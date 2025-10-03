@@ -1,0 +1,6 @@
+---
+vlan_groups:
+
+  - name: Staging
+    scope_type: dcim.site
+    scope: Home
