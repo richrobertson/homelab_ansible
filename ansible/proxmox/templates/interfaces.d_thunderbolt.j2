@@ -1,0 +1,17 @@
+# Thunderbolt interfaces
+
+auto en05
+iface en05 inet6 static
+    pre-up ip link set $IFACE up
+    mtu 65520
+
+auto en06
+iface en06 inet6 static
+    pre-up ip link set $IFACE up
+    mtu 65520
+
+# Loopback for Ceph MON
+auto lo
+iface lo inet loopback
+    up ip -6 addr add fc00::8{{ inventory_hostname[-1] }}/128 dev lo
+    up ip addr add 10.0.0.8{{ inventory_hostname[-1] }}/32 dev lo

@@ -1,0 +1,25 @@
+#!/bin/bash
+# note the logger entries log to the system journal in the pve UI etc
+
+INTERFACE=$IFACE
+
+if [ "$INTERFACE" = "en05" ] || [ "$INTERFACE" = "en06" ]; then
+    logger "Checking if frr.service is running for $INTERFACE"
+    
+    if ! systemctl is-active --quiet frr.service; then
+        logger -t SCYTO "   [SCYTO SCRIPT ] frr.service not running. Starting service."
+        if systemctl start frr.service; then
+            logger -t SCYTO "   [SCYTO SCRIPT ] Successfully started frr.service"
+        else
+            logger -t SCYTO "   [SCYTO SCRIPT ] Failed to start frr.service"
+        fi
+        exit 0
+    fi
+
+    logger "Attempting to reload frr.service for $INTERFACE"
+    if systemctl reload frr.service; then
+        logger -t SCYTO "   [SCYTO SCRIPT ] Successfully reloaded frr.service for $INTERFACE"
+    else
+        logger -t SCYTO "   [SCYTO SCRIPT ] Failed to reload frr.service for $INTERFACE"
+    fi
+fi

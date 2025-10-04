@@ -1,0 +1,17 @@
+---
+- name: restart networking
+  throttle: 1
+  ansible.builtin.service:
+    name: networking
+    state: restarted
+
+- name: restart frr service
+  throttle: 1
+  ansible.builtin.service:
+    name: frr
+    state: restarted
+
+- name: Reboot the server
+  throttle: 1
+  ansible.builtin.reboot:
+    reboot_timeout: 12000

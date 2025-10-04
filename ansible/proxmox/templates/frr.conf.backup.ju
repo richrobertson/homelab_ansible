@@ -1,0 +1,91 @@
+frr version 10.3.1
+frr defaults datacenter
+hostname pve3
+log syslog informational
+service integrated-vtysh-config
+!
+!
+vrf vrf_stgl3
+ vni 4000
+exit-vrf
+!
+router bgp 65000
+ bgp router-id 192.168.1.241
+ no bgp hard-administrative-reset
+ no bgp default ipv4-unicast
+ coalesce-time 1000
+ no bgp graceful-restart notification
+ neighbor VTEP peer-group
+ neighbor VTEP remote-as 65000
+ neighbor VTEP bfd
+ neighbor 192.168.1.242 peer-group VTEP
+ neighbor 192.168.1.243 peer-group VTEP
+ !
+ address-family l2vpn evpn
+  neighbor VTEP activate
+  neighbor VTEP route-map MAP_VTEP_IN in
+  neighbor VTEP route-map MAP_VTEP_OUT out
+  advertise-all-vni
+ exit-address-family
+exit
+!
+router bgp 65000 vrf vrf_stgl3
+ bgp router-id 192.168.1.241
+ no bgp hard-administrative-reset
+ no bgp graceful-restart notification
+ !
+ address-family l2vpn evpn
+  default-originate ipv4
+  default-originate ipv6
+  route-target import 65000:65000
+ exit-address-family
+exit
+!
+ip prefix-list only_default seq 1 permit 0.0.0.0/0
+!
+ipv6 prefix-list only_default_v6 seq 1 permit ::/0
+!
+route-map MAP_VTEP_IN deny 1
+ match ip address prefix-list only_default
+exit
+!
+route-map MAP_VTEP_IN deny 2
+ match ipv6 address prefix-list only_default_v6
+exit
+!
+route-map MAP_VTEP_IN permit 3
+exit
+!
+route-map MAP_VTEP_OUT permit 1
+exit
+!
+ip route 10.20.0.0/24 10.255.255.2 xvrf_stgl3
+ip route 10.20.1.0/24 10.255.255.2 xvrf_stgl3
+ip route 10.20.2.0/24 10.255.255.2 xvrf_stgl3
+ip route 10.21.0.0/24 10.255.255.2 xvrf_stgl3
+ip route 10.21.1.0/24 10.255.255.2 xvrf_stgl3
+ip route 10.21.2.0/24 10.255.255.2 xvrf_stgl3
+router openfabric testfab
+ net 49.0001.0100.0200.0003.00
+exit
+!
+interface dummy_testfab
+ ip router openfabric testfab
+ openfabric passive
+exit
+!
+interface vmbrOvr
+ ip router openfabric testfab
+exit
+!
+access-list pve_openfabric_testfab_ips permit 10.2.0.0/16
+!
+route-map pve_openfabric permit 100
+ match ip address pve_openfabric_testfab_ips
+ set src 10.2.0.3
+exit
+!
+ip protocol openfabric route-map pve_openfabric
+!
+!
+line vty

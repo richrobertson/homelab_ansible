@@ -1,0 +1,12 @@
+#!/bin/bash
+
+INTERFACE=$IFACE
+
+if [ "$INTERFACE" = "lo" ]  ; then
+    logger "Attempting to restart frr.service for $INTERFACE"
+    if systemctl restart frr.service; then
+        logger -t SCYTO "   [SCYTO SCRIPT ] Successfully restart frr.service for $INTERFACE"
+    else
+        logger -t SCYTO "   [SCYTO SCRIPT ] Failed to restart frr.service for $INTERFACE"
+    fi
+fi

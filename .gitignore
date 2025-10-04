@@ -1,8 +1,5 @@
-ansible/lib/*
-ansible/bin/*
-.DS_Store
 pyvenv.cfg
-lib/
-include/
-bin/
-.env
+lib
+bin
+include
+

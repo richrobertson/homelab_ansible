@@ -1,0 +1,20 @@
+---
+- name:  PLAY 1 - Configure Thunderbolt Network Interfaces
+  #connection: local
+  user: root
+  hosts: proxmox_nodes
+  #become: yes
+
+  roles:
+    - role: thunderbolt_network_interfaces 
+      tags: thunderbolt_network_interfaces
+
+- name: PLAY 2 - FRR Setup
+  user: root
+  hosts: proxmox_nodes
+
+  roles:
+    - role: thunderbolt_fabric
+      tags: thunderbolt_fabric
+  
+

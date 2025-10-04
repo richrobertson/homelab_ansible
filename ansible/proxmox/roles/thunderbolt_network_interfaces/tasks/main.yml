@@ -1,0 +1,70 @@
+---
+- name: Ensure thunderbolt module is loaded at boot
+  ansible.builtin.lineinfile:
+    dest: /etc/modules
+    line: "{{ module['name'] }}"
+  loop: "{{ ect_modules }}"
+  loop_control: 
+    loop_var: module
+    label: "{{ module['name']}}"
+
+- name: Add thunderbolt interfaces
+  ansible.builtin.blockinfile:
+    path: /etc/network/interfaces
+    block: |
+      #iface en05 inet manual
+      ##do not edit it GUI
+
+      #iface en06 inet manual
+      ##do not edit in GUI
+    insertbefore: "^source /etc/network/interfaces.d" # This regex matches the line you want to insert before
+    marker: "# {mark} ANSIBLE MANAGED BLOCK"
+    append_newline: true
+    prepend_newline: true
+
+- name: Define thunderbolt interfaces in network.d file
+  ansible.builtin.template:
+    src: interfaces.d_thunderbolt.j2
+    dest: /etc/network/interfaces.d/thunderbolt
+    owner: root
+    group: root
+    mode: '0777'    
+
+- name: Create thunderbolt1 link file from template
+  ansible.builtin.template:
+    src: thunderbolt.link.j2
+    dest: /etc/systemd/network/00-thunderbolt{{ link_index }}.link
+    owner: root
+    group: root
+    mode: '0777'
+  loop: "{{ links }}"
+  loop_control: 
+    index_var: link_index
+    loop_var: link
+    label: "{{ link['link_name']}}"
+
+- name: Create 10-tb-en.rules file from template
+  ansible.builtin.template:
+    src: 10-tb-en.rules.j2
+    dest: /etc/udev/rules.d/10-tb-en.rules
+    owner: root
+    group: root
+    mode: '0777'
+
+- name: Create en06 thunderbolt cable insertion script from template
+  ansible.builtin.template:
+    src: udev-script.sh.j2
+    dest: /usr/local/bin/pve-{{ link['link_name'] }}.sh
+    owner: root
+    group: root
+    mode: '0777'
+  loop: "{{ links }}"
+  loop_control: 
+    loop_var: link
+    label: "{{ link['link_name']}}"
+  register: insertion
+
+- name: Propogate the new link files into initramfs
+  ansible.builtin.command: update-initramfs -u -k all
+  notify: Reboot the server
+  when: insertion.changed
