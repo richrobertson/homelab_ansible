@@ -4,11 +4,17 @@
     name: frr
     state: present
     update_cache: yes
+  retries: 10
+  delay: 5
+  register: result
 
 - name: Enable Free Range Routing (FRR) 
   ansible.builtin.systemd_service:
     state: started
     name: frr
+  retries: 10
+  delay: 5
+  register: result
 
 - name: Enable fabricd in fabric daemon file
   ansible.builtin.lineinfile:
@@ -16,24 +22,21 @@
     search_string: '^fabricd='
     line: fabricd=yes
   notify: restart frr service
+  retries: 10
+  delay: 5
+  register: result
 
 - name: Script to restart frr when interfaces are brought up
   ansible.builtin.template:
-    src: if-up.d_en0x.j2
-    dest: /etc/network/if-up.d/en0x
+    src: if-up.d_enpx.j2
+    dest: /etc/network/if-up.d/enpx
     owner: root
     group: root
     mode: '0755' 
   tags: never
-
-- name: Script to restart frr when loopback resets
-  ansible.builtin.template:
-    src: if-up.d_lo.j2
-    dest: /etc/network/if-up.d/lo
-    owner: root
-    group: root
-    mode: '0755' 
-  tags: never
+  retries: 10
+  delay: 5
+  register: result
 
 - name: Configure OpenFabric
   ansible.builtin.template:
@@ -43,6 +46,9 @@
     group: root
     mode: '0644'
   notify: apply sdn config
+  retries: 10
+  delay: 5
+  register: result
 
   
 

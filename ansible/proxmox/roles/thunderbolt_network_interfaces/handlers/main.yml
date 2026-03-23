@@ -15,3 +15,6 @@
   throttle: 1
   ansible.builtin.reboot:
     reboot_timeout: 600
+
+- name: update-grub
+  ansible.builtin.command: update-grub

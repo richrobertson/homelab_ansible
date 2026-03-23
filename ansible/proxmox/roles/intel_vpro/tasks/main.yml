@@ -1,0 +1,10 @@
+---
+- name: Add auto up above vpro dedicated port
+  ansible.builtin.lineinfile:
+    path: /etc/network/interfaces
+    insertbefore: '^iface enp90s0$'
+    line: 'auto enp90s0'
+
+
+
+

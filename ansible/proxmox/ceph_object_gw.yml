@@ -1,0 +1,9 @@
+---
+- name:  PLAY 1 - Ceph Object Gateway
+  #connection: local
+  hosts: proxmox_nodes
+  #become: yes
+
+  roles:
+    - role: ceph_object_gateway 
+      tags: ceph_object_gateway

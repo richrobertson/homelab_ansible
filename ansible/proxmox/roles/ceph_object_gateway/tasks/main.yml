@@ -1,0 +1,36 @@
+---
+- name: Get keyring file status
+  ansible.builtin.stat:
+    path: /etc/pve/priv/ceph.client.radosgw.keyring
+  run_once: true
+  register: radosgw_keyring_file_status
+
+- name: Create the keyring to store the keys
+  ansible.builtin.command: ceph-authtool --create-keyring /etc/pve/priv/ceph.client.radosgw.keyring
+  run_once: true
+  when: not radosgw_keyring_file_status.stat.exists
+
+- name: Check if radosgw client auth already exists in the cluster
+  ansible.builtin.command: ceph -k /etc/pve/priv/ceph.client.admin.keyring auth get client.radosgw.{{ inventory_hostname }}
+  register: radosgw_client_auth
+  changed_when: false
+  failed_when: false
+
+- name: Generate the keys and add them to the keyring
+  ansible.builtin.command: ceph-authtool /etc/pve/priv/ceph.client.radosgw.keyring -n client.radosgw.{{ inventory_hostname }} --gen-key
+  when: radosgw_client_auth.rc != 0
+
+- name: Add the required capabilities to the keys
+  ansible.builtin.command: ceph-authtool -n client.radosgw.{{ inventory_hostname }} --cap osd 'allow rwx' --cap mon 'allow rwx' /etc/pve/priv/ceph.client.radosgw.keyring
+  when: radosgw_client_auth.rc != 0
+
+- name: Add the keys to the cluster
+  ansible.builtin.command: ceph -k /etc/pve/priv/ceph.client.admin.keyring auth add client.radosgw.{{ inventory_hostname }} -i /etc/pve/priv/ceph.client.radosgw.keyring
+  when: radosgw_client_auth.rc != 0
+
+- name: Install Rados Rest Gateway(radosgw) 
+  ansible.builtin.apt:
+    name: radosgw
+    state: present
+    update_cache: yes
+  tags: never

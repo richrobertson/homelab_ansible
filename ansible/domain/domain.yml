@@ -1,0 +1,10 @@
+- name: Domain automation placeholder
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Domain playbook not implemented
+      ansible.builtin.fail:
+        msg: >-
+          ansible/domain/domain.yml is a placeholder and is intentionally not
+          implemented. Use the homelab_bootstrap project for Proxmox inventory
+          and related bootstrap configuration.

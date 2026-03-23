@@ -1,0 +1,6 @@
+[submodule "roles/pdns-ansible"]
+	path = roles/pdns-ansible
+	url = https://github.com/PowerDNS/pdns-ansible
+[submodule "ceph-ansible"]
+	path = ceph-ansible
+	url = https://github.com/ceph/ceph-ansible.git

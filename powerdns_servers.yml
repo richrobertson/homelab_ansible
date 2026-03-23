@@ -1,0 +1,84 @@
+- hosts: powerdns
+  become: yes
+  roles:
+    - { role: PowerDNS.pdns }
+  vars:
+    _pdns_secrets: "{{ lookup('community.hashi_vault.hashi_vault', 'secret/data/powerdns', token=lookup('env', 'VAULT_TOKEN'), url=lookup('env', 'VAULT_ADDR')) }}"
+    pdns_api_key: "{{ _pdns_secrets.get('api_key', (_pdns_secrets.get('data', {})).get('api_key')) }}"
+    pdns_db_password: "{{ _pdns_secrets.get('db_password', (_pdns_secrets.get('data', {})).get('db_password')) }}"
+    pdns_auth_webserver_allow_from: "0.0.0.0/0"
+    pdns_config:
+
+      # Turns on primary operations
+      primary: true
+
+      # Listen Address
+      local-address: "192.168.7.201"
+      local-port: "53"
+
+      # API Configuration
+      api: yes
+      api-key: "{{ pdns_api_key }}"
+
+      # Embedded webserver
+      webserver: yes
+      webserver-address: "192.168.7.201"
+      webserver-port: "8001"
+      webserver-allow-from: "{{ pdns_auth_webserver_allow_from }}"
+      
+      default-soa-content: "subns.myrobertson.net hostmaster.@ 0 10800 10 604800 3600"
+    pdns_backends:
+      'gpgsql':
+        host: 192.168.7.200
+        user: postgres
+        password: "{{ pdns_db_password }}"
+        dbname: pdns
+    pdns_install_repo: "{{ pdns_auth_powerdns_repo_master }}"
+    pdns_service_state: "started"
+    pdns_service_enabled: "yes"
+
+- name: PDNS Recursor Master
+  hosts: powerdns-recurse
+  become: yes
+  vars:
+    _pdns_secrets: "{{ lookup('community.hashi_vault.hashi_vault', 'secret/data/powerdns', token=lookup('env', 'VAULT_TOKEN'), url=lookup('env', 'VAULT_ADDR')) }}"
+    pdns_api_key: "{{ _pdns_secrets.get('api_key', (_pdns_secrets.get('data', {})).get('api_key')) }}"
+    pdns_recursor_webserver_allow_from: "0.0.0.0/0"
+    pdns_rec_config:
+
+      # Listen Address
+      local-address: "192.168.7.202"
+      local-port: "53"
+
+      # Embedded webserver
+      webserver: yes
+      webserver-address: "192.168.7.202"
+      webserver-port: "8001"
+      webserver-allow-from: "{{ pdns_recursor_webserver_allow_from }}"
+      api-key: "{{ pdns_api_key }}"
+
+      # Let the kernel do the distribution of queries
+      pdns-distributes-queries: "no"
+      reuseport: "yes"
+
+      # We need more mthreads to handle huge traffic load
+      threads: 5
+      max-mthreads: 8192
+
+      # This tests that we expand lists to comma-separated configuration items
+      allow-from:
+        - 0.0.0.0/0
+
+      forward-zones:
+        - "staging.myrobertson.net.=192.168.7.201:53;"
+        - "prod.myrobertson.net.=192.168.7.201:53;"
+        - "dev.myrobertson.net.=192.168.7.201:53;"
+        - "myrobertson.net.=192.168.1.244;192.168.1.245;192.168.1.2;"
+
+      forward-zones-recurse:
+        - ".=1.1.1.1;8.8.8.8;"
+
+      max-negative-ttl: 15
+
+  roles:
+    - { role: powerdns.pdns_recursor }

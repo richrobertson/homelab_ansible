@@ -1,0 +1,23 @@
+---
+
+- name: Include OS-specific variables
+  ansible.builtin.include_vars: "{{ item }}"
+  with_first_found:
+    - "{{ ansible_distribution }}-{{ ansible_distribution_major_version }}.yml"
+    - "{{ ansible_distribution }}.yml"
+    - "{{ ansible_os_family }}-{{ ansible_distribution_major_version }}.yml"
+    - "{{ ansible_os_family }}.yml"
+  tags:
+    - always
+
+- name: Setup repository
+  ansible.builtin.include_tasks: "repo-{{ ansible_os_family }}.yml"
+  when: "pdns_install_repo | length > 0"
+  tags:
+    - install
+    - repository
+
+- name: Install PowerDNS
+  ansible.builtin.include_tasks: install.yml
+  tags:
+    - install
