@@ -2,7 +2,7 @@
 
 LOGFILE="/tmp/udev-debug.log"
 VERBOSE="" # Set this to "-v" for verbose logging
-IF="en05"
+IF="{{ link['link_name'] }}"
 
 echo "$(date): pve-$IF.sh triggered by udev" >> "$LOGFILE"
 

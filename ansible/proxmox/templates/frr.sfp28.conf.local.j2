@@ -1,7 +1,7 @@
 ip forwarding
 ipv6 forwarding
 
-interface en05
+interface enp1s0f0np0
  ip router openfabric 1
  ipv6 router openfabric 1
  openfabric hello-interval 1
@@ -10,7 +10,7 @@ interface en05
  openfabric psnp-interval 2
 exit
 
-interface en06
+interface enp1s0f0np1
  ip router openfabric 1
  ipv6 router openfabric 1
  openfabric hello-interval 1
@@ -30,7 +30,7 @@ interface lo
 exit
 
 router openfabric 1
-net 49.0000.0000.000{{ (inventory_hostname | regex_search('([0-9]+)$')) | default('1', true) }}.00
+net 49.0000.0001.000{{ inventory_hostname[-1] }}.00
 lsp-gen-interval 5
 exit
 !

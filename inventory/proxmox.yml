@@ -1,0 +1,6 @@
+plugin: community.proxmox.proxmox
+want_proxmox_nodes_ansible_host: false
+# Intentional for current environment until Proxmox API CA trust is wired in.
+validate_certs: false
+compose:
+  ansible_host: (proxmox_ipconfig0 | default({})).ip | default((proxmox_net0 | default({})).ip) | ipaddr('address')

@@ -1,0 +1,9 @@
+---
+- name: Rolling restart of proxmox servers
+  hosts: proxmox_nodes
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: Perform reboot
+      ansible.builtin.reboot:
+        reboot_timeout: 600

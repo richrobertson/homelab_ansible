@@ -18,3 +18,4 @@
 
 - name: apply sdn config
   ansible.builtin.command: pvesh set /cluster/sdn
+  run_once: false

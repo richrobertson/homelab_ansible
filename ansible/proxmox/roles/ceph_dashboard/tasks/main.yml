@@ -1,0 +1,4 @@
+- name: enable dashboard mgr module
+  ceph.automation.ceph_mgr_module:
+    name: dashboard
+    state: enable
