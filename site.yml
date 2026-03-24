@@ -1,4 +1,4 @@
 ---
-# file: site.yml
-- import_playbook: powerdns_servers.yml
-- import_playbook: vault_server.yml
+# Compatibility entrypoint.
+# Canonical location: playbooks/core/site.yml
+- import_playbook: playbooks/core/site.yml

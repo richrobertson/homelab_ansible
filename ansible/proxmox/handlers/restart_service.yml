@@ -1,0 +1,6 @@
+---
+# Example handler for restarting a service
+- name: restart example service
+  ansible.builtin.service:
+    name: example-service
+    state: restarted

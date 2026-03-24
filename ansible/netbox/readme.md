@@ -1,33 +1,35 @@
-## Installing Ansible
-Ansible runs on Linux based systems, and is installed as a Python package. Follow these steps to set up Ansible on your own system (they assume [Python](https://www.python.org/downloads/) and [Git](https://github.com/git-guides/install-git) are already installed and set up on Ansible host):
+# NetBox Ansible Bundle
 
-1. Clone the NetBox Zero to Hero Git repository and change into the Ansible directory:
+This directory contains playbooks, roles, and templates for automating NetBox IPAM and network configuration.
 
-```
-git clone https://github.com/netbox-community/netbox-zero-to-hero.git
-cd netbox-zero-to-hero/ansible
-```
+## Playbooks
+- **assign_ip_addresses.yml**: Assigns IP addresses in NetBox
+- **create_prefixes.yml**: Creates prefixes in NetBox
+- **create_vlan_interfaces.yml**: Creates VLAN interfaces in NetBox
+- **generate_config.yml**: Generates network device configs from NetBox data
+- **populate_netbox_ipam.yml**: Populates NetBox with IPAM data
 
-2. Create a new Python Virtual Environment and activate it: 
-```
-python3 -m venv .
-source bin/activate
-```
-3. Upgrade PIP (Python package manager) and install Pynetbox (NetBox API client library), Ansible and the NetBox modules for Ansible using Ansible Collections:
-```
-python3 -m pip install --upgrade pip
-pip3 install pynetbox
-pip3 install ansible
-pip3 install netaddr
-pip3 install pytz
-ansible-galaxy collection install netbox.netbox
-```
-4. Set up environment variables for NetBox (these are referenced by the Ansible playbooks):
-```
-export NETBOX_TOKEN=< YOUR_API_TOKEN >
-export NETBOX_API=< YOUR_NETBOX_URL >
-```
-5. When you have finished working deactivate the Python virtual environment:
-```
-deactivate
-```
+## Inventory
+- **netbox_inv.yml**: Example inventory for NetBox automation (see this file for host/group structure and variable examples)
+
+## Roles & Templates
+- See `roles/` for custom roles
+- See `templates/` for Jinja2 templates for config generation
+- See `configs/` for generated configs or config fragments
+
+## Usage
+1. Activate your Python/Ansible environment
+2. Set NetBox API credentials as environment variables (required for playbook authentication):
+   ```sh
+   export NETBOX_TOKEN=<YOUR_API_TOKEN>
+   export NETBOX_API=<YOUR_NETBOX_URL>
+   ```
+3. Run playbooks, e.g.:
+   ```sh
+   ansible-playbook -i netbox_inv.yml assign_ip_addresses.yml
+   ```
+4. Adjust variables and inventory as needed
+
+## Notes
+- `ansible.cfg` in this directory sets local options for NetBox automation
+- See top-level README for environment setup and global usage
