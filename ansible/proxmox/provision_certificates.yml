@@ -114,6 +114,8 @@
   vars:
     proxmox_cert_manage_vault_bootstrap: true
     proxmox_vault_group: vault
+    # NOTE: Set this per inventory group (for example proxmox_cert_nodes_cl0/cl1)
+    # so each cluster receives only its own VIP DNS SAN.
     proxmox_vault_addr: "https://{{ hostvars[groups[proxmox_vault_group][0]].ansible_host | default(groups[proxmox_vault_group][0]) }}:8200"
     proxmox_vault_skip_verify: true
     proxmox_vault_root_token_file: /root/.vault-token
@@ -139,6 +141,8 @@
     - name: Build cert subject names for this host
       ansible.builtin.set_fact:
         proxmox_cert_common_name: "{{ ansible_fqdn | default(inventory_hostname) }}"
+        # Include host FQDN/IP plus optional cluster VIP SAN from inventory var
+        # proxmox_cert_cluster_san (for example cl0.myrobertson.net or cl1.myrobertson.net).
         proxmox_cert_alt_names: "{{ [ansible_fqdn | default(inventory_hostname), inventory_hostname, ansible_host | default(''), proxmox_cert_cluster_san | default('')] | reject('equalto', '') | unique | join(',') }}"
 
     - name: Ensure vault CLI exists on Proxmox node
