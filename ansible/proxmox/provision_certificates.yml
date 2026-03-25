@@ -116,7 +116,16 @@
     proxmox_vault_group: vault
     # NOTE: Set this per inventory group (for example proxmox_cert_nodes_cl0/cl1)
     # so each cluster receives only its own VIP DNS SAN.
-    proxmox_vault_addr: "https://{{ hostvars[groups[proxmox_vault_group][0]].ansible_host | default(groups[proxmox_vault_group][0]) }}:8200"
+    proxmox_vault_addr: >-
+      https://{{
+        (proxmox_vault_group is defined
+         and proxmox_vault_group in groups
+         and (groups[proxmox_vault_group] | length) > 0)
+        | ternary(
+            hostvars[groups[proxmox_vault_group][0]].ansible_host
+            | default(groups[proxmox_vault_group][0]),
+            '127.0.0.1')
+      }}:8200
     proxmox_vault_skip_verify: true
     proxmox_vault_root_token_file: /root/.vault-token
     proxmox_pki_mount: pki_int

@@ -1,6 +1,6 @@
 ---
 - name: Migrate cl0 nodes to new SFP28 interface names
-  hosts: "192.168.11.3:192.168.11.5"
+  hosts: "192.168.11.3,192.168.11.4,192.168.11.5"
   become: true
   gather_facts: true
   serial: 1
