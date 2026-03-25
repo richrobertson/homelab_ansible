@@ -174,6 +174,15 @@
       when:
         - proxmox_cert_vault_role_id | length == 0 or proxmox_cert_vault_secret_id | length == 0
 
+    - name: Validate Vault address when vault group is absent
+      ansible.builtin.assert:
+        that:
+          - (groups.get(proxmox_vault_group, []) | length) > 0 or (proxmox_vault_addr is not search('https?://(?:127\\.0\\.0\\.1|localhost)(?::[0-9]+)?/?$'))
+        fail_msg: >-
+          proxmox_vault_group '{{ proxmox_vault_group }}' is empty/undefined and proxmox_vault_addr
+          resolves to loopback ({{ proxmox_vault_addr }}). Define a non-empty vault group or override
+          proxmox_vault_addr to a non-loopback Vault endpoint.
+
     - name: Check delegated Vault root token file exists
       ansible.builtin.stat:
         path: "{{ proxmox_vault_root_token_file }}"
@@ -314,15 +323,15 @@
           key_changed=0
           if [[ ! -f "$CERT_FILE" ]] || ! cmp -s "$cert_tmp" "$CERT_FILE"; then
             cat "$cert_tmp" > "$CERT_FILE"
-            chown root:www-data "$CERT_FILE" 2>/dev/null || true
-            chmod 0640 "$CERT_FILE" 2>/dev/null || true
+            chown root:www-data "$CERT_FILE"
+            chmod 0640 "$CERT_FILE"
             cert_changed=1
           fi
 
           if [[ ! -f "$KEY_FILE" ]] || ! cmp -s "$key_tmp" "$KEY_FILE"; then
             cat "$key_tmp" > "$KEY_FILE"
-            chown root:www-data "$KEY_FILE" 2>/dev/null || true
-            chmod 0640 "$KEY_FILE" 2>/dev/null || true
+            chown root:www-data "$KEY_FILE"
+            chmod 0640 "$KEY_FILE"
             key_changed=1
           fi
 
