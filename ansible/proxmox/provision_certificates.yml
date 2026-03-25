@@ -105,7 +105,7 @@
 
 - name: Provision Proxmox API certificate automation
   hosts: proxmox_cert_nodes
-  become: false
+  become: true
   gather_facts: true
   serial: 1
   tags:
@@ -124,6 +124,7 @@
     proxmox_pki_role_name: proxmox-api
     proxmox_pki_approle_name: proxmox-api-cert
     proxmox_cert_ttl: 720h
+    proxmox_cert_expected_issuer_pattern: Vault
     proxmox_cert_vault_role_id: ""
     proxmox_cert_vault_secret_id: ""
     proxmox_cert_agent_name: vault-agent-proxmox-pveproxy
@@ -163,6 +164,22 @@
           Add a vault host or pass proxmox_cert_vault_role_id and proxmox_cert_vault_secret_id.
       when:
         - proxmox_cert_vault_role_id | length == 0 or proxmox_cert_vault_secret_id | length == 0
+
+    - name: Check delegated Vault root token file exists
+      ansible.builtin.stat:
+        path: "{{ proxmox_vault_root_token_file }}"
+      delegate_to: "{{ groups[proxmox_vault_group][0] }}"
+      become: true
+      register: proxmox_vault_delegate_token_stat
+      when:
+        - proxmox_cert_vault_role_id | length == 0 or proxmox_cert_vault_secret_id | length == 0
+
+    - name: Fail when delegated Vault root token file is missing
+      ansible.builtin.fail:
+        msg: "Vault root token file {{ proxmox_vault_root_token_file }} is required on delegated vault host {{ groups[proxmox_vault_group][0] }}."
+      when:
+        - proxmox_cert_vault_role_id | length == 0 or proxmox_cert_vault_secret_id | length == 0
+        - not (proxmox_vault_delegate_token_stat.stat.exists | default(false))
 
     - name: Generate role_id for Proxmox cert AppRole (vault host)
       ansible.builtin.shell: |
@@ -400,8 +417,10 @@
       changed_when: false
       retries: 10
       delay: 3
-      until: proxmox_pveproxy_cert_issuer.rc == 0 and ('Vault' in proxmox_pveproxy_cert_issuer.stdout)
-      failed_when: "'Vault' not in proxmox_pveproxy_cert_issuer.stdout"
+      until:
+        - proxmox_pveproxy_cert_issuer.rc == 0
+        - proxmox_pveproxy_cert_issuer.stdout is search(proxmox_cert_expected_issuer_pattern)
+      failed_when: proxmox_pveproxy_cert_issuer.stdout is not search(proxmox_cert_expected_issuer_pattern)
 
   handlers:
     - name: Restart Proxmox cert agent
