@@ -33,8 +33,8 @@ The `handlers/` directory is for custom handlers (e.g., service restarts or noti
    ansible-playbook -i ../../inventory/proxmox.yml ceph_object_gw.yml
    ansible-playbook -i ../../inventory/proxmox.yml rolling_restart.yml
    ansible-playbook -i ../../inventory/proxmox.yml intel_vpro.yml
-  ansible-playbook -i ../../inventory/proxmox.yml provision_certificates.yml
-  ansible-playbook -i ../../inventory/proxmox.yml disable_vlan_hw_filtering.yml
+   ansible-playbook -i ../../inventory/proxmox.yml provision_certificates.yml
+   ansible-playbook -i ../../inventory/proxmox.yml disable_vlan_hw_filtering.yml
    ```
    (Adjust the path to `inventory/proxmox.yml` as needed for your working directory.)
 3. Adjust inventory and variables as needed
