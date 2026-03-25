@@ -26,8 +26,8 @@ Canonical paths are organized by function:
 │   ├── environments/                # canonical static inventories
 │   │   ├── production.ini
 │   │   └── staging.ini
-│   ├── production.ini               # compatibility copy
-│   ├── staging.ini                  # compatibility copy
+│   ├── production.ini               # minimal stub for backward compatibility (see environments/production.ini)
+│   ├── staging.ini                  # minimal stub for backward compatibility (see environments/staging.ini)
 │   └── proxmox.yml                  # dynamic proxmox inventory plugin config
 ├── playbooks/
 │   └── core/                        # canonical root playbooks

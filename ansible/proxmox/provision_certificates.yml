@@ -143,7 +143,9 @@
         proxmox_cert_common_name: "{{ ansible_fqdn | default(inventory_hostname) }}"
         # Include host FQDN/IP plus optional cluster VIP SAN from inventory var
         # proxmox_cert_cluster_san (for example cl0.myrobertson.net or cl1.myrobertson.net).
-        proxmox_cert_alt_names: "{{ [ansible_fqdn | default(inventory_hostname), inventory_hostname, ansible_host | default(''), proxmox_cert_cluster_san | default('')] | reject('equalto', '') | unique | join(',') }}"
+        proxmox_cert_all_sans: "{{ [ansible_fqdn | default(inventory_hostname), inventory_hostname, ansible_host | default(''), proxmox_cert_cluster_san | default('')] | reject('equalto', '') | unique }}"
+        proxmox_cert_alt_names: "{{ proxmox_cert_all_sans | reject('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') | join(',') }}"
+        proxmox_cert_ip_sans: "{{ proxmox_cert_all_sans | select('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') | join(',') }}"
 
     - name: Ensure vault CLI exists on Proxmox node
       ansible.builtin.shell: command -v vault
@@ -177,6 +179,20 @@
       changed_when: false
       when: proxmox_cert_vault_role_id | length == 0
 
+    - name: Check whether AppRole secret_id file already exists on Proxmox node
+      ansible.builtin.stat:
+        path: "{{ proxmox_cert_secret_id_file }}"
+      register: proxmox_existing_secret_id_stat
+      when: proxmox_cert_vault_secret_id | length == 0
+
+    - name: Read existing AppRole secret_id file from Proxmox node
+      ansible.builtin.slurp:
+        path: "{{ proxmox_cert_secret_id_file }}"
+      register: proxmox_existing_secret_id_file
+      when:
+        - proxmox_cert_vault_secret_id | length == 0
+        - proxmox_existing_secret_id_stat.stat.exists | default(false)
+
     - name: Generate secret_id for Proxmox cert AppRole (vault host)
       ansible.builtin.shell: |
         set -euo pipefail
@@ -190,12 +206,24 @@
       become: true
       register: proxmox_secret_id_result
       changed_when: false
-      when: proxmox_cert_vault_secret_id | length == 0
+      when:
+        - proxmox_cert_vault_secret_id | length == 0
+        - not (proxmox_existing_secret_id_stat.stat.exists | default(false))
 
     - name: Resolve effective AppRole credentials
       ansible.builtin.set_fact:
         proxmox_cert_effective_role_id: "{{ proxmox_cert_vault_role_id if proxmox_cert_vault_role_id | length > 0 else proxmox_role_id_result.stdout }}"
-        proxmox_cert_effective_secret_id: "{{ proxmox_cert_vault_secret_id if proxmox_cert_vault_secret_id | length > 0 else proxmox_secret_id_result.stdout }}"
+        proxmox_cert_effective_secret_id: >-
+          {{
+            proxmox_cert_vault_secret_id
+            if proxmox_cert_vault_secret_id | length > 0
+            else
+              (
+                (proxmox_existing_secret_id_file.content | b64decode | trim)
+                if (proxmox_existing_secret_id_stat.stat.exists | default(false))
+                else proxmox_secret_id_result.stdout
+              )
+          }}
 
   tasks:
     - name: Ensure certificate agent runtime directory exists
@@ -316,7 +344,7 @@
             destination = "{{ proxmox_cert_bundle_file }}"
             perms       = 0600
             contents = <<EOT
-          {{ '{{- with pkiCert "' ~ proxmox_pki_mount ~ '/issue/' ~ proxmox_pki_role_name ~ '" "common_name=' ~ proxmox_cert_common_name ~ '" "alt_names=' ~ proxmox_cert_alt_names ~ '" "ttl=' ~ proxmox_cert_ttl ~ '"' ~ (( ' "issuer_ref=' ~ proxmox_pki_issuer_id ~ '"' ) if (proxmox_pki_issuer_id | length > 0) else '') ~ ' -}}' }}
+          {{ '{{- with pkiCert "' ~ proxmox_pki_mount ~ '/issue/' ~ proxmox_pki_role_name ~ '" "common_name=' ~ proxmox_cert_common_name ~ '" "alt_names=' ~ proxmox_cert_alt_names ~ '" "ip_sans=' ~ proxmox_cert_ip_sans ~ '" "ttl=' ~ proxmox_cert_ttl ~ '"' ~ (( ' "issuer_ref=' ~ proxmox_pki_issuer_id ~ '"' ) if (proxmox_pki_issuer_id | length > 0) else '') ~ ' -}}' }}
           CERT_BEGIN
           {{ '{{ .Cert }}' }}
           {{ '{{ .CA }}' }}
