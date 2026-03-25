@@ -114,7 +114,6 @@
   vars:
     proxmox_cert_manage_vault_bootstrap: true
     proxmox_vault_group: vault
-    proxmox_cert_cluster_san: ""
     proxmox_vault_addr: "https://{{ hostvars[groups[proxmox_vault_group][0]].ansible_host | default(groups[proxmox_vault_group][0]) }}:8200"
     proxmox_vault_skip_verify: true
     proxmox_vault_root_token_file: /root/.vault-token
