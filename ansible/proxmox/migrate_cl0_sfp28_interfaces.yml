@@ -1,0 +1,95 @@
+---
+- name: Migrate cl0 nodes to new SFP28 interface names
+  hosts: "192.168.11.3,192.168.11.4,192.168.11.5"
+  become: true
+  gather_facts: true
+  serial: 1
+
+  vars:
+    interfaces_file: /etc/network/interfaces
+
+  tasks:
+    - name: Create dated backup of interfaces file
+      ansible.builtin.copy:
+        src: "{{ interfaces_file }}"
+        dest: "{{ interfaces_file }}.pre-sfp28-migration-{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Replace vmbr0 uplink VLAN interface only
+      ansible.builtin.replace:
+        path: "{{ interfaces_file }}"
+        regexp: '^(\s*bridge-ports\s+)enp3s0f0np0\.88$'
+        replace: '\1enp1s0f0np0.88'
+      notify:
+        - Remove stale VLAN links
+        - Reload networking
+
+    - name: Replace vmbr1 bridge-ports bare interface (no VLAN suffix)
+      ansible.builtin.replace:
+        path: "{{ interfaces_file }}"
+        regexp: '^(\s*bridge-ports\s+)enp3s0f0np0$'
+        replace: '\1enp1s0f0np0'
+      notify:
+        - Reload networking
+
+    - name: Replace VLAN10 auto stanza interface name
+      ansible.builtin.replace:
+        path: "{{ interfaces_file }}"
+        regexp: '^auto enp3s0f1np1\.10$'
+        replace: 'auto enp1s0f1np1.10'
+      notify:
+        - Remove stale VLAN links
+        - Reload networking
+
+    - name: Replace VLAN10 iface stanza interface name
+      ansible.builtin.replace:
+        path: "{{ interfaces_file }}"
+        regexp: '^iface enp3s0f1np1\.10 inet static$'
+        replace: 'iface enp1s0f1np1.10 inet static'
+      notify:
+        - Remove stale VLAN links
+        - Reload networking
+
+    - name: Remove legacy bond1 lines from interfaces file
+      ansible.builtin.lineinfile:
+        path: "{{ interfaces_file }}"
+        regexp: "{{ item }}"
+        state: absent
+      loop:
+        - '^auto bond1$'
+        - '^iface bond1 inet static$'
+        - '^\s+address 10\.15\.15\.5/24$'
+        - '^\s+bond-slaves\s+enp1s0f0np0\s+enp1s0f1np1$'
+        - '^\s+bond-miimon\s+100$'
+        - '^\s+bond-mode\s+broadcast$'
+      notify:
+        - Reload networking
+
+    - name: Flush handlers so networking changes apply immediately per host
+      ansible.builtin.meta: flush_handlers
+
+    - name: Validate vmbr0 gateway reachability
+      ansible.builtin.command: ping -I vmbr0 -c 3 -W 1 192.168.88.1
+      changed_when: false
+
+    - name: Validate VLAN10 gateway reachability
+      ansible.builtin.command: ping -I enp1s0f1np1.10 -c 3 -W 1 192.168.10.1
+      changed_when: false
+
+  handlers:
+    - name: Remove stale VLAN links
+      ansible.builtin.shell: |
+        ip link del enp3s0f0np0.88 2>/dev/null || true
+        ip link del enp3s0f1np1.10 2>/dev/null || true
+      changed_when: false
+
+    - name: Reload networking
+      ansible.builtin.shell: |
+        if command -v ifreload >/dev/null 2>&1; then
+          ifreload -a
+        else
+          systemctl restart networking
+        fi

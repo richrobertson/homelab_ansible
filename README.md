@@ -26,8 +26,8 @@ Canonical paths are organized by function:
 │   ├── environments/                # canonical static inventories
 │   │   ├── production.ini
 │   │   └── staging.ini
-│   ├── production.ini               # compatibility copy
-│   ├── staging.ini                  # compatibility copy
+│   ├── production.ini               # minimal stub for backward compatibility (see environments/production.ini)
+│   ├── staging.ini                  # minimal stub for backward compatibility (see environments/staging.ini)
 │   └── proxmox.yml                  # dynamic proxmox inventory plugin config
 ├── playbooks/
 │   └── core/                        # canonical root playbooks
@@ -98,6 +98,14 @@ ansible-playbook site.yml
 - `playbooks/core/site.yml` orchestrates:
 	- `playbooks/core/powerdns_servers.yml`
 	- `playbooks/core/vault_server.yml`
+	- `ansible/proxmox/provision_certificates.yml` (tagged: `certs`, `proxmox_certs`)
+
+Tag examples for `playbooks/core/site.yml`:
+
+- Run only certificate automation:
+	- `ansible-playbook playbooks/core/site.yml --tags certs`
+- Skip certificate automation:
+	- `ansible-playbook playbooks/core/site.yml --skip-tags certs`
 
 ### Proxmox bundle
 
@@ -108,6 +116,8 @@ Common playbooks:
 - `create_thunder_ring.yml` (Thunderbolt interfaces + FRR fabric)
 - `ceph_object_gw.yml` (Ceph object gateway role application)
 - `rolling_restart.yml` (serial reboot workflow)
+- `provision_certificates.yml` (Vault Agent-managed Proxmox API certificate provisioning and rotation)
+	- set `proxmox_cert_cluster_san` per cluster group (for example `cl0.myrobertson.net` or `cl1.myrobertson.net`)
 
 ### NetBox bundle
 

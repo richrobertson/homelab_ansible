@@ -1,0 +1,454 @@
+---
+- name: Bootstrap Vault PKI/AppRole for Proxmox API certs
+  hosts: vault
+  become: true
+  gather_facts: false
+  tags:
+    - certs
+    - proxmox_certs
+  vars:
+    proxmox_cert_manage_vault_bootstrap: true
+    proxmox_vault_addr: https://127.0.0.1:8200
+    proxmox_vault_skip_verify: true
+    proxmox_pki_allowed_domain: myrobertson.net
+    proxmox_vault_root_token_file: /root/.vault-token
+    proxmox_pki_mount: pki_int
+    proxmox_pki_issuer_id: ""
+    proxmox_pki_role_name: proxmox-api
+    proxmox_pki_policy_name: proxmox-api-cert
+    proxmox_pki_approle_name: proxmox-api-cert
+    proxmox_cert_ttl: 720h
+  tasks:
+    - name: Skip vault bootstrap when disabled
+      ansible.builtin.meta: end_play
+      when: not proxmox_cert_manage_vault_bootstrap
+
+    - name: Check Vault root token file exists
+      ansible.builtin.stat:
+        path: "{{ proxmox_vault_root_token_file }}"
+      register: proxmox_vault_token_stat
+
+    - name: Fail when Vault root token file is missing
+      ansible.builtin.fail:
+        msg: "Vault root token file {{ proxmox_vault_root_token_file }} is required for certificate bootstrap."
+      when: not proxmox_vault_token_stat.stat.exists
+
+    - name: Ensure vault CLI is installed on vault host
+      ansible.builtin.shell: command -v vault
+      register: proxmox_vault_cli_check
+      changed_when: false
+      failed_when: proxmox_vault_cli_check.rc != 0
+
+    - name: Ensure AppRole auth method is enabled
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ proxmox_vault_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
+        if ! vault auth list | awk '{print $1}' | grep -q '^approle/'; then
+          vault auth enable approle
+          echo "ENABLED"
+        else
+          echo "SKIPPED"
+        fi
+      args:
+        executable: /bin/bash
+      register: approle_enable
+      changed_when: "'ENABLED' in approle_enable.stdout"
+
+    - name: Ensure PKI role exists for Proxmox API certs
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ proxmox_vault_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
+        vault write {{ proxmox_pki_mount }}/roles/{{ proxmox_pki_role_name }} \
+          {% if proxmox_pki_issuer_id | length > 0 %}issuer_ref={{ proxmox_pki_issuer_id }} \
+          {% endif %}allowed_domains={{ proxmox_pki_allowed_domain }} \
+          allow_bare_domains=false \
+          allow_subdomains=true \
+          allow_glob_domains=false \
+          allow_any_name=false \
+          allow_ip_sans=true \
+          enforce_hostnames=true \
+          server_flag=true \
+          client_flag=false \
+          key_type=ec \
+          key_bits=256 \
+          max_ttl={{ proxmox_cert_ttl }}
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Ensure Vault policy can issue Proxmox certs
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ proxmox_vault_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
+        vault policy write {{ proxmox_pki_policy_name }} - <<'POLICY'
+        path "{{ proxmox_pki_mount }}/issue/{{ proxmox_pki_role_name }}" {
+          capabilities = ["update"]
+        }
+        path "{{ proxmox_pki_mount }}/cert/ca" {
+          capabilities = ["read"]
+        }
+        POLICY
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Ensure AppRole exists for Proxmox cert agent
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ proxmox_vault_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
+        vault write auth/approle/role/{{ proxmox_pki_approle_name }} \
+          token_policies={{ proxmox_pki_policy_name }} \
+          token_ttl=1h \
+          token_max_ttl=24h \
+          token_num_uses=0
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+- name: Provision Proxmox API certificate automation
+  hosts: proxmox_cert_nodes
+  become: true
+  gather_facts: true
+  serial: 1
+  tags:
+    - certs
+    - proxmox_certs
+  vars:
+    proxmox_cert_manage_vault_bootstrap: true
+    proxmox_vault_group: vault
+    proxmox_pki_allowed_domain: myrobertson.net
+    # NOTE: Set this per inventory group (for example proxmox_cert_nodes_cl0/cl1)
+    # so each cluster receives only its own VIP DNS SAN.
+    proxmox_vault_addr: >-
+      https://{{
+        (proxmox_vault_group is defined
+         and proxmox_vault_group in groups
+         and (groups[proxmox_vault_group] | length) > 0)
+        | ternary(
+            hostvars[groups[proxmox_vault_group][0]].ansible_host
+            | default(groups[proxmox_vault_group][0]),
+            '127.0.0.1')
+      }}:8200
+    proxmox_vault_skip_verify: false
+    proxmox_vault_root_token_file: /root/.vault-token
+    proxmox_pki_mount: pki_int
+    proxmox_pki_issuer_id: ""
+    proxmox_pki_role_name: proxmox-api
+    proxmox_pki_approle_name: proxmox-api-cert
+    proxmox_cert_ttl: 720h
+    proxmox_cert_expected_issuer_pattern: Vault
+    proxmox_cert_vault_role_id: ""
+    proxmox_cert_vault_secret_id: ""
+    proxmox_cert_agent_name: vault-agent-proxmox-pveproxy
+    proxmox_cert_agent_dir: /etc/vault-agent.d
+    proxmox_cert_agent_runtime_dir: /var/lib/vault-agent/proxmox-pveproxy
+    proxmox_cert_bundle_file: /var/lib/vault-agent/proxmox-pveproxy/issue-bundle.pem
+    proxmox_cert_role_id_file: /etc/vault-agent.d/proxmox-role-id
+    proxmox_cert_secret_id_file: /etc/vault-agent.d/proxmox-secret-id
+    proxmox_cert_agent_config_file: /etc/vault-agent.d/proxmox-pveproxy.hcl
+    proxmox_cert_agent_token_file: /var/lib/vault-agent/proxmox-pveproxy/token
+    proxmox_cert_apply_script: /usr/local/sbin/apply-proxmox-api-cert.sh
+    proxmox_pveproxy_cert_file: /etc/pve/local/pveproxy-ssl.pem
+    proxmox_pveproxy_key_file: /etc/pve/local/pveproxy-ssl.key
+  pre_tasks:
+    - name: Build cert subject names for this host
+      ansible.builtin.set_fact:
+        proxmox_cert_common_name: "{{ ansible_fqdn | default(inventory_hostname) }}"
+        # Include host FQDN/IP plus optional cluster VIP SAN from inventory var
+        # proxmox_cert_cluster_san (for example cl0.myrobertson.net or cl1.myrobertson.net).
+        proxmox_cert_all_sans: "{{ [ansible_fqdn | default(inventory_hostname), inventory_hostname, ansible_host | default(''), proxmox_cert_cluster_san | default('')] | reject('equalto', '') | unique }}"
+        proxmox_cert_alt_names: "{{ proxmox_cert_all_sans | reject('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') | join(',') }}"
+        proxmox_cert_ip_sans: "{{ proxmox_cert_all_sans | select('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') | join(',') }}"
+
+    - name: Ensure vault CLI exists on Proxmox node
+      ansible.builtin.shell: command -v vault
+      register: proxmox_node_vault_cli_check
+      changed_when: false
+      failed_when: proxmox_node_vault_cli_check.rc != 0
+
+    - name: Validate vault group exists when AppRole IDs are not preseeded
+      ansible.builtin.assert:
+        that:
+          - proxmox_vault_group in groups
+          - groups.get(proxmox_vault_group, []) | length > 0
+        fail_msg: >-
+          No vault host is defined in inventory group '{{ proxmox_vault_group }}'.
+          Add a vault host or pass proxmox_cert_vault_role_id and proxmox_cert_vault_secret_id.
+      when:
+        - proxmox_cert_vault_role_id | length == 0 or proxmox_cert_vault_secret_id | length == 0
+
+    - name: Validate Vault address when vault group is absent
+      ansible.builtin.assert:
+        that:
+          - (groups.get(proxmox_vault_group, []) | length) > 0 or (proxmox_vault_addr is not search('https?://(?:127\\.0\\.0\\.1|localhost)(?::[0-9]+)?/?$'))
+        fail_msg: >-
+          proxmox_vault_group '{{ proxmox_vault_group }}' is empty/undefined and proxmox_vault_addr
+          resolves to loopback ({{ proxmox_vault_addr }}). Define a non-empty vault group or override
+          proxmox_vault_addr to a non-loopback Vault endpoint.
+
+    - name: Check delegated Vault root token file exists
+      ansible.builtin.stat:
+        path: "{{ proxmox_vault_root_token_file }}"
+      delegate_to: "{{ groups[proxmox_vault_group][0] }}"
+      become: true
+      register: proxmox_vault_delegate_token_stat
+      when:
+        - proxmox_cert_vault_role_id | length == 0 or proxmox_cert_vault_secret_id | length == 0
+
+    - name: Fail when delegated Vault root token file is missing
+      ansible.builtin.fail:
+        msg: "Vault root token file {{ proxmox_vault_root_token_file }} is required on delegated vault host {{ groups[proxmox_vault_group][0] }}."
+      when:
+        - proxmox_cert_vault_role_id | length == 0 or proxmox_cert_vault_secret_id | length == 0
+        - not (proxmox_vault_delegate_token_stat.stat.exists | default(false))
+
+    - name: Generate role_id for Proxmox cert AppRole (vault host)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ proxmox_vault_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
+        vault read -field=role_id auth/approle/role/{{ proxmox_pki_approle_name }}/role-id
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ groups[proxmox_vault_group][0] }}"
+      become: true
+      register: proxmox_role_id_result
+      changed_when: false
+      when: proxmox_cert_vault_role_id | length == 0
+
+    - name: Check whether AppRole secret_id file already exists on Proxmox node
+      ansible.builtin.stat:
+        path: "{{ proxmox_cert_secret_id_file }}"
+      register: proxmox_existing_secret_id_stat
+      when: proxmox_cert_vault_secret_id | length == 0
+
+    - name: Read existing AppRole secret_id file from Proxmox node
+      ansible.builtin.slurp:
+        path: "{{ proxmox_cert_secret_id_file }}"
+      register: proxmox_existing_secret_id_file
+      when:
+        - proxmox_cert_vault_secret_id | length == 0
+        - proxmox_existing_secret_id_stat.stat.exists | default(false)
+
+    - name: Generate secret_id for Proxmox cert AppRole (vault host)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ proxmox_vault_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
+        vault write -field=secret_id -f auth/approle/role/{{ proxmox_pki_approle_name }}/secret-id
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ groups[proxmox_vault_group][0] }}"
+      become: true
+      register: proxmox_secret_id_result
+      changed_when: false
+      when:
+        - proxmox_cert_vault_secret_id | length == 0
+        - not (proxmox_existing_secret_id_stat.stat.exists | default(false))
+
+    - name: Resolve effective AppRole credentials
+      ansible.builtin.set_fact:
+        proxmox_cert_effective_role_id: "{{ proxmox_cert_vault_role_id if proxmox_cert_vault_role_id | length > 0 else proxmox_role_id_result.stdout }}"
+        proxmox_cert_effective_secret_id: >-
+          {{
+            proxmox_cert_vault_secret_id
+            if proxmox_cert_vault_secret_id | length > 0
+            else
+              (
+                (proxmox_existing_secret_id_file.content | b64decode | trim)
+                if (proxmox_existing_secret_id_stat.stat.exists | default(false))
+                else proxmox_secret_id_result.stdout
+              )
+          }}
+
+  tasks:
+    - name: Ensure certificate agent runtime directory exists
+      ansible.builtin.file:
+        path: "{{ proxmox_cert_agent_runtime_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Ensure vault agent config directory exists
+      ansible.builtin.file:
+        path: "{{ proxmox_cert_agent_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Install AppRole role_id file on Proxmox node
+      ansible.builtin.copy:
+        dest: "{{ proxmox_cert_role_id_file }}"
+        content: "{{ proxmox_cert_effective_role_id }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Install AppRole secret_id file on Proxmox node
+      ansible.builtin.copy:
+        dest: "{{ proxmox_cert_secret_id_file }}"
+        content: "{{ proxmox_cert_effective_secret_id }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Write Proxmox certificate apply script
+      ansible.builtin.copy:
+        dest: "{{ proxmox_cert_apply_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          BUNDLE_FILE="{{ proxmox_cert_bundle_file }}"
+          CERT_FILE="{{ proxmox_pveproxy_cert_file }}"
+          KEY_FILE="{{ proxmox_pveproxy_key_file }}"
+
+          cert_tmp=$(mktemp)
+          key_tmp=$(mktemp)
+          trap 'rm -f "$cert_tmp" "$key_tmp"' EXIT
+
+          awk '/^CERT_BEGIN$/{in_cert=1;next}/^CERT_END$/{in_cert=0} in_cert{print}' "$BUNDLE_FILE" > "$cert_tmp"
+          awk '/^KEY_BEGIN$/{in_key=1;next}/^KEY_END$/{in_key=0} in_key{print}' "$BUNDLE_FILE" > "$key_tmp"
+
+          if [[ ! -s "$cert_tmp" || ! -s "$key_tmp" ]]; then
+            echo "failed to parse certificate bundle from $BUNDLE_FILE" >&2
+            exit 1
+          fi
+
+          cert_changed=0
+          key_changed=0
+          if [[ ! -f "$CERT_FILE" ]] || ! cmp -s "$cert_tmp" "$CERT_FILE"; then
+            install -b -m 0640 -o root -g www-data "$cert_tmp" "$CERT_FILE"
+            cert_changed=1
+          fi
+
+          if [[ ! -f "$KEY_FILE" ]] || ! cmp -s "$key_tmp" "$KEY_FILE"; then
+            install -b -m 0640 -o root -g www-data "$key_tmp" "$KEY_FILE"
+            key_changed=1
+          fi
+
+          if [[ "$cert_changed" -eq 1 || "$key_changed" -eq 1 ]]; then
+            systemctl restart pveproxy
+          fi
+
+    - name: Write Vault agent config for Proxmox API cert
+      ansible.builtin.copy:
+        dest: "{{ proxmox_cert_agent_config_file }}"
+        owner: root
+        group: root
+        mode: "0640"
+        content: |
+          pid_file = "{{ proxmox_cert_agent_runtime_dir }}/agent.pid"
+
+          vault {
+            address = "{{ proxmox_vault_addr }}"
+            tls_skip_verify = {{ proxmox_vault_skip_verify | string | lower }}
+          }
+
+          auto_auth {
+            method "approle" {
+              mount_path = "auth/approle"
+              config = {
+                role_id_file_path = "{{ proxmox_cert_role_id_file }}"
+                secret_id_file_path = "{{ proxmox_cert_secret_id_file }}"
+                remove_secret_id_file_after_reading = false
+              }
+            }
+
+            sink "file" {
+              config = {
+                path = "{{ proxmox_cert_agent_token_file }}"
+                mode = 0600
+              }
+            }
+          }
+
+          template_config {
+            exit_on_retry_failure = true
+          }
+
+          template {
+            destination = "{{ proxmox_cert_bundle_file }}"
+            perms       = 0600
+            contents = <<EOT
+          {{ '{{- with pkiCert "' ~ proxmox_pki_mount ~ '/issue/' ~ proxmox_pki_role_name ~ '" "common_name=' ~ proxmox_cert_common_name ~ '" "alt_names=' ~ proxmox_cert_alt_names ~ '" "ip_sans=' ~ proxmox_cert_ip_sans ~ '" "ttl=' ~ proxmox_cert_ttl ~ '"' ~ (( ' "issuer_ref=' ~ proxmox_pki_issuer_id ~ '"' ) if (proxmox_pki_issuer_id | length > 0) else '') ~ ' -}}' }}
+          CERT_BEGIN
+          {{ '{{ .Cert }}' }}
+          {{ '{{ .CA }}' }}
+          CERT_END
+          KEY_BEGIN
+          {{ '{{ .Key }}' }}
+          KEY_END
+          {{ '{{- end -}}' }}
+          EOT
+            command = "{{ proxmox_cert_apply_script }}"
+          }
+      notify: Restart Proxmox cert agent
+
+    - name: Write systemd unit for Proxmox cert agent
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ proxmox_cert_agent_name }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Vault Agent Proxmox API Certificate Renewer
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          ExecStart={{ proxmox_node_vault_cli_check.stdout }} agent -config={{ proxmox_cert_agent_config_file }}
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Ensure Proxmox cert agent service is enabled and started
+      ansible.builtin.systemd:
+        name: "{{ proxmox_cert_agent_name }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Apply pending service restarts before certificate verification
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verify pveproxy serves Vault-issued certificate
+      ansible.builtin.shell: |
+        set -euo pipefail
+        openssl s_client -connect 127.0.0.1:8006 -servername "{{ proxmox_cert_common_name }}" </dev/null 2>/dev/null |
+          openssl x509 -noout -issuer
+      args:
+        executable: /bin/bash
+      register: proxmox_pveproxy_cert_issuer
+      changed_when: false
+      retries: 10
+      delay: 3
+      until:
+        - proxmox_pveproxy_cert_issuer.rc == 0
+        - proxmox_pveproxy_cert_issuer.stdout is search(proxmox_cert_expected_issuer_pattern)
+      failed_when: proxmox_pveproxy_cert_issuer.stdout is not search(proxmox_cert_expected_issuer_pattern)
+
+  handlers:
+    - name: Restart Proxmox cert agent
+      ansible.builtin.systemd:
+        name: "{{ proxmox_cert_agent_name }}"
+        state: restarted
