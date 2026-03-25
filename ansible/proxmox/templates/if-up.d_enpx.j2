@@ -3,7 +3,7 @@
 
 INTERFACE=$IFACE
 
-if [ "$INTERFACE" = "enp1s0f0np0" ] || [ "$INTERFACE" = "enp1s0f0np1" ]; then
+if [ "$INTERFACE" = "enp1s0f0np0" ] || [ "$INTERFACE" = "enp1s0f1np1" ]; then
     logger "Checking if frr.service is running for $INTERFACE"
     
     if ! systemctl is-active --quiet frr.service; then
