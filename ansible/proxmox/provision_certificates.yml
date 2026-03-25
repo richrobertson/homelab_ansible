@@ -10,6 +10,7 @@
     proxmox_cert_manage_vault_bootstrap: true
     proxmox_vault_addr: https://127.0.0.1:8200
     proxmox_vault_skip_verify: true
+    proxmox_pki_allowed_domain: myrobertson.net
     proxmox_vault_root_token_file: /root/.vault-token
     proxmox_pki_mount: pki_int
     proxmox_pki_issuer_id: ""
@@ -63,7 +64,12 @@
         export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
         vault write {{ proxmox_pki_mount }}/roles/{{ proxmox_pki_role_name }} \
           {% if proxmox_pki_issuer_id | length > 0 %}issuer_ref={{ proxmox_pki_issuer_id }} \
-          {% endif %}allow_any_name=true \
+          {% endif %}allowed_domains={{ proxmox_pki_allowed_domain }} \
+          allow_bare_domains=false \
+          allow_subdomains=true \
+          allow_glob_domains=false \
+          allow_any_name=false \
+          allow_ip_sans=true \
           enforce_hostnames=true \
           server_flag=true \
           client_flag=false \
@@ -118,6 +124,7 @@
   vars:
     proxmox_cert_manage_vault_bootstrap: true
     proxmox_vault_group: vault
+    proxmox_pki_allowed_domain: myrobertson.net
     # NOTE: Set this per inventory group (for example proxmox_cert_nodes_cl0/cl1)
     # so each cluster receives only its own VIP DNS SAN.
     proxmox_vault_addr: >-
@@ -170,8 +177,8 @@
     - name: Validate vault group exists when AppRole IDs are not preseeded
       ansible.builtin.assert:
         that:
-          - groups[proxmox_vault_group] is defined
-          - groups[proxmox_vault_group] | length > 0
+          - proxmox_vault_group in groups
+          - groups.get(proxmox_vault_group, []) | length > 0
         fail_msg: >-
           No vault host is defined in inventory group '{{ proxmox_vault_group }}'.
           Add a vault host or pass proxmox_cert_vault_role_id and proxmox_cert_vault_secret_id.
