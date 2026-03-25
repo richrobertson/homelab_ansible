@@ -30,6 +30,15 @@ This directory contains playbooks, roles, and templates for automating NetBox IP
    ```
 4. Adjust variables and inventory as needed
 
+### Core orchestration entrypoint
+For repository-wide orchestration, use the canonical core playbook path:
+
+```sh
+ansible-playbook playbooks/core/site.yml
+```
+
+The root `site.yml` remains available as a compatibility wrapper.
+
 ## Notes
 - `ansible.cfg` in this directory sets local options for NetBox automation
 - See top-level README for environment setup and global usage

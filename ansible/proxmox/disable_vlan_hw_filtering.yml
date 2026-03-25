@@ -1,0 +1,75 @@
+---
+- name: Disable VLAN hardware filtering on Proxmox nodes (persistent)
+  hosts: "{{ target_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: true
+
+  vars:
+    vlan_filter_script_path: /usr/local/sbin/disable-vlan-hw-filtering.sh
+    vlan_filter_service_name: disable-vlan-hw-filtering
+
+  tasks:
+    - name: Ensure ethtool is installed
+      ansible.builtin.package:
+        name: ethtool
+        state: present
+
+    - name: Install VLAN hardware filtering disable script
+      ansible.builtin.copy:
+        dest: "{{ vlan_filter_script_path }}"
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          for iface_path in /sys/class/net/*; do
+            iface="$(basename "$iface_path")"
+
+            case "$iface" in
+              lo|vmbr*|veth*|tap*|fwbr*|fwln*|fwpr*|bonding_masters)
+                continue
+                ;;
+            esac
+
+            if ethtool -k "$iface" 2>/dev/null | grep -q '^rx-vlan-filter:'; then
+              ethtool -K "$iface" rx-vlan-filter off || true
+            fi
+          done
+      notify: Restart VLAN hardware filtering service
+
+    - name: Install systemd service for persistent VLAN hardware filtering disable
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ vlan_filter_service_name }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Disable VLAN hardware filtering on physical interfaces
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ vlan_filter_script_path }}
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart VLAN hardware filtering service
+
+    - name: Enable and run VLAN hardware filtering service
+      ansible.builtin.systemd:
+        name: "{{ vlan_filter_service_name }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+  handlers:
+    - name: Restart VLAN hardware filtering service
+      ansible.builtin.systemd:
+        name: "{{ vlan_filter_service_name }}"
+        state: restarted
+        daemon_reload: true

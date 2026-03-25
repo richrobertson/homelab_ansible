@@ -1,3 +1,7 @@
 ---
 - import_playbook: powerdns_servers.yml
 - import_playbook: vault_server.yml
+- import_playbook: ../../ansible/proxmox/provision_certificates.yml
+  tags:
+    - certs
+    - proxmox_certs

@@ -57,6 +57,16 @@ ansible-playbook -i <your_inventory> domain.yml
 
 3. Adjust variables and inventory as needed.
 
+### Core orchestration entrypoint
+
+When running the repository-wide orchestration, use the canonical core entrypoint:
+
+```sh
+ansible-playbook playbooks/core/site.yml
+```
+
+The root `site.yml` remains available as a compatibility wrapper.
+
 ## Notes
 
 - `ansible.cfg` in this directory sets local options for domain automation.
