@@ -46,10 +46,14 @@
         export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
         if ! vault auth list | awk '{print $1}' | grep -q '^approle/'; then
           vault auth enable approle
+          echo "ENABLED"
+        else
+          echo "SKIPPED"
         fi
       args:
         executable: /bin/bash
-      changed_when: false
+      register: approle_enable
+      changed_when: "'ENABLED' in approle_enable.stdout"
 
     - name: Ensure PKI role exists for Proxmox API certs
       ansible.builtin.shell: |
@@ -126,7 +130,7 @@
             | default(groups[proxmox_vault_group][0]),
             '127.0.0.1')
       }}:8200
-    proxmox_vault_skip_verify: true
+    proxmox_vault_skip_verify: false
     proxmox_vault_root_token_file: /root/.vault-token
     proxmox_pki_mount: pki_int
     proxmox_pki_issuer_id: ""
@@ -322,16 +326,12 @@
           cert_changed=0
           key_changed=0
           if [[ ! -f "$CERT_FILE" ]] || ! cmp -s "$cert_tmp" "$CERT_FILE"; then
-            cat "$cert_tmp" > "$CERT_FILE"
-            chown root:www-data "$CERT_FILE"
-            chmod 0640 "$CERT_FILE"
+            install -b -m 0640 -o root -g www-data "$cert_tmp" "$CERT_FILE"
             cert_changed=1
           fi
 
           if [[ ! -f "$KEY_FILE" ]] || ! cmp -s "$key_tmp" "$KEY_FILE"; then
-            cat "$key_tmp" > "$KEY_FILE"
-            chown root:www-data "$KEY_FILE"
-            chmod 0640 "$KEY_FILE"
+            install -b -m 0640 -o root -g www-data "$key_tmp" "$KEY_FILE"
             key_changed=1
           fi
 

@@ -82,7 +82,7 @@ Suggested phased rollout:
 2. Add nodes to `[proxmox_cert_nodes_cl0]` and `[proxmox_cert_nodes_cl1]` as needed; each child group sets its own `proxmox_cert_cluster_san`.
 3. Run a canary bootstrap rollout (static inventory only):
    ```sh
-  ansible-playbook -i ../../inventory/environments/production.ini provision_certificates.yml --limit <canary-node-host-or-ip>
+   ansible-playbook -i ../../inventory/environments/production.ini provision_certificates.yml --limit <canary-node-host-or-ip>
    ```
   (`--limit` can be an inventory hostname, group, or host IP present in `production.ini`.)
 4. Verify dynamic Proxmox inventory can be queried with TLS validation:
