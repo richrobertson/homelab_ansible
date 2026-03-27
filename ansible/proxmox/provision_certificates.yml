@@ -355,6 +355,33 @@
       register: proxmox_current_key_type
       changed_when: false
 
+    - name: Validate vault group exists for one-time RSA reissue
+      ansible.builtin.assert:
+        that:
+          - proxmox_vault_group in groups
+          - groups.get(proxmox_vault_group, []) | length > 0
+        fail_msg: >-
+          No vault host is defined in inventory group '{{ proxmox_vault_group }}',
+          but RSA reissue requires delegated Vault access.
+      when: proxmox_current_key_type.stdout | trim != 'RSA'
+
+    - name: Check delegated Vault root token file exists for one-time RSA reissue
+      ansible.builtin.stat:
+        path: "{{ proxmox_vault_root_token_file }}"
+      delegate_to: "{{ groups[proxmox_vault_group][0] }}"
+      become: true
+      register: proxmox_vault_delegate_token_stat_for_rsa_reissue
+      when: proxmox_current_key_type.stdout | trim != 'RSA'
+
+    - name: Fail when delegated Vault root token file is missing for one-time RSA reissue
+      ansible.builtin.fail:
+        msg: >-
+          Vault root token file {{ proxmox_vault_root_token_file }} is required on delegated vault host
+          {{ groups[proxmox_vault_group][0] }} for one-time EC→RSA certificate reissue.
+      when:
+        - proxmox_current_key_type.stdout | trim != 'RSA'
+        - not (proxmox_vault_delegate_token_stat_for_rsa_reissue.stat.exists | default(false))
+
     - name: Issue fresh RSA certificate for Proxmox portal (vault host)
       ansible.builtin.shell: |
         set -euo pipefail
@@ -437,7 +464,7 @@
     - name: Install Vault CA certificate for vault-agent trust
       ansible.builtin.copy:
         dest: "{{ proxmox_cert_vault_ca_file }}"
-        content: "{{ proxmox_vault_ca_cert_for_nodes.stdout | trim }}\n"
+        content: "{{ hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes.stdout | trim }}\n"
         owner: root
         group: root
         mode: "0644"

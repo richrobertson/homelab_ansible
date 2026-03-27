@@ -31,7 +31,7 @@ The `handlers/` directory is for custom handlers (e.g., service restarts or noti
 1. Activate your Python/Ansible environment
 2. Run playbooks with:
    ```sh
-  ansible-playbook -i ../../inventory/proxmox.yml ceph_admin_portal.yml --extra-vars "ceph_dashboard_admin_password=<strong-password>"
+  ansible-playbook -i ../../inventory/proxmox.yml ceph_admin_portal.yml --extra-vars "ceph_dashboard_manage_login_credentials=true ceph_dashboard_admin_password=<strong-password>"
    ansible-playbook -i ../../inventory/proxmox.yml ceph_object_gw.yml
    ansible-playbook -i ../../inventory/proxmox.yml rolling_restart.yml
    ansible-playbook -i ../../inventory/proxmox.yml intel_vpro.yml

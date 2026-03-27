@@ -4,7 +4,7 @@
   become: true
   gather_facts: false
   vars:
-    ceph_dashboard_bind_addr: "cl0.myrobertson.net"
+    ceph_dashboard_bind_addr: "{{ proxmox_cert_cluster_san | default('') }}"
     ceph_dashboard_port: "8089"
     ceph_dashboard_ssl: "true"
     ceph_dashboard_manage_login_credentials: false
@@ -15,6 +15,15 @@
     ceph_proxmox_portal_key_file: /etc/pve/local/pveproxy-ssl.key
 
   pre_tasks:
+    - name: Require Ceph dashboard bind address
+      ansible.builtin.assert:
+        that:
+          - ceph_dashboard_bind_addr | length > 0
+        fail_msg: >-
+          Set ceph_dashboard_bind_addr (or proxmox_cert_cluster_san in group vars)
+          before running ceph_admin_portal.yml.
+      run_once: true
+
     - name: Require dashboard admin password
       ansible.builtin.assert:
         that:
