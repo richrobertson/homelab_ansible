@@ -24,6 +24,8 @@ This directory contains Ansible inventory configurations for different environme
 3. **Never commit sensitive files**:
    - Treat concrete environment inventory data as sensitive
    - Keep hostnames/IPs/credentials for real infrastructure out of version control
+   - Only commit `*.example` inventory templates
+   - Keep `environments/*.ini` and `proxmox.yml` local and ignored by git
    - Use `*.example` files as templates only
 
 ## Environment Structure
@@ -31,16 +33,17 @@ This directory contains Ansible inventory configurations for different environme
 ### Production
 - **File**: `environments/production.ini`
 - **Purpose**: Production infrastructure
-- **Note**: Keep this file local and never commit
+- **Note**: Keep this file local and never commit (ignored by `.gitignore`)
 
 ### Staging  
 - **File**: `environments/staging.ini`
 - **Purpose**: Testing and non-production deployments
-- **Note**: May use placeholder values for testing
+- **Note**: Keep this file local and never commit (ignored by `.gitignore`)
 
 ### Dynamic Inventory (Proxmox)
 - **File**: `proxmox.yml`
 - **Purpose**: Dynamically discover VMs/LXC containers from Proxmox
+- **Note**: Keep this file local and never commit (ignored by `.gitignore`)
 - **Docs**: https://docs.ansible.com/ansible/latest/collections/community/proxmox/proxmox_inventory.html
 
 ## Credentials Management
