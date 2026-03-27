@@ -126,7 +126,7 @@
     proxmox_vault_skip_verify: true
     proxmox_vault_root_token_file: /root/.vault-token
     proxmox_pki_mount: pki_int
-    proxmox_control_ca_bundle_path: "{{ playbook_dir }}/../../inventory/certs/proxmox-vault-ca.pem"
+    proxmox_control_ca_bundle_path: "{{ inventory_dir }}/certs/proxmox-vault-ca.pem"
   tasks:
     - name: Skip CA export when vault bootstrap is disabled
       ansible.builtin.meta: end_play
@@ -511,7 +511,7 @@
     - name: Install Vault CA certificate for vault-agent trust
       ansible.builtin.copy:
         dest: "{{ proxmox_cert_vault_ca_file }}"
-        content: "{{ hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes.stdout | trim }}\n"
+        content: "{{ proxmox_vault_ca_cert_for_nodes.stdout | trim }}\n"
         owner: root
         group: root
         mode: "0644"
