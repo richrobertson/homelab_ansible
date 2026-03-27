@@ -398,7 +398,7 @@
         fail_msg: >-
           No vault host is defined in inventory group '{{ proxmox_vault_group }}',
           but RSA reissue requires delegated Vault access.
-          when: proxmox_current_key_type.stdout | trim == 'NON_RSA'
+      when: proxmox_current_key_type.stdout | trim == 'NON_RSA'
 
     - name: Check delegated Vault root token file exists for one-time RSA reissue
       ansible.builtin.stat:
@@ -420,8 +420,8 @@
     - name: Issue fresh RSA certificate for Proxmox portal (vault host)
       ansible.builtin.shell: |
         set -euo pipefail
-        export VAULT_ADDR="https://127.0.0.1:8200"
-        export VAULT_SKIP_VERIFY=true
+        export VAULT_ADDR="{{ proxmox_vault_delegate_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_delegate_skip_verify | string | lower }}
         export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
         vault write -format=json {{ proxmox_pki_mount }}/issue/{{ proxmox_pki_role_name }} \
           common_name="{{ proxmox_cert_common_name }}" \
