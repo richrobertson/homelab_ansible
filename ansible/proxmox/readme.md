@@ -32,7 +32,7 @@ The `handlers/` directory is for custom handlers (e.g., service restarts or noti
 2. Run playbooks with:
    ```sh
   # Recommended: store dashboard credentials in an Ansible Vault vars file.
-  ansible-playbook -i ../../inventory/proxmox.yml ceph_admin_portal.yml --extra-vars @../../inventory/ceph_dashboard_credentials.vault.yml
+  ansible-playbook -i ../../inventory/proxmox.yml ceph_admin_portal.yml --extra-vars @../../inventory/ceph_dashboard_credentials.vault.yml --ask-vault-pass
    ansible-playbook -i ../../inventory/proxmox.yml ceph_object_gw.yml
    ansible-playbook -i ../../inventory/proxmox.yml rolling_restart.yml
    ansible-playbook -i ../../inventory/proxmox.yml intel_vpro.yml
