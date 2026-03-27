@@ -73,8 +73,8 @@
           enforce_hostnames=true \
           server_flag=true \
           client_flag=false \
-          key_type=ec \
-          key_bits=256 \
+          key_type=rsa \
+          key_bits=2048 \
           max_ttl={{ proxmox_cert_ttl }}
       args:
         executable: /bin/bash
@@ -113,6 +113,68 @@
         executable: /bin/bash
       changed_when: false
 
+- name: Export Vault CA for Proxmox API trust on control node
+  hosts: vault
+  become: true
+  gather_facts: false
+  tags:
+    - certs
+    - proxmox_certs
+  vars:
+    proxmox_cert_manage_vault_bootstrap: true
+    proxmox_vault_addr: https://127.0.0.1:8200
+    proxmox_vault_skip_verify: true
+    proxmox_vault_root_token_file: /root/.vault-token
+    proxmox_pki_mount: pki_int
+    proxmox_control_ca_bundle_path: "{{ inventory_dir }}/certs/proxmox-vault-ca.pem"
+  tasks:
+    - name: Skip CA export when vault bootstrap is disabled
+      ansible.builtin.meta: end_play
+      when: not proxmox_cert_manage_vault_bootstrap
+
+    - name: Check Vault root token file exists for CA export
+      ansible.builtin.stat:
+        path: "{{ proxmox_vault_root_token_file }}"
+      register: proxmox_vault_token_stat_for_ca_export
+      run_once: true
+
+    - name: Fail when Vault root token file is missing for CA export
+      ansible.builtin.fail:
+        msg: "Vault root token file {{ proxmox_vault_root_token_file }} is required for CA export."
+      when: not (proxmox_vault_token_stat_for_ca_export.stat.exists | default(false))
+      run_once: true
+
+    - name: Read Vault CA certificate for Proxmox PKI mount
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ proxmox_vault_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
+        vault read -field=certificate {{ proxmox_pki_mount }}/cert/ca
+      args:
+        executable: /bin/bash
+      register: proxmox_vault_ca_cert
+      changed_when: false
+      run_once: true
+
+    - name: Ensure local inventory cert directory exists
+      ansible.builtin.file:
+        path: "{{ proxmox_control_ca_bundle_path | dirname }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Write Vault CA certificate bundle for Proxmox API trust
+      ansible.builtin.copy:
+        dest: "{{ proxmox_control_ca_bundle_path }}"
+        content: "{{ proxmox_vault_ca_cert.stdout | trim }}\n"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
 - name: Provision Proxmox API certificate automation
   hosts: proxmox_cert_nodes
   become: true
@@ -138,6 +200,8 @@
             '127.0.0.1')
       }}:8200
     proxmox_vault_skip_verify: false
+    proxmox_vault_delegate_addr: https://127.0.0.1:8200
+    proxmox_vault_delegate_skip_verify: true
     proxmox_vault_root_token_file: /root/.vault-token
     proxmox_pki_mount: pki_int
     proxmox_pki_issuer_id: ""
@@ -158,6 +222,7 @@
     proxmox_cert_apply_script: /usr/local/sbin/apply-proxmox-api-cert.sh
     proxmox_pveproxy_cert_file: /etc/pve/local/pveproxy-ssl.pem
     proxmox_pveproxy_key_file: /etc/pve/local/pveproxy-ssl.key
+    proxmox_cert_vault_ca_file: /etc/vault-agent.d/vault-ca.pem
   pre_tasks:
     - name: Build cert subject names for this host
       ansible.builtin.set_fact:
@@ -165,6 +230,9 @@
         # Include host FQDN/IP plus optional cluster VIP SAN from inventory var
         # proxmox_cert_cluster_san (for example cl0.myrobertson.net or cl1.myrobertson.net).
         proxmox_cert_all_sans: "{{ [ansible_fqdn | default(inventory_hostname), inventory_hostname, ansible_host | default(''), proxmox_cert_cluster_san | default('')] | reject('equalto', '') | unique }}"
+
+    - name: Build cert SAN strings for Vault request
+      ansible.builtin.set_fact:
         proxmox_cert_alt_names: "{{ proxmox_cert_all_sans | reject('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') | join(',') }}"
         proxmox_cert_ip_sans: "{{ proxmox_cert_all_sans | select('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') | join(',') }}"
 
@@ -213,8 +281,8 @@
     - name: Generate role_id for Proxmox cert AppRole (vault host)
       ansible.builtin.shell: |
         set -euo pipefail
-        export VAULT_ADDR="{{ proxmox_vault_addr }}"
-        export VAULT_SKIP_VERIFY={{ proxmox_vault_skip_verify | string | lower }}
+        export VAULT_ADDR="{{ proxmox_vault_delegate_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_delegate_skip_verify | string | lower }}
         export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
         vault read -field=role_id auth/approle/role/{{ proxmox_pki_approle_name }}/role-id
       args:
@@ -242,8 +310,8 @@
     - name: Generate secret_id for Proxmox cert AppRole (vault host)
       ansible.builtin.shell: |
         set -euo pipefail
-        export VAULT_ADDR="{{ proxmox_vault_addr }}"
-        export VAULT_SKIP_VERIFY={{ proxmox_vault_skip_verify | string | lower }}
+        export VAULT_ADDR="{{ proxmox_vault_delegate_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_delegate_skip_verify | string | lower }}
         export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
         vault write -field=secret_id -f auth/approle/role/{{ proxmox_pki_approle_name }}/secret-id
       args:
@@ -271,7 +339,143 @@
               )
           }}
 
+    - name: Validate vault group exists for delegated CA fetch
+      ansible.builtin.assert:
+        that:
+          - proxmox_vault_group in groups
+          - groups.get(proxmox_vault_group, []) | length > 0
+        fail_msg: >-
+          No vault host is defined in inventory group '{{ proxmox_vault_group }}',
+          but proxmox_vault_skip_verify=false requires delegated Vault CA fetch.
+      when: not (proxmox_vault_skip_verify | bool)
+
+    - name: Check delegated Vault root token file exists for delegated CA fetch
+      ansible.builtin.stat:
+        path: "{{ proxmox_vault_root_token_file }}"
+      delegate_to: "{{ groups[proxmox_vault_group][0] }}"
+      become: true
+      register: proxmox_vault_delegate_token_stat_for_ca_fetch
+      when: not (proxmox_vault_skip_verify | bool)
+      run_once: true
+
+    - name: Fail when delegated Vault root token file is missing for delegated CA fetch
+      ansible.builtin.fail:
+        msg: >-
+          Vault root token file {{ proxmox_vault_root_token_file }} is required on delegated vault host
+          {{ groups[proxmox_vault_group][0] }} when proxmox_vault_skip_verify=false.
+      when:
+        - not (proxmox_vault_skip_verify | bool)
+        - not (proxmox_vault_delegate_token_stat_for_ca_fetch.stat.exists | default(false))
+      run_once: true
+
+    - name: Read Vault CA certificate for Proxmox nodes
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ proxmox_vault_delegate_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_delegate_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
+        vault read -field=certificate {{ proxmox_pki_mount }}/cert/ca
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ groups[proxmox_vault_group][0] }}"
+      become: true
+      register: proxmox_vault_ca_cert_for_nodes
+      changed_when: false
+      when: not (proxmox_vault_skip_verify | bool)
+      run_once: true
+
   tasks:
+    - name: Detect current Proxmox portal private key type
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if [[ ! -f "{{ proxmox_pveproxy_key_file }}" ]]; then
+          echo "MISSING"
+        elif openssl pkey -in "{{ proxmox_pveproxy_key_file }}" -noout -text 2>/dev/null | grep -qi 'modulus:'; then
+          echo "RSA"
+        elif openssl pkey -in "{{ proxmox_pveproxy_key_file }}" -noout >/dev/null 2>&1; then
+          echo "NON_RSA"
+        else
+          echo "UNREADABLE"
+        fi
+      args:
+        executable: /bin/bash
+      register: proxmox_current_key_type
+      changed_when: false
+
+    - name: Validate vault group exists for one-time RSA reissue
+      ansible.builtin.assert:
+        that:
+          - proxmox_vault_group in groups
+          - groups.get(proxmox_vault_group, []) | length > 0
+        fail_msg: >-
+          No vault host is defined in inventory group '{{ proxmox_vault_group }}',
+          but RSA reissue requires delegated Vault access.
+      when: proxmox_current_key_type.stdout | trim == 'NON_RSA'
+
+    - name: Check delegated Vault root token file exists for one-time RSA reissue
+      ansible.builtin.stat:
+        path: "{{ proxmox_vault_root_token_file }}"
+      delegate_to: "{{ groups[proxmox_vault_group][0] }}"
+      become: true
+      register: proxmox_vault_delegate_token_stat_for_rsa_reissue
+      when: proxmox_current_key_type.stdout | trim == 'NON_RSA'
+
+    - name: Fail when delegated Vault root token file is missing for one-time RSA reissue
+      ansible.builtin.fail:
+        msg: >-
+          Vault root token file {{ proxmox_vault_root_token_file }} is required on delegated vault host
+          {{ groups[proxmox_vault_group][0] }} for one-time EC→RSA certificate reissue.
+      when:
+        - proxmox_current_key_type.stdout | trim == 'NON_RSA'
+        - not (proxmox_vault_delegate_token_stat_for_rsa_reissue.stat.exists | default(false))
+
+    - name: Issue fresh RSA certificate for Proxmox portal (vault host)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ proxmox_vault_delegate_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_delegate_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
+        vault write -format=json {{ proxmox_pki_mount }}/issue/{{ proxmox_pki_role_name }} \
+          common_name="{{ proxmox_cert_common_name }}" \
+          alt_names="{{ proxmox_cert_alt_names }}" \
+          ip_sans="{{ proxmox_cert_ip_sans }}" \
+          ttl="{{ proxmox_cert_ttl }}" \
+          key_type="rsa" \
+          key_bits="2048"
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ groups[proxmox_vault_group][0] }}"
+      become: true
+      register: proxmox_rsa_issue_result
+      changed_when: false
+      no_log: true
+      when: proxmox_current_key_type.stdout | trim == 'NON_RSA'
+
+    - name: Install freshly issued RSA certificate for Proxmox portal
+      ansible.builtin.copy:
+        dest: "{{ proxmox_pveproxy_cert_file }}"
+        content: "{{ (proxmox_rsa_issue_result.stdout | from_json).data.certificate | trim }}\n{{ (proxmox_rsa_issue_result.stdout | from_json).data.issuing_ca | trim }}\n"
+        owner: root
+        group: www-data
+        mode: "0640"
+      when: proxmox_current_key_type.stdout | trim == 'NON_RSA'
+
+    - name: Install freshly issued RSA private key for Proxmox portal
+      ansible.builtin.copy:
+        dest: "{{ proxmox_pveproxy_key_file }}"
+        content: "{{ (proxmox_rsa_issue_result.stdout | from_json).data.private_key | trim }}\n"
+        owner: root
+        group: www-data
+        mode: "0640"
+      no_log: true
+      when: proxmox_current_key_type.stdout | trim == 'NON_RSA'
+
+    - name: Restart pveproxy after RSA key rotation
+      ansible.builtin.systemd:
+        name: pveproxy
+        state: restarted
+      when: proxmox_current_key_type.stdout | trim == 'NON_RSA'
+
     - name: Ensure certificate agent runtime directory exists
       ansible.builtin.file:
         path: "{{ proxmox_cert_agent_runtime_dir }}"
@@ -303,6 +507,15 @@
         owner: root
         group: root
         mode: "0600"
+
+    - name: Install Vault CA certificate for vault-agent trust
+      ansible.builtin.copy:
+        dest: "{{ proxmox_cert_vault_ca_file }}"
+        content: "{{ proxmox_vault_ca_cert_for_nodes.stdout | trim }}\n"
+        owner: root
+        group: root
+        mode: "0644"
+      when: not (proxmox_vault_skip_verify | bool)
 
     - name: Write Proxmox certificate apply script
       ansible.builtin.copy:
@@ -358,6 +571,9 @@
           vault {
             address = "{{ proxmox_vault_addr }}"
             tls_skip_verify = {{ proxmox_vault_skip_verify | string | lower }}
+          {% if not (proxmox_vault_skip_verify | bool) %}
+            ca_cert = "{{ proxmox_cert_vault_ca_file }}"
+          {% endif %}
           }
 
           auto_auth {
@@ -386,7 +602,7 @@
             destination = "{{ proxmox_cert_bundle_file }}"
             perms       = 0600
             contents = <<EOT
-          {{ '{{- with pkiCert "' ~ proxmox_pki_mount ~ '/issue/' ~ proxmox_pki_role_name ~ '" "common_name=' ~ proxmox_cert_common_name ~ '" "alt_names=' ~ proxmox_cert_alt_names ~ '" "ip_sans=' ~ proxmox_cert_ip_sans ~ '" "ttl=' ~ proxmox_cert_ttl ~ '"' ~ (( ' "issuer_ref=' ~ proxmox_pki_issuer_id ~ '"' ) if (proxmox_pki_issuer_id | length > 0) else '') ~ ' -}}' }}
+          {{ '{{- with pkiCert "' ~ proxmox_pki_mount ~ '/issue/' ~ proxmox_pki_role_name ~ '" "common_name=' ~ proxmox_cert_common_name ~ '" "alt_names=' ~ proxmox_cert_alt_names ~ '" "ip_sans=' ~ proxmox_cert_ip_sans ~ '" "ttl=' ~ proxmox_cert_ttl ~ '" "key_type=rsa" "key_bits=2048"' ~ (( ' "issuer_ref=' ~ proxmox_pki_issuer_id ~ '"' ) if (proxmox_pki_issuer_id | length > 0) else '') ~ ' -}}' }}
           CERT_BEGIN
           {{ '{{ .Cert }}' }}
           {{ '{{ .CA }}' }}

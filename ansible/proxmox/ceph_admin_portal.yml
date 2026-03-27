@@ -1,0 +1,236 @@
+---
+- name: Configure Ceph admin portal (dashboard)
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: false
+  vars:
+    ceph_dashboard_bind_addr: "{{ proxmox_cert_cluster_san | default('') }}"
+    ceph_dashboard_port: "8089"
+    ceph_dashboard_ssl: "true"
+    ceph_dashboard_manage_login_credentials: false
+    ceph_dashboard_admin_user: admin
+    ceph_dashboard_admin_password: ""
+    ceph_dashboard_reuse_proxmox_portal_cert: true
+    ceph_proxmox_portal_cert_file: /etc/pve/local/pveproxy-ssl.pem
+    ceph_proxmox_portal_key_file: /etc/pve/local/pveproxy-ssl.key
+
+  pre_tasks:
+    - name: Require Ceph dashboard bind address
+      ansible.builtin.assert:
+        that:
+          - ceph_dashboard_bind_addr | length > 0
+        fail_msg: >-
+          Set ceph_dashboard_bind_addr (or proxmox_cert_cluster_san in group vars)
+          before running ceph_admin_portal.yml.
+      run_once: true
+
+    - name: Require dashboard admin password
+      ansible.builtin.assert:
+        that:
+          - ceph_dashboard_admin_password | length > 0
+        fail_msg: >-
+          Set ceph_dashboard_admin_password (for example via --extra-vars or an encrypted var file)
+          before running ceph_admin_portal.yml.
+      when: ceph_dashboard_manage_login_credentials | bool
+      run_once: true
+
+  tasks:
+    - name: Read Ceph mgr modules
+      ansible.builtin.command:
+        argv:
+          - ceph
+          - mgr
+          - module
+          - ls
+          - --format
+          - json
+      register: ceph_mgr_modules
+      changed_when: false
+      run_once: true
+
+    - name: Enable Ceph dashboard module
+      ansible.builtin.command:
+        argv:
+          - ceph
+          - mgr
+          - module
+          - enable
+          - dashboard
+      when: "'dashboard' not in ((ceph_mgr_modules.stdout | from_json).enabled_modules | default([]))"
+      run_once: true
+
+    - name: Read current Ceph dashboard settings
+      ansible.builtin.command:
+        argv:
+          - ceph
+          - config
+          - get
+          - mgr
+          - "{{ item.key }}"
+      loop:
+        - { key: "mgr/dashboard/server_addr", value: "{{ ceph_dashboard_bind_addr }}" }
+        - { key: "mgr/dashboard/server_port", value: "{{ ceph_dashboard_port }}" }
+        - { key: "mgr/dashboard/ssl_server_port", value: "{{ ceph_dashboard_port }}" }
+        - { key: "mgr/dashboard/ssl", value: "{{ ceph_dashboard_ssl }}" }
+      register: ceph_dashboard_current_settings
+      changed_when: false
+      failed_when: false
+      run_once: true
+
+    - name: Apply Ceph dashboard settings
+      ansible.builtin.command:
+        argv:
+          - ceph
+          - config
+          - set
+          - mgr
+          - "{{ item.item.key }}"
+          - "{{ item.item.value }}"
+      loop: "{{ ceph_dashboard_current_settings.results }}"
+      when: (item.stdout | default('')) != (item.item.value | string)
+      run_once: true
+
+    - name: Read Proxmox portal certificate fingerprint
+      ansible.builtin.shell: |
+        set -euo pipefail
+        openssl x509 -in "{{ ceph_proxmox_portal_cert_file }}" -noout -fingerprint -sha256
+      args:
+        executable: /bin/bash
+      register: ceph_proxmox_portal_cert_fingerprint
+      changed_when: false
+      when: ceph_dashboard_reuse_proxmox_portal_cert | bool
+      run_once: true
+
+    - name: Read global Ceph dashboard certificate fingerprint from config-key store
+      ansible.builtin.shell: |
+        set -euo pipefail
+        ceph config-key get "mgr/dashboard/crt" 2>/dev/null | openssl x509 -noout -fingerprint -sha256 2>/dev/null || echo "MISSING"
+      args:
+        executable: /bin/bash
+      register: ceph_dashboard_stored_fingerprint
+      changed_when: false
+      failed_when: false
+      when: ceph_dashboard_reuse_proxmox_portal_cert | bool
+      run_once: true
+
+    - name: Detect Proxmox portal private key type for dashboard compatibility
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if openssl pkey -in "{{ ceph_proxmox_portal_key_file }}" -noout -text 2>/dev/null | grep -qi 'modulus:'; then
+          echo "RSA"
+        else
+          echo "NON_RSA"
+        fi
+      args:
+        executable: /bin/bash
+      register: ceph_proxmox_portal_key_type
+      changed_when: false
+      when: ceph_dashboard_reuse_proxmox_portal_cert | bool
+      run_once: true
+
+    - name: Require RSA key when reusing Proxmox portal cert for Ceph dashboard
+      ansible.builtin.assert:
+        that:
+          - ceph_proxmox_portal_key_type.stdout | trim == 'RSA'
+        fail_msg: >-
+          ceph_dashboard_reuse_proxmox_portal_cert=true requires an RSA private key for this Ceph dashboard build.
+          The current Proxmox key at {{ ceph_proxmox_portal_key_file }} is not RSA.
+      when: ceph_dashboard_reuse_proxmox_portal_cert | bool
+      run_once: true
+
+    - name: Reuse Proxmox portal certificate for Ceph dashboard
+      ansible.builtin.command:
+        argv:
+          - ceph
+          - dashboard
+          - set-ssl-certificate
+          - -i
+          - "{{ ceph_proxmox_portal_cert_file }}"
+      when:
+        - ceph_dashboard_reuse_proxmox_portal_cert | bool
+        - (ceph_proxmox_portal_cert_fingerprint.stdout | trim) != (ceph_dashboard_stored_fingerprint.stdout | default('MISSING') | trim)
+      run_once: true
+
+    - name: Reuse Proxmox portal key for Ceph dashboard
+      ansible.builtin.command:
+        argv:
+          - ceph
+          - dashboard
+          - set-ssl-certificate-key
+          - -i
+          - "{{ ceph_proxmox_portal_key_file }}"
+      when:
+        - ceph_dashboard_reuse_proxmox_portal_cert | bool
+        - (ceph_proxmox_portal_cert_fingerprint.stdout | trim) != (ceph_dashboard_stored_fingerprint.stdout | default('MISSING') | trim)
+      run_once: true
+
+    - name: Get active Ceph mgr name for restart task
+      ansible.builtin.shell: ceph mgr stat --format json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('active_name',''))"
+      register: ceph_active_mgr_name
+      changed_when: false
+      run_once: true
+
+    - name: Sync per-node dashboard certificate to all mgr nodes
+      ansible.builtin.shell: |
+        set -euo pipefail
+        NODES=$(ceph mgr dump --format json | python3 -c "
+        import json, sys
+        d = json.load(sys.stdin)
+        nodes = []
+        if d.get('active_name'): nodes.append(d['active_name'])
+        nodes += [s['name'] for s in d.get('standbys', [])]
+        print(' '.join(nodes))
+        ")
+        EXPECTED_KEY_HASH="$(sha256sum '{{ ceph_proxmox_portal_key_file }}' | awk '{print $1}')"
+        EXPECTED_CRT_HASH="$(sha256sum '{{ ceph_proxmox_portal_cert_file }}' | awk '{print $1}')"
+        UPDATED=""
+        for node in $NODES; do
+          CURRENT_KEY_HASH="$(ceph config-key get "mgr/dashboard/${node}/key" 2>/dev/null | sha256sum | awk '{print $1}' || true)"
+          CURRENT_CRT_HASH="$(ceph config-key get "mgr/dashboard/${node}/crt" 2>/dev/null | sha256sum | awk '{print $1}' || true)"
+          if [[ "$CURRENT_KEY_HASH" != "$EXPECTED_KEY_HASH" || "$CURRENT_CRT_HASH" != "$EXPECTED_CRT_HASH" ]]; then
+            ceph config-key set "mgr/dashboard/${node}/key" -i "{{ ceph_proxmox_portal_key_file }}"
+            ceph config-key set "mgr/dashboard/${node}/crt" -i "{{ ceph_proxmox_portal_cert_file }}"
+            UPDATED="${UPDATED} ${node}"
+          fi
+        done
+        if [[ -n "$UPDATED" ]]; then echo "UPDATED:${UPDATED}"; else echo "SKIPPED"; fi
+      args:
+        executable: /bin/bash
+      register: ceph_per_node_cert_sync
+      changed_when: "'UPDATED' in ceph_per_node_cert_sync.stdout"
+      when: ceph_dashboard_reuse_proxmox_portal_cert | bool
+      run_once: true
+
+    - name: Fail active ceph-mgr to reload dashboard cert on new active
+      ansible.builtin.assert:
+        that:
+          - ceph_active_mgr_name.stdout | trim | length > 0
+        fail_msg: "Cannot fail ceph-mgr because active mgr name is empty from ceph mgr stat."
+      when:
+        - ceph_dashboard_reuse_proxmox_portal_cert | bool
+        - ceph_per_node_cert_sync.changed
+      run_once: true
+
+    - name: Fail active ceph-mgr to reload dashboard cert on new active
+      ansible.builtin.command:
+        argv:
+          - ceph
+          - mgr
+          - fail
+          - "{{ ceph_active_mgr_name.stdout | trim }}"
+      when:
+        - ceph_dashboard_reuse_proxmox_portal_cert | bool
+        - ceph_per_node_cert_sync.changed
+      run_once: true
+
+    - name: Configure Ceph dashboard admin login credentials
+      ansible.builtin.command:
+        argv:
+          - ceph
+          - dashboard
+          - set-login-credentials
+          - "{{ ceph_dashboard_admin_user }}"
+          - "{{ ceph_dashboard_admin_password }}"
+      no_log: true
+      when: ceph_dashboard_manage_login_credentials | bool
+      run_once: true

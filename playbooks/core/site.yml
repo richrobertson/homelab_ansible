@@ -5,3 +5,7 @@
   tags:
     - certs
     - proxmox_certs
+- import_playbook: ../../ansible/proxmox/ceph_admin_portal.yml
+  tags:
+    - ceph_dashboard
+    - ceph_admin_portal

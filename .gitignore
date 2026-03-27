@@ -3,4 +3,5 @@ lib
 bin
 include
 .DS_Store
+inventory/certs/proxmox-vault-ca.pem
 

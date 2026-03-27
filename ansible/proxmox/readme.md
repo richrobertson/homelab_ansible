@@ -3,6 +3,7 @@
 This directory contains playbooks, roles, and templates for managing Proxmox clusters and related Ceph infrastructure.
 
 - **proxmox.yml**: Inventory configuration for Proxmox nodes, uses the `community.proxmox.proxmox` dynamic inventory plugin (see `inventory/proxmox.yml`)
+- **ceph_admin_portal.yml**: Configure Ceph Dashboard (admin portal) bind settings and admin login credentials
 - **ceph_object_gw.yml**: Deploy Ceph Object Gateway on Proxmox nodes
 - **rolling_restart.yml**: Safely reboot Proxmox nodes one at a time
 - **intel_vpro.yml**: Configure Intel vPro interfaces on Proxmox nodes
@@ -30,6 +31,7 @@ The `handlers/` directory is for custom handlers (e.g., service restarts or noti
 1. Activate your Python/Ansible environment
 2. Run playbooks with:
    ```sh
+  ansible-playbook -i ../../inventory/proxmox.yml ceph_admin_portal.yml --extra-vars "ceph_dashboard_manage_login_credentials=true ceph_dashboard_admin_password=<strong-password>"
    ansible-playbook -i ../../inventory/proxmox.yml ceph_object_gw.yml
    ansible-playbook -i ../../inventory/proxmox.yml rolling_restart.yml
    ansible-playbook -i ../../inventory/proxmox.yml intel_vpro.yml
@@ -74,6 +76,7 @@ When running the core orchestration playbook, certificate automation can be targ
 - `/root/.vault-token` must exist on the Vault host for role/policy/bootstrap tasks.
 - `vault` CLI must be installed on both the Vault host and each Proxmox node.
 - Proxmox nodes must be able to restart `pveproxy` after certificate updates.
+- Control-node trust for Proxmox API validation uses a Vault CA bundle exported by `provision_certificates.yml` to `inventory/certs/proxmox-vault-ca.pem`.
 
 ## Rolling out certificate automation
 Suggested phased rollout:
@@ -87,9 +90,9 @@ Suggested phased rollout:
   (`--limit` can be an inventory hostname, group, or host IP present in `production.ini`.)
 4. Verify dynamic Proxmox inventory can be queried with TLS validation:
    ```sh
-   ansible-inventory -i ../../inventory/proxmox.yml --graph
+  REQUESTS_CA_BUNDLE=../../inventory/certs/proxmox-vault-ca.pem ansible-inventory -i ../../inventory/proxmox.yml --graph
    ```
 5. Roll out to all Proxmox nodes using dynamic inventory (the playbook applies nodes one at a time via `serial: 1`):
    ```sh
-   ansible-playbook -i ../../inventory/environments/production.ini -i ../../inventory/proxmox.yml provision_certificates.yml
+  REQUESTS_CA_BUNDLE=../../inventory/certs/proxmox-vault-ca.pem ansible-playbook -i ../../inventory/environments/production.ini -i ../../inventory/proxmox.yml provision_certificates.yml
    ```
