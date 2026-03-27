@@ -76,7 +76,7 @@ When using this repo in production:
 
 - **Never commit actual hostnames/IPs/credentials to version control**
 - Use `inventory/production.ini.example` as a template
-- Create `inventory/production.ini` from the example and exclude from git (already in `.gitignore`)
+- Create your environment-specific inventory from the example and ensure it is excluded from git
 - Store actual inventory in Vault or secure external systems
 
 ### 7. SSL/TLS Certificates
@@ -112,7 +112,7 @@ If building or deploying containers:
 
 ## Security Scanning
 
-This repository uses [Semgrep](https://semgrep.dev/) for Static Application Security Testing (SAST). The CI workflow (`ci: add Semgrep SAST GitHub workflow`) runs on all pull requests.
+This repository uses [Semgrep](https://semgrep.dev/) for Static Application Security Testing (SAST). The Semgrep SAST workflow in `.github/workflows/sast.yml` runs on pull requests.
 
 To run Semgrep locally:
 ```bash

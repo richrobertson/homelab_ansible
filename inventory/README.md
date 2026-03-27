@@ -125,7 +125,11 @@ vault_addr: "https://{{ inventory_hostname }}:8200"
 ### Dynamic inventory not working
 - Verify Proxmox credentials in environment variables
 - Check PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_ID/SECRET are set
-- Test Proxmox API: `python -m proxmoxer`
+- Test Proxmox API with a simple proxmoxer one-liner:
+   ```bash
+   python -c "from proxmoxer import ProxmoxAPI; prox = ProxmoxAPI('your-proxmox-host', user='your-user@pam', token_name='token-id', token_value='token-secret', verify_ssl=True); print(prox.version.get())"
+   ```
+   See: https://github.com/proxmoxer/proxmoxer#usage
 
 ### SSH connection issues
 - Verify `ansible_user` matches your SSH user
