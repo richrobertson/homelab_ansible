@@ -1,5 +1,5 @@
 # Proxmox Inventory Plugin Configuration Example
-# Copy this file to ../proxmox.yml and update with your Proxmox credentials
+# Copy this file to proxmox.yml (in this directory) and update with your Proxmox credentials
 #
 # This uses the community.proxmox.proxmox inventory plugin for dynamic discovery
 # See: https://docs.ansible.com/ansible/latest/collections/community/proxmox/proxmox_inventory.html

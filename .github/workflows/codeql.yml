@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'python', 'bash' ]
+        language: [ 'actions' ]
 
     steps:
       - name: Checkout repository
@@ -31,9 +31,6 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           queries: security-and-quality
-
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3

@@ -1,5 +1,5 @@
 # Staging Inventory Example
-# Copy this file to ../staging.ini and customize for your environment
+# Copy this file to environments/staging.ini and customize for your environment
 #
 # Replace example hostnames/IPs with your actual staging infrastructure
 # This inventory is typically used for testing and non-production deployments
@@ -31,7 +31,5 @@ ansible_python_interpreter=/usr/bin/python3
 
 # Vault configuration (staging)
 vault_addr=https://vault.staging.example.com:8200
-vault_skip_verify=true  # Only for testing! Disable in production
-
-# Set to true to skip Vault operations in staging
-vault_skip_verify=false
+# Set to true to disable TLS verification (INSECURE, only for testing)
+vault_skip_verify=true

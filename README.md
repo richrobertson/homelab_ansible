@@ -71,7 +71,7 @@ This means old commands still work while new canonical paths are available.
 
 2. **Inventory files are templates**
    - `inventory/*.example` files provide templates for your infrastructure
-   - Copy and customize them locally - they're in `.gitignore` and won't be committed
+   - Copy and customize them locally, and ensure concrete environment inventories are excluded from version control in your workflow
    - Never commit actual hostnames, IPs, or credentials
 
 3. **SSH Key Authentication**
@@ -92,7 +92,7 @@ This means old commands still work while new canonical paths are available.
      ```
 
 6. **Regular Security Audits**
-   - Review git history for leaked secrets: `git log --all -S "password|secret|token"`
+   - Review git history for leaked secrets: `git log --all -G "password|secret|token"`
    - Scan playbooks with Semgrep: `semgrep --config p/ansible --config p/security-audit`
    - Update dependencies regularly for security patches
 

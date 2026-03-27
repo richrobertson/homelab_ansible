@@ -10,7 +10,7 @@ This directory contains Ansible inventory configurations for different environme
    cp production.ini.example environments/production.ini
    
    # For staging
-   cp staging.ini.example staging.ini
+   cp staging.ini.example environments/staging.ini
    
    # For Proxmox dynamic inventory
    cp proxmox.yml.example proxmox.yml
@@ -22,8 +22,8 @@ This directory contains Ansible inventory configurations for different environme
    - Adjust ansible_user and other connection parameters
 
 3. **Never commit sensitive files**:
-   - These files are already in `.gitignore` - keep them local!
-   - Actual inventory files should **never** be committed to version control
+   - Treat concrete environment inventory data as sensitive
+   - Keep hostnames/IPs/credentials for real infrastructure out of version control
    - Use `*.example` files as templates only
 
 ## Environment Structure
@@ -34,7 +34,7 @@ This directory contains Ansible inventory configurations for different environme
 - **Note**: Keep this file local and never commit
 
 ### Staging  
-- **File**: `staging.ini`
+- **File**: `environments/staging.ini`
 - **Purpose**: Testing and non-production deployments
 - **Note**: May use placeholder values for testing
 
@@ -112,7 +112,7 @@ vault_addr: "https://{{ inventory_hostname }}:8200"
 4. **Document group membership** in comments
 5. **Test inventory** with `ansible-inventory --graph`:
    ```bash
-   ansible-inventory -i staging.ini --graph
+   ansible-inventory -i environments/staging.ini --graph
    ```
 
 ## Troubleshooting

@@ -347,7 +347,9 @@
         fail_msg: >-
           No vault host is defined in inventory group '{{ proxmox_vault_group }}',
           but proxmox_vault_skip_verify=false requires delegated Vault CA fetch.
-      when: not (proxmox_vault_skip_verify | bool)
+      when:
+        - not (proxmox_vault_skip_verify | bool)
+        - not (proxmox_cert_vault_role_id | length > 0 and proxmox_cert_vault_secret_id | length > 0)
 
     - name: Check delegated Vault root token file exists for delegated CA fetch
       ansible.builtin.stat:
@@ -355,7 +357,9 @@
       delegate_to: "{{ groups[proxmox_vault_group][0] }}"
       become: true
       register: proxmox_vault_delegate_token_stat_for_ca_fetch
-      when: not (proxmox_vault_skip_verify | bool)
+      when:
+        - not (proxmox_vault_skip_verify | bool)
+        - not (proxmox_cert_vault_role_id | length > 0 and proxmox_cert_vault_secret_id | length > 0)
       run_once: true
 
     - name: Fail when delegated Vault root token file is missing for delegated CA fetch
@@ -365,6 +369,7 @@
           {{ groups[proxmox_vault_group][0] }} when proxmox_vault_skip_verify=false.
       when:
         - not (proxmox_vault_skip_verify | bool)
+        - not (proxmox_cert_vault_role_id | length > 0 and proxmox_cert_vault_secret_id | length > 0)
         - not (proxmox_vault_delegate_token_stat_for_ca_fetch.stat.exists | default(false))
       run_once: true
 
@@ -381,7 +386,9 @@
       become: true
       register: proxmox_vault_ca_cert_for_nodes
       changed_when: false
-      when: not (proxmox_vault_skip_verify | bool)
+      when:
+        - not (proxmox_vault_skip_verify | bool)
+        - not (proxmox_cert_vault_role_id | length > 0 and proxmox_cert_vault_secret_id | length > 0)
       run_once: true
 
   tasks:
@@ -515,7 +522,9 @@
         owner: root
         group: root
         mode: "0644"
-      when: not (proxmox_vault_skip_verify | bool)
+      when:
+        - not (proxmox_vault_skip_verify | bool)
+        - proxmox_vault_ca_cert_for_nodes is defined
 
     - name: Write Proxmox certificate apply script
       ansible.builtin.copy:

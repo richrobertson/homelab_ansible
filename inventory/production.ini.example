@@ -1,5 +1,5 @@
 # Production Inventory Example
-# Copy this file to ../environments/production.ini and customize for your environment
+# Copy this file to environments/production.ini and customize for your environment
 #
 # Replace example hostnames/IPs with your actual infrastructure details
 # Add appropriate host_vars and group_vars as needed
