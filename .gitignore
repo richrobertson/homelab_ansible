@@ -16,6 +16,7 @@ include/
 *.swo
 *~
 .DS_Store
+inventory/certs/proxmox-vault-ca.pem
 
 # Vault / Secrets
 vault_token
