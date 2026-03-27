@@ -67,9 +67,9 @@ jobs:
               exit 0
             fi
 
-            python -m semgrep scan "${SEMGREP_ARGS[@]}" "${changed_files[@]}"
+            semgrep scan "${SEMGREP_ARGS[@]}" "${changed_files[@]}"
           else
-            python -m semgrep scan "${SEMGREP_ARGS[@]}" .
+            semgrep scan "${SEMGREP_ARGS[@]}" .
           fi
 
       - name: Upload SARIF to GitHub Security
