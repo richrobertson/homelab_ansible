@@ -172,11 +172,13 @@
         nodes += [s['name'] for s in d.get('standbys', [])]
         print(' '.join(nodes))
         ")
-        EXPECTED_KEY_HEADER="$(head -n 1 '{{ ceph_proxmox_portal_key_file }}')"
+        EXPECTED_KEY_HASH="$(sha256sum '{{ ceph_proxmox_portal_key_file }}' | awk '{print $1}')"
+        EXPECTED_CRT_HASH="$(sha256sum '{{ ceph_proxmox_portal_cert_file }}' | awk '{print $1}')"
         UPDATED=""
         for node in $NODES; do
-          CURRENT=$(ceph config-key get "mgr/dashboard/${node}/key" 2>/dev/null | head -n 1 || true)
-          if [[ "$CURRENT" != "$EXPECTED_KEY_HEADER" ]]; then
+          CURRENT_KEY_HASH="$(ceph config-key get "mgr/dashboard/${node}/key" 2>/dev/null | sha256sum | awk '{print $1}' || true)"
+          CURRENT_CRT_HASH="$(ceph config-key get "mgr/dashboard/${node}/crt" 2>/dev/null | sha256sum | awk '{print $1}' || true)"
+          if [[ "$CURRENT_KEY_HASH" != "$EXPECTED_KEY_HASH" || "$CURRENT_CRT_HASH" != "$EXPECTED_CRT_HASH" ]]; then
             ceph config-key set "mgr/dashboard/${node}/key" -i "{{ ceph_proxmox_portal_key_file }}"
             ceph config-key set "mgr/dashboard/${node}/crt" -i "{{ ceph_proxmox_portal_cert_file }}"
             UPDATED="${UPDATED} ${node}"
@@ -194,6 +196,7 @@
       ansible.builtin.systemd:
         name: "ceph-mgr@{{ ceph_active_mgr_name.stdout | trim }}"
         state: restarted
+      delegate_to: "{{ ceph_active_mgr_name.stdout | trim }}"
       when:
         - ceph_dashboard_reuse_proxmox_portal_cert | bool
         - ceph_per_node_cert_sync.changed
