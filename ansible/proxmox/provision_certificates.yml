@@ -347,7 +347,8 @@
         fail_msg: >-
           No vault host is defined in inventory group '{{ proxmox_vault_group }}',
           but proxmox_vault_skip_verify=false requires delegated Vault CA fetch.
-      when: not (proxmox_vault_skip_verify | bool)
+      when:
+        - not (proxmox_vault_skip_verify | bool)
 
     - name: Check delegated Vault root token file exists for delegated CA fetch
       ansible.builtin.stat:
@@ -355,7 +356,8 @@
       delegate_to: "{{ groups[proxmox_vault_group][0] }}"
       become: true
       register: proxmox_vault_delegate_token_stat_for_ca_fetch
-      when: not (proxmox_vault_skip_verify | bool)
+      when:
+        - not (proxmox_vault_skip_verify | bool)
       run_once: true
 
     - name: Fail when delegated Vault root token file is missing for delegated CA fetch
@@ -381,7 +383,8 @@
       become: true
       register: proxmox_vault_ca_cert_for_nodes
       changed_when: false
-      when: not (proxmox_vault_skip_verify | bool)
+      when:
+        - not (proxmox_vault_skip_verify | bool)
       run_once: true
 
   tasks:
@@ -511,11 +514,24 @@
     - name: Install Vault CA certificate for vault-agent trust
       ansible.builtin.copy:
         dest: "{{ proxmox_cert_vault_ca_file }}"
-        content: "{{ proxmox_vault_ca_cert_for_nodes.stdout | trim }}\n"
+        content: "{{ hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes.stdout | trim }}\n"
         owner: root
         group: root
         mode: "0644"
-      when: not (proxmox_vault_skip_verify | bool)
+      when:
+        - not (proxmox_vault_skip_verify | bool)
+        - hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes is defined
+
+    - name: Fail if Vault CA is required but unavailable
+      ansible.builtin.fail:
+        msg: >-
+          proxmox_vault_skip_verify is false, but Vault CA content is unavailable,
+          so {{ proxmox_cert_vault_ca_file }} cannot be created. Ensure Vault CA
+          retrieval is enabled for nodes or set proxmox_vault_skip_verify=true
+          only for test scenarios.
+      when:
+        - not (proxmox_vault_skip_verify | bool)
+        - hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes is not defined
 
     - name: Write Proxmox certificate apply script
       ansible.builtin.copy:

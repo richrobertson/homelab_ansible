@@ -58,6 +58,47 @@ To avoid breaking existing workflows, root playbook names are preserved as wrapp
 
 This means old commands still work while new canonical paths are available.
 
+## Security Best Practices
+
+⚠️ **Before using this repository in production, please review the [SECURITY.md](SECURITY.md) guide.** 
+
+### Key Security Points
+
+1. **Never commit secrets to git**
+   - Use [HashiCorp Vault](https://www.vaultproject.io/) for all secrets management
+   - All credentials (passwords, API keys, tokens) must be stored in Vault
+   - Use `vault_*` variables in playbooks to reference secrets securely
+
+2. **Inventory files are templates**
+   - `inventory/*.example` files provide templates for your infrastructure
+   - Copy and customize them locally, and ensure concrete environment inventories are excluded from version control in your workflow
+   - Never commit actual hostnames, IPs, or credentials
+
+3. **SSH Key Authentication**
+   - Use `scripts/enable_ssh_key_access.sh` to set up passwordless SSH
+   - Ensure SSH keys are installed on all target hosts
+   - Disable password-based SSH authentication in production
+
+4. **Vault Agent for Certificate Management**
+   - Proxmox certificate provisioning uses Vault Agent
+   - Certificates are rotated automatically and securely
+   - No private keys are stored in git or playbooks
+
+5. **Pre-commit Secret Detection**
+   - Install and use pre-commit hooks to prevent accidental secret commits:
+     ```bash
+     pip install pre-commit detect-secrets
+     pre-commit install
+     ```
+
+6. **Regular Security Audits**
+   - Review git history for leaked secrets: `git log --all -G "password|secret|token"`
+   - Scan playbooks with Semgrep: `semgrep --config p/ansible --config p/security-audit`
+   - Update dependencies regularly for security patches
+
+For detailed security practices, threat models, and incident response, see [SECURITY.md](SECURITY.md).
+
+
 ## Getting started
 
 ### 1) Activate the local virtual environment

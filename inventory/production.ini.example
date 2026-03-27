@@ -1,0 +1,40 @@
+# Production Inventory Example
+# Copy this file to environments/production.ini and customize for your environment
+#
+# Replace example hostnames/IPs with your actual infrastructure details
+# Add appropriate host_vars and group_vars as needed
+#
+# WARNING: Never commit actual credentials or sensitive details!
+# Use Vault for secret management instead.
+
+[dbservers]
+postgresql01.example.com
+postgresql02.example.com
+
+[vault]
+vault01.example.com
+vault02.example.com
+
+[powerdns]
+dns01.example.com
+dns02.example.com
+
+[powerdns-recurse]
+resolver01.example.com
+
+[proxmox_nodes]
+pve01.example.com
+pve02.example.com
+pve03.example.com
+
+[all:vars]
+# Connection settings
+ansible_user=admin
+ansible_python_interpreter=/usr/bin/python3
+
+# Vault configuration (update with your Vault server details)
+vault_addr=https://vault.example.com:8200
+vault_skip_verify=false
+
+# Ceph cluster (if applicable)
+ceph_cluster_name=ceph

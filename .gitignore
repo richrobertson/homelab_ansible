@@ -1,7 +1,74 @@
+# Python virtual environment
 pyvenv.cfg
-lib
-bin
-include
+lib/
+bin/
+include/
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE and editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 .DS_Store
 inventory/certs/proxmox-vault-ca.pem
+
+# Vault / Secrets
+vault_token
+.vault-token
+.vault-pass
+vault-unseal-key-*.txt
+
+# TLS/Certificates and Keys
+*.pem
+*.key
+*.crt
+*.cert
+*.pfx
+*.p12
+*.jks
+/inventory/certs/*.pem
+/inventory/certs/*.key
+!inventory/certs/README.md
+!roles/*/files/*.pem.example
+
+# Ansible artifacts
+*.retry
+.ansible/
+inventory/dynamic/
+
+# Configuration with local overrides
+host_vars/*.local.yml
+group_vars/*.local.yml
+*_local.yml
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+/tmp/
+
+# Environment files (may contain secrets)
+.env
+.env.local
+.env.*.local
+env.sh
+
+# Local Ansible inventory overrides
+inventory/local/
+inventory/local.ini
+inventory/environments/*.ini
+inventory/proxmox.yml
+inventory/production.ini
+inventory/staging.ini
+!inventory/*.example
+
+# Proxy/network configs with auth
+*proxy*.conf
+*auth*.conf
 

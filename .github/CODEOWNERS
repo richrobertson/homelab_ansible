@@ -1,0 +1,14 @@
+# Default owner for all files
+* @richrobertson
+
+# Security and governance
+SECURITY.md @richrobertson
+LICENSE @richrobertson
+.github/workflows/ @richrobertson
+
+# Inventory and infrastructure automation
+inventory/ @richrobertson
+playbooks/ @richrobertson
+ansible/ @richrobertson
+roles/ @richrobertson
+scripts/ @richrobertson

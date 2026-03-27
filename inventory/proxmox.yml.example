@@ -1,0 +1,25 @@
+# Proxmox Inventory Plugin Configuration Example
+# Copy this file to proxmox.yml (in this directory) and update with your Proxmox credentials
+#
+# This uses the community.proxmox.proxmox inventory plugin for dynamic discovery
+# See: https://docs.ansible.com/ansible/latest/collections/community/proxmox/proxmox_inventory.html
+
+# plugin: community.proxmox.proxmox
+# want_proxmox_nodes_ansible_host: false
+# validate_certs: true
+# compose:
+#   ansible_host: (proxmox_ipconfig0 | default({})).ip | default((proxmox_net0 | default({})).ip) | ipaddr('address')
+
+# Credentials should be provided via environment variables or Vault:
+# PROXMOX_HOST=proxmox.example.com
+# PROXMOX_USER=automation@pam
+# PROXMOX_TOKEN_ID=ansible-token
+# PROXMOX_TOKEN_SECRET=(use Vault!)
+
+# Or use Vault to retrieve credentials at runtime:
+# See: https://docs.ansible.com/ansible/latest/plugins/inventory.html#using-vault-with-inventory
+plugin: community.proxmox.proxmox
+want_proxmox_nodes_ansible_host: false
+validate_certs: true
+compose:
+  ansible_host: (proxmox_ipconfig0 | default({})).ip | default((proxmox_net0 | default({})).ip) | ipaddr('address')
