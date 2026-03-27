@@ -24,6 +24,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -37,14 +39,35 @@ jobs:
 
       - name: Run Semgrep
         run: |
-          semgrep scan \
-            --config p/security-audit \
-            --config p/secrets \
-            --exclude ceph-ansible \
-            --exclude roles/pdns-ansible \
-            --sarif \
-            --output semgrep.sarif \
+          set -euo pipefail
+
+          SEMGREP_ARGS=(
+            --config p/security-audit
+            --config p/secrets
+            --exclude ceph-ansible
+            --exclude roles/pdns-ansible
+            --sarif
+            --output semgrep.sarif
             --error
+          )
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            mapfile -t changed_files < <(
+              git diff --name-only --diff-filter=ACMR \
+                "${{ github.event.pull_request.base.sha }}" \
+                "${{ github.sha }}"
+            )
+
+            if (( ${#changed_files[@]} == 0 )); then
+              echo "No changed files detected for PR; skipping Semgrep scan."
+              printf '%s\n' '{"version":"2.1.0","runs":[]}' > semgrep.sarif
+              exit 0
+            fi
+
+            semgrep scan "${SEMGREP_ARGS[@]}" "${changed_files[@]}"
+          else
+            semgrep scan "${SEMGREP_ARGS[@]}" .
+          fi
 
       - name: Upload SARIF to GitHub Security
         if: always()
