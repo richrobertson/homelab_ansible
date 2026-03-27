@@ -42,6 +42,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          python -m pip install --upgrade "setuptools<81"
+
           SEMGREP_ARGS=(
             --config p/security-audit
             --config p/secrets
@@ -65,9 +67,9 @@ jobs:
               exit 0
             fi
 
-            semgrep scan "${SEMGREP_ARGS[@]}" "${changed_files[@]}"
+            python -m semgrep scan "${SEMGREP_ARGS[@]}" "${changed_files[@]}"
           else
-            semgrep scan "${SEMGREP_ARGS[@]}" .
+            python -m semgrep scan "${SEMGREP_ARGS[@]}" .
           fi
 
       - name: Upload SARIF to GitHub Security
