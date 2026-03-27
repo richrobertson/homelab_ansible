@@ -6,16 +6,16 @@ This directory contains Ansible inventory configurations for different environme
 
 1. **Copy the example files** for your environment:
    ```bash
-   mkdir -p environments
+   mkdir -p inventory/environments
 
    # For production
-   cp production.ini.example environments/production.ini
+   cp inventory/production.ini.example inventory/environments/production.ini
    
    # For staging
-   cp staging.ini.example environments/staging.ini
+   cp inventory/staging.ini.example inventory/environments/staging.ini
    
    # For Proxmox dynamic inventory
-   cp proxmox.yml.example proxmox.yml
+   cp inventory/proxmox.yml.example inventory/proxmox.yml
    ```
 
 2. **Update with your infrastructure details**:

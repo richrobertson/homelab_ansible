@@ -358,6 +358,7 @@
       register: proxmox_vault_delegate_token_stat_for_ca_fetch
       when:
         - not (proxmox_vault_skip_verify | bool)
+      run_once: true
 
     - name: Fail when delegated Vault root token file is missing for delegated CA fetch
       ansible.builtin.fail:
@@ -367,6 +368,7 @@
       when:
         - not (proxmox_vault_skip_verify | bool)
         - not (proxmox_vault_delegate_token_stat_for_ca_fetch.stat.exists | default(false))
+      run_once: true
 
     - name: Read Vault CA certificate for Proxmox nodes
       ansible.builtin.shell: |
@@ -383,6 +385,7 @@
       changed_when: false
       when:
         - not (proxmox_vault_skip_verify | bool)
+      run_once: true
 
   tasks:
     - name: Detect current Proxmox portal private key type
@@ -511,13 +514,13 @@
     - name: Install Vault CA certificate for vault-agent trust
       ansible.builtin.copy:
         dest: "{{ proxmox_cert_vault_ca_file }}"
-        content: "{{ proxmox_vault_ca_cert_for_nodes.stdout | trim }}\n"
+        content: "{{ hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes.stdout | trim }}\n"
         owner: root
         group: root
         mode: "0644"
       when:
         - not (proxmox_vault_skip_verify | bool)
-        - proxmox_vault_ca_cert_for_nodes is defined
+        - hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes is defined
 
     - name: Fail if Vault CA is required but unavailable
       ansible.builtin.fail:
@@ -528,7 +531,7 @@
           only for test scenarios.
       when:
         - not (proxmox_vault_skip_verify | bool)
-        - proxmox_vault_ca_cert_for_nodes is not defined
+        - hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes is not defined
 
     - name: Write Proxmox certificate apply script
       ansible.builtin.copy:
