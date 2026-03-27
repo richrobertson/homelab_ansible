@@ -201,11 +201,13 @@
       when: ceph_dashboard_reuse_proxmox_portal_cert | bool
       run_once: true
 
-    - name: Restart active ceph-mgr after per-node cert sync
-      ansible.builtin.systemd:
-        name: "ceph-mgr@{{ ceph_active_mgr_name.stdout | trim }}"
-        state: restarted
-      delegate_to: "{{ ceph_active_mgr_name.stdout | trim }}"
+    - name: Fail active ceph-mgr to reload dashboard cert on new active
+      ansible.builtin.command:
+        argv:
+          - ceph
+          - mgr
+          - fail
+          - "{{ ceph_active_mgr_name.stdout | trim }}"
       when:
         - ceph_dashboard_reuse_proxmox_portal_cert | bool
         - ceph_per_node_cert_sync.changed

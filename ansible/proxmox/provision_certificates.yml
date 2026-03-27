@@ -188,6 +188,8 @@
             '127.0.0.1')
       }}:8200
     proxmox_vault_skip_verify: false
+    proxmox_vault_delegate_addr: "{{ proxmox_vault_addr }}"
+    proxmox_vault_delegate_skip_verify: "{{ proxmox_vault_skip_verify }}"
     proxmox_vault_root_token_file: /root/.vault-token
     proxmox_pki_mount: pki_int
     proxmox_pki_issuer_id: ""
@@ -267,8 +269,8 @@
     - name: Generate role_id for Proxmox cert AppRole (vault host)
       ansible.builtin.shell: |
         set -euo pipefail
-        export VAULT_ADDR="https://127.0.0.1:8200"
-        export VAULT_SKIP_VERIFY=true
+        export VAULT_ADDR="{{ proxmox_vault_delegate_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_delegate_skip_verify | string | lower }}
         export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
         vault read -field=role_id auth/approle/role/{{ proxmox_pki_approle_name }}/role-id
       args:
@@ -296,8 +298,8 @@
     - name: Generate secret_id for Proxmox cert AppRole (vault host)
       ansible.builtin.shell: |
         set -euo pipefail
-        export VAULT_ADDR="https://127.0.0.1:8200"
-        export VAULT_SKIP_VERIFY=true
+        export VAULT_ADDR="{{ proxmox_vault_delegate_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_delegate_skip_verify | string | lower }}
         export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
         vault write -field=secret_id -f auth/approle/role/{{ proxmox_pki_approle_name }}/secret-id
       args:
@@ -328,8 +330,8 @@
     - name: Read Vault CA certificate for Proxmox nodes
       ansible.builtin.shell: |
         set -euo pipefail
-        export VAULT_ADDR="https://127.0.0.1:8200"
-        export VAULT_SKIP_VERIFY=true
+        export VAULT_ADDR="{{ proxmox_vault_delegate_addr }}"
+        export VAULT_SKIP_VERIFY={{ proxmox_vault_delegate_skip_verify | string | lower }}
         export VAULT_TOKEN="$(cat {{ proxmox_vault_root_token_file }})"
         vault read -field=certificate {{ proxmox_pki_mount }}/cert/ca
       args:
