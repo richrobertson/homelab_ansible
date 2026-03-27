@@ -202,6 +202,16 @@
       run_once: true
 
     - name: Fail active ceph-mgr to reload dashboard cert on new active
+      ansible.builtin.assert:
+        that:
+          - ceph_active_mgr_name.stdout | trim | length > 0
+        fail_msg: "Cannot fail ceph-mgr because active mgr name is empty from ceph mgr stat."
+      when:
+        - ceph_dashboard_reuse_proxmox_portal_cert | bool
+        - ceph_per_node_cert_sync.changed
+      run_once: true
+
+    - name: Fail active ceph-mgr to reload dashboard cert on new active
       ansible.builtin.command:
         argv:
           - ceph
