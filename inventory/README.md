@@ -6,6 +6,8 @@ This directory contains Ansible inventory configurations for different environme
 
 1. **Copy the example files** for your environment:
    ```bash
+   mkdir -p environments
+
    # For production
    cp production.ini.example environments/production.ini
    

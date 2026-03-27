@@ -4,11 +4,11 @@
 # Security and governance
 SECURITY.md @richrobertson
 LICENSE @richrobertson
-.github/workflows/* @richrobertson
+.github/workflows/ @richrobertson
 
 # Inventory and infrastructure automation
-inventory/* @richrobertson
-playbooks/* @richrobertson
-ansible/* @richrobertson
-roles/* @richrobertson
-scripts/* @richrobertson
+inventory/ @richrobertson
+playbooks/ @richrobertson
+ansible/ @richrobertson
+roles/ @richrobertson
+scripts/ @richrobertson

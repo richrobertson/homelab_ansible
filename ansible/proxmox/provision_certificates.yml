@@ -358,7 +358,6 @@
       register: proxmox_vault_delegate_token_stat_for_ca_fetch
       when:
         - not (proxmox_vault_skip_verify | bool)
-      run_once: true
 
     - name: Fail when delegated Vault root token file is missing for delegated CA fetch
       ansible.builtin.fail:
@@ -368,7 +367,6 @@
       when:
         - not (proxmox_vault_skip_verify | bool)
         - not (proxmox_vault_delegate_token_stat_for_ca_fetch.stat.exists | default(false))
-      run_once: true
 
     - name: Read Vault CA certificate for Proxmox nodes
       ansible.builtin.shell: |
@@ -385,7 +383,6 @@
       changed_when: false
       when:
         - not (proxmox_vault_skip_verify | bool)
-      run_once: true
 
   tasks:
     - name: Detect current Proxmox portal private key type

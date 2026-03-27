@@ -82,9 +82,9 @@ When using this repo in production:
 ### 7. SSL/TLS Certificates
 
 - Don't commit private keys to git
-- Public certificates (`.crt`, `.cer`) are safe to commit if they don't reveal infrastructure details
+- Public certificates (`.crt`, `.cer`) are generally shareable, but this repository intentionally ignores certificate files (`*.crt`, `*.cert`) to avoid accidental disclosure
 - CAs should be tracked separately via Vault or certificate management systems
-- Use `inventory/certs/` only for public CAs (add to `.gitignore` for private keys)
+- Use `inventory/certs/` only for local deployment assets and keep certificate material out of version control
 
 ### 8. Third-party Dependencies
 
