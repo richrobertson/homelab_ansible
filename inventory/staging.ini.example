@@ -1,0 +1,37 @@
+# Staging Inventory Example
+# Copy this file to ../staging.ini and customize for your environment
+#
+# Replace example hostnames/IPs with your actual staging infrastructure
+# This inventory is typically used for testing and non-production deployments
+#
+# WARNING: Never commit actual credentials or sensitive details!
+# Use test/placeholder values only in version control.
+
+[dbservers]
+postgresql01.staging.example.com
+
+[vault]
+# Staging Vault hosts (if using Vault for staging environment)
+# vault01.staging.example.com
+
+[powerdns]
+192.168.100.201
+
+[powerdns-recurse]
+192.168.100.202
+
+[proxmox_nodes]
+pve01.staging.example.com
+pve02.staging.example.com
+
+[all:vars]
+# Connection settings
+ansible_user=admin
+ansible_python_interpreter=/usr/bin/python3
+
+# Vault configuration (staging)
+vault_addr=https://vault.staging.example.com:8200
+vault_skip_verify=true  # Only for testing! Disable in production
+
+# Set to true to skip Vault operations in staging
+vault_skip_verify=false
