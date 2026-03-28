@@ -1,0 +1,52 @@
+name: Deploy Cloudflare
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deployment environment
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+jobs:
+  deploy-api-worker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/api/worker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy API Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          workingDirectory: apps/api/worker
+          command: deploy --env ${{ github.event.inputs.environment }}
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+  deploy-web-worker-assets:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy Web Worker Assets
+        uses: cloudflare/wrangler-action@v3
+        with:
+          workingDirectory: apps/web
+          command: deploy --env ${{ github.event.inputs.environment }}
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
