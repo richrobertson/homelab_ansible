@@ -28,9 +28,12 @@ jobs:
             dirs+=("$(dirname "$file")")
           done < <(
             find . -type f -name '*.py' \
+              -not -path './.git/*' \
               -not -path './lib/*' \
               -not -path './include/*' \
               -not -path './bin/*' \
+              -not -path './.venv/*' \
+              -not -path './venv/*' \
               -not -path './ceph-ansible/*' \
               -not -path './roles/pdns-ansible/*' \
               -print0
