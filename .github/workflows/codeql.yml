@@ -2,28 +2,30 @@ name: CodeQL
 
 on:
   push:
-    branches: [ main, reconcile/*, chore/* ]
+    branches:
+      - main
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
   schedule:
-    - cron: '0 9 * * 1'  # Weekly Monday at 9 AM UTC
+    - cron: "18 4 * * 1"
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
 
 jobs:
   analyze:
-    name: Analyze code
+    name: Analyze
     runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'actions' ]
-
+        language:
+          - actions
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Initialize CodeQL
@@ -31,6 +33,9 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
 
       - name: Perform CodeQL Analysis
         if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
