@@ -1,0 +1,48 @@
+===== rook-ceph.cephfs.csi.ceph.com-nodeplugin-cpf9l (k8s-prod-worker-0) =====
+MON 192.168.10.3:3300 fail
+MON 192.168.10.3:6789 fail
+MON 192.168.10.4:3300 ok
+MON 192.168.10.4:6789 ok
+MON 192.168.10.5:3300 ok
+MON 192.168.10.5:6789 ok
+
+===== rook-ceph.cephfs.csi.ceph.com-nodeplugin-jlr8h (k8s-prod-worker-1) =====
+MON 192.168.10.3:3300 ok
+MON 192.168.10.3:6789 ok
+MON 192.168.10.4:3300 fail
+MON 192.168.10.4:6789 fail
+MON 192.168.10.5:3300 ok
+MON 192.168.10.5:6789 ok
+
+===== rook-ceph.cephfs.csi.ceph.com-nodeplugin-kbwhp (k8s-prod-worker-2) =====
+MON 192.168.10.3:3300 ok
+MON 192.168.10.3:6789 ok
+MON 192.168.10.4:3300 ok
+MON 192.168.10.4:6789 ok
+MON 192.168.10.5:3300 fail
+MON 192.168.10.5:6789 fail
+
+===== rook-ceph.rbd.csi.ceph.com-nodeplugin-thlpn (k8s-prod-worker-0) =====
+MON 192.168.10.3:3300 fail
+MON 192.168.10.3:6789 fail
+MON 192.168.10.4:3300 ok
+MON 192.168.10.4:6789 ok
+MON 192.168.10.5:3300 ok
+MON 192.168.10.5:6789 ok
+
+===== rook-ceph.rbd.csi.ceph.com-nodeplugin-x445z (k8s-prod-worker-1) =====
+MON 192.168.10.3:3300 ok
+MON 192.168.10.3:6789 ok
+MON 192.168.10.4:3300 fail
+MON 192.168.10.4:6789 fail
+MON 192.168.10.5:3300 ok
+MON 192.168.10.5:6789 ok
+
+===== rook-ceph.rbd.csi.ceph.com-nodeplugin-xg8gx (k8s-prod-worker-2) =====
+MON 192.168.10.3:3300 ok
+MON 192.168.10.3:6789 ok
+MON 192.168.10.4:3300 ok
+MON 192.168.10.4:6789 ok
+MON 192.168.10.5:3300 fail
+MON 192.168.10.5:6789 fail
+

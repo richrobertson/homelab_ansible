@@ -1,0 +1,23 @@
+timestamp=2026-03-30T16:44:38-07:00
+context=after tcp_l3mdev_accept=1 on pve3,pve4,pve5
+[k8s-prod-worker-0] pod=rook-ceph.rbd.csi.ceph.com-nodeplugin-thlpn
+  192.168.10.3:3300 OK
+  192.168.10.3:6789 OK
+  192.168.10.4:3300 OK
+  192.168.10.4:6789 OK
+  192.168.10.5:3300 OK
+  192.168.10.5:6789 OK
+[k8s-prod-worker-1] pod=rook-ceph.rbd.csi.ceph.com-nodeplugin-x445z
+  192.168.10.3:3300 OK
+  192.168.10.3:6789 OK
+  192.168.10.4:3300 OK
+  192.168.10.4:6789 OK
+  192.168.10.5:3300 OK
+  192.168.10.5:6789 OK
+[k8s-prod-worker-2] pod=rook-ceph.rbd.csi.ceph.com-nodeplugin-xg8gx
+  192.168.10.3:3300 OK
+  192.168.10.3:6789 OK
+  192.168.10.4:3300 OK
+  192.168.10.4:6789 OK
+  192.168.10.5:3300 OK
+  192.168.10.5:6789 OK

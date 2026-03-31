@@ -1,0 +1,15 @@
+timestamp=2026-03-30T16:24:02 local
+artifact=mon-network-snapshot-pve4-20260330-162402.log
+status=partial_failed
+
+context:
+- attempted direct SSH snapshot capture from operator host to pve4 (192.168.11.4)
+- command set intended: hostname/date, interface summary, route checks, and worker reachability probes
+
+result:
+- capture incomplete due to intermittent pve4 SSH reachability during this window
+- no stable session was available long enough to record a full snapshot
+
+follow_up:
+- use pve3 jump-host collection when direct pve4 access is unstable
+- see pve4-snapshot-via-pve3-20260330-163932.log for a successful fallback capture

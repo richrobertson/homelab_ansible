@@ -1,0 +1,163 @@
+===== 192.168.11.3 =====
+pve3
+
+IP -BR ADDR
+lo               UNKNOWN        127.0.0.1/8 10.0.0.83/32 fc00::83/128 ::1/128 
+enp88s0          UP             fe80::5a47:caff:fe7e:d75e/64 
+enp91s0          UP             10.15.15.3/24 fe80::5a47:caff:fe7e:d75f/64 
+enp3s0f0np0      DOWN           
+enp3s0f1np1      DOWN           
+enp1s0f0np0      UP             
+enp1s0f1np1      UP             fe80::6eb3:11ff:fe79:c413/64 
+wlp92s0          DOWN           
+enp88s0.11@enp88s0 UP             192.168.11.3/24 fe80::5a47:caff:fe7e:d75e/64 
+enp1s0f1np1.10@enp1s0f1np1 UP             192.168.10.3/24 fe80::6eb3:11ff:fe79:c413/64 
+enp1s0f0np0.88@enp1s0f0np0 UP             
+vmbr0            UP             192.168.88.3/24 fe80::6eb3:11ff:fe79:c412/64 
+vmbr1            UP             192.168.1.241/24 fe80::6eb3:11ff:fe79:c412/64 
+vxlan_prodctr    UNKNOWN        
+prodctr          UP             10.30.0.1/24 10.30.1.1/24 10.30.2.1/24 fe80::be24:11ff:fedd:c72e/64 
+vrf_prodl3       UP             
+vxlan_proddata   UNKNOWN        
+proddata         UP             10.31.0.1/24 10.31.1.1/24 10.31.2.1/24 fe80::be24:11ff:fedd:c72e/64 
+vrfvx_prodl3     UNKNOWN        
+vrfbr_prodl3     UP             fe80::2c6b:d0ff:fe96:caa5/64 
+vxlan_stgctr     UNKNOWN        
+stgctr           UP             10.20.0.1/24 10.20.1.1/24 10.20.2.1/24 fe80::be24:11ff:fe22:8024/64 
+vrf_stgl3        UP             
+vxlan_stgdata    UNKNOWN        
+stgdata          UP             10.21.0.1/24 10.21.1.1/24 10.21.2.1/24 fe80::be24:11ff:fe22:8024/64 
+vrfvx_stgl3      UNKNOWN        
+vrfbr_stgl3      UP             fe80::745a:9fff:fec9:9390/64 
+veth113i0@if2    UP             
+tap119i0         UNKNOWN        
+tap204i0         UNKNOWN        
+tap212i0         UNKNOWN        
+
+VRF PRODL3 ROUTES
+blackhole 10.20.0.0/24 proto static metric 20 
+blackhole 10.20.1.0/24 proto static metric 20 
+blackhole 10.20.2.0/24 proto static metric 20 
+blackhole 10.21.0.0/24 proto static metric 20 
+blackhole 10.21.1.0/24 proto static metric 20 
+blackhole 10.21.2.0/24 proto static metric 20 
+10.30.0.0/24 dev prodctr proto kernel scope link src 10.30.0.1 
+10.30.1.0/24 dev prodctr proto kernel scope link src 10.30.1.1 
+10.30.2.0/24 dev prodctr proto kernel scope link src 10.30.2.1 
+10.31.0.0/24 dev proddata proto kernel scope link src 10.31.0.1 
+10.31.1.0/24 dev proddata proto kernel scope link src 10.31.1.1 
+10.31.2.0/24 dev proddata proto kernel scope link src 10.31.2.1 
+
+RULES
+1000:	from all lookup [l3mdev-table]
+32765:	from all lookup local
+32766:	from all lookup main
+32767:	from all lookup default
+
+INTERFACES FILE (prod bits)
+15:iface enp3s0f0np0 inet manual
+17:iface enp3s0f1np1 inet manual
+22:auto enp88s0.11
+23:iface enp88s0.11 inet static
+30:auto enp1s0f1np1.10
+31:iface enp1s0f1np1.10 inet static
+34:auto enp1s0f0np0
+35:iface enp1s0f0np0 inet manual
+37:auto enp1s0f1np1
+38:iface enp1s0f1np1 inet manual
+40:iface enp88s0 inet manual
+44:auto enp91s0
+45:iface enp91s0 inet manual
+49:auto vmbr0
+50:iface vmbr0 inet static
+53:	bridge-ports enp1s0f0np0.88
+57:auto vmbr1
+58:iface vmbr1 inet static
+60:	bridge-ports enp1s0f0np0
+
+===== 192.168.11.4 =====
+ssh failed
+
+===== 192.168.11.5 =====
+pve5
+
+IP -BR ADDR
+lo               UNKNOWN        127.0.0.1/8 10.0.0.85/32 fc00::85/128 ::1/128 
+enp88s0          UP             fe80::5a47:caff:fe7e:df3e/64 
+nic0             UP             fe80::5a47:caff:fe7e:df3f/64 
+enp3s0f0np0      DOWN           
+enp3s0f1np1      DOWN           
+enp1s0f0np0      UP             
+enp1s0f1np1      UP             fe80::6eb3:11ff:fe79:c47f/64 
+wlp92s0          DOWN           
+enp88s0.11@enp88s0 UP             192.168.11.5/24 fe80::5a47:caff:fe7e:df3e/64 
+enp1s0f1np1.10@enp1s0f1np1 UP             192.168.10.5/24 fe80::6eb3:11ff:fe79:c47f/64 
+enp1s0f0np0.88@enp1s0f0np0 UP             
+vmbr0            UP             192.168.88.5/24 fe80::6eb3:11ff:fe79:c47e/64 
+vmbr1            UP             192.168.1.243/24 fe80::6eb3:11ff:fe79:c47e/64 
+vxlan_prodctr    UNKNOWN        
+prodctr          UP             10.30.0.1/24 10.30.1.1/24 10.30.2.1/24 fe80::be24:11ff:fedd:c72e/64 
+vrf_prodl3       UP             
+vxlan_proddata   UNKNOWN        
+proddata         UP             10.31.0.1/24 10.31.1.1/24 10.31.2.1/24 fe80::be24:11ff:fedd:c72e/64 
+vrfvx_prodl3     UNKNOWN        
+vrfbr_prodl3     UP             fe80::8045:10ff:fef3:e5cf/64 
+vxlan_stgctr     UNKNOWN        
+stgctr           UP             10.20.0.1/24 10.20.1.1/24 10.20.2.1/24 fe80::be24:11ff:fe22:8024/64 
+vrf_stgl3        UP             
+vxlan_stgdata    UNKNOWN        
+stgdata          UP             10.21.0.1/24 10.21.1.1/24 10.21.2.1/24 fe80::be24:11ff:fe22:8024/64 
+vrfvx_stgl3      UNKNOWN        
+vrfbr_stgl3      UP             fe80::5c3c:63ff:fe52:6988/64 
+tap202i0         UNKNOWN        
+tap208i0         UNKNOWN        
+tap200i0         UNKNOWN        
+tap214i0         UNKNOWN        
+tap210i0         UNKNOWN        
+tap112i0         UNKNOWN        
+fwbr112i0        UP             
+fwpr112p0@fwln112i0 UP             
+fwln112i0@fwpr112p0 UP             
+
+VRF PRODL3 ROUTES
+blackhole 10.20.0.0/24 proto static metric 20 
+blackhole 10.20.1.0/24 proto static metric 20 
+blackhole 10.20.2.0/24 proto static metric 20 
+blackhole 10.21.0.0/24 proto static metric 20 
+blackhole 10.21.1.0/24 proto static metric 20 
+blackhole 10.21.2.0/24 proto static metric 20 
+10.30.0.0/24 dev prodctr proto kernel scope link src 10.30.0.1 
+10.30.1.0/24 dev prodctr proto kernel scope link src 10.30.1.1 
+10.30.2.0/24 dev prodctr proto kernel scope link src 10.30.2.1 
+10.31.0.0/24 dev proddata proto kernel scope link src 10.31.0.1 
+10.31.1.0/24 dev proddata proto kernel scope link src 10.31.1.1 
+10.31.2.0/24 dev proddata proto kernel scope link src 10.31.2.1 
+
+RULES
+1000:	from all lookup [l3mdev-table]
+32765:	from all lookup local
+32766:	from all lookup main
+32767:	from all lookup default
+
+INTERFACES FILE (prod bits)
+15:auto enp1s0f1np1
+16:iface enp1s0f1np1 inet manual
+18:iface enp1s0f1np1 inet manual
+20:auto enp1s0f0np0
+21:iface enp1s0f0np0 inet manual
+23:iface enp1s0f0np0 inet manual
+25:auto enp88s0.11
+26:iface enp88s0.11 inet static
+29:auto enp1s0f1np1.10
+30:iface enp1s0f1np1.10 inet static
+33:iface enp90s0 inet manual
+35:iface enp88s0 inet manual
+42:iface enp3s0f0np0 inet manual
+44:iface enp3s0f1np1 inet manual
+46:auto vmbr0
+47:iface vmbr0 inet static
+50:	bridge-ports enp1s0f0np0.88
+54:auto vmbr1
+55:iface vmbr1 inet static
+57:	bridge-ports enp1s0f0np0
+
