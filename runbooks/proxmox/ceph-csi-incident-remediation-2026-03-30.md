@@ -273,7 +273,7 @@ Success criteria:
   - `k8s-pods-20260330-160913.log`
   - `rbd-nodeplugin-20260330-160913.log`
   - `cephfs-nodeplugin-20260330-160913.log`
-  - Note: `rbd-ctrlplugin-20260330-160913.log` was excluded from repository artifacts due secret-scan policy matches.
+  - Note: `rbd-ctrlplugin-20260330-160913.log` was excluded from repository artifacts due to secret-scan policy matches.
 
 ### Phase 2 actions and result
 - Applied pve4 systemd override for `ceph-crash`:
