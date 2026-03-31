@@ -1,0 +1,122 @@
+NAMESPACE                       NAME                                                              READY   STATUS    RESTARTS        AGE     IP             NODE                NOMINATED NODE   READINESS GATES
+ceph-csi                        ceph-csi-cephfs-nodeplugin-bgtvr                                  3/3     Running   0               2d2h    10.31.2.2      k8s-prod-worker-2   <none>           <none>
+ceph-csi                        ceph-csi-cephfs-nodeplugin-g2cwg                                  3/3     Running   0               2d2h    10.31.0.2      k8s-prod-worker-0   <none>           <none>
+ceph-csi                        ceph-csi-cephfs-nodeplugin-g5cxc                                  3/3     Running   0               2d17h   10.31.1.2      k8s-prod-worker-1   <none>           <none>
+ceph-csi                        ceph-csi-cephfs-provisioner-9d8cd7966-4bb6c                       6/6     Running   0               2d2h    10.244.1.183   k8s-prod-worker-1   <none>           <none>
+ceph-csi                        ceph-csi-cephfs-provisioner-9d8cd7966-8g565                       6/6     Running   0               2d2h    10.244.0.171   k8s-prod-worker-0   <none>           <none>
+ceph-csi                        ceph-csi-cephfs-provisioner-9d8cd7966-qhtmt                       6/6     Running   0               2d2h    10.244.5.97    k8s-prod-worker-2   <none>           <none>
+cert-manager                    cert-manager-6454c565c5-fsd68                                     1/1     Running   0               2d17h   10.244.0.155   k8s-prod-worker-0   <none>           <none>
+cert-manager                    cert-manager-cainjector-7f45ffb9d5-vdnbj                          1/1     Running   0               2d17h   10.244.0.157   k8s-prod-worker-0   <none>           <none>
+cert-manager                    cert-manager-webhook-7944648944-wvbsm                             1/1     Running   0               2d17h   10.244.0.156   k8s-prod-worker-0   <none>           <none>
+cnpg-system                     cnpg-cloudnative-pg-5b778c6976-f9sbr                              1/1     Running   2 (5d5h ago)    5d7h    10.244.1.99    k8s-prod-worker-1   <none>           <none>
+default                         authelia-6d9f59f685-x58ts                                         1/1     Running   0               2d21h   10.244.1.150   k8s-prod-worker-1   <none>           <none>
+default                         cluster-authelia-ceph-1                                           1/1     Running   0               3d2h    10.244.0.124   k8s-prod-worker-0   <none>           <none>
+default                         cluster-immich-1                                                  1/1     Running   0               5d5h    10.244.5.32    k8s-prod-worker-2   <none>           <none>
+default                         inteldeviceplugins-controller-manager-7c4fbb66d8-wdm2s            1/1     Running   3 (5d5h ago)    5d7h    10.244.1.89    k8s-prod-worker-1   <none>           <none>
+default                         lidarr-59dbcd56dc-jsppj                                           2/2     Running   0               13h     10.244.5.102   k8s-prod-worker-2   <none>           <none>
+default                         mealie-75c5b4564f-z4tw5                                           1/1     Running   0               3d3h    10.244.0.106   k8s-prod-worker-0   <none>           <none>
+default                         mealie-cnpg-main-1                                                1/1     Running   0               11d     10.244.1.29    k8s-prod-worker-1   <none>           <none>
+default                         myrobertson-com-gateway-istio-6567568fd4-sklbf                    1/1     Running   0               5d7h    10.244.1.88    k8s-prod-worker-1   <none>           <none>
+default                         overseerr-7756c84955-przcc                                        1/1     Running   0               2d8h    10.244.5.80    k8s-prod-worker-2   <none>           <none>
+default                         prowlarr-659c4dc7dd-sr9n7                                         2/2     Running   0               14h     10.244.5.101   k8s-prod-worker-2   <none>           <none>
+default                         radarr-5764d4dc79-t458t                                           2/2     Running   0               19h     10.244.5.99    k8s-prod-worker-2   <none>           <none>
+default                         sonarr-5dfb66dcdc-bbpr2                                           2/2     Running   0               2d1h    10.244.5.98    k8s-prod-worker-2   <none>           <none>
+external-dns                    external-dns-7df7df94db-gp8pd                                     1/1     Running   8 (5d6h ago)    5d7h    10.244.1.92    k8s-prod-worker-1   <none>           <none>
+flux-system                     helm-controller-865dc55587-wrgfp                                  1/1     Running   1 (5d7h ago)    11d     10.244.5.252   k8s-prod-worker-2   <none>           <none>
+flux-system                     kustomize-controller-75d9cf857b-6tb6h                             1/1     Running   0               5d7h    10.244.1.94    k8s-prod-worker-1   <none>           <none>
+flux-system                     notification-controller-6555d9fdd8-bqxvt                          1/1     Running   1 (5d15h ago)   11d     10.244.5.237   k8s-prod-worker-2   <none>           <none>
+flux-system                     source-controller-76c945c6f5-qxtvw                                1/1     Running   2 (5d15h ago)   11d     10.244.5.238   k8s-prod-worker-2   <none>           <none>
+istio-system                    istio-cni-node-cxc25                                              1/1     Running   0               5d5h    10.244.3.30    k8s-prod-cp-0       <none>           <none>
+istio-system                    istio-cni-node-ncv4n                                              1/1     Running   0               16d     10.244.5.212   k8s-prod-worker-2   <none>           <none>
+istio-system                    istio-cni-node-plpxt                                              1/1     Running   0               16d     10.244.6.22    k8s-prod-cp-2       <none>           <none>
+istio-system                    istio-cni-node-q7z24                                              1/1     Running   5 (5d5h ago)    20d     10.244.0.58    k8s-prod-worker-0   <none>           <none>
+istio-system                    istio-cni-node-sw287                                              1/1     Running   2 (16d ago)     20d     10.244.2.30    k8s-prod-cp-1       <none>           <none>
+istio-system                    istio-cni-node-zbl2j                                              1/1     Running   2 (16d ago)     20d     10.244.1.235   k8s-prod-worker-1   <none>           <none>
+istio-system                    istiod-69bc87b797-92xds                                           1/1     Running   0               11d     10.244.5.240   k8s-prod-worker-2   <none>           <none>
+istio-system                    prometheus-6bd68c5c99-rp55j                                       2/2     Running   0               11d     10.244.5.245   k8s-prod-worker-2   <none>           <none>
+istio-system                    ztunnel-4bz85                                                     1/1     Running   2 (16d ago)     20d     10.244.2.29    k8s-prod-cp-1       <none>           <none>
+istio-system                    ztunnel-5njm5                                                     1/1     Running   2 (16d ago)     20d     10.244.1.238   k8s-prod-worker-1   <none>           <none>
+istio-system                    ztunnel-7bjhr                                                     1/1     Running   0               16d     10.244.6.23    k8s-prod-cp-2       <none>           <none>
+istio-system                    ztunnel-ccdsr                                                     1/1     Running   0               16d     10.244.5.213   k8s-prod-worker-2   <none>           <none>
+istio-system                    ztunnel-kcxwv                                                     1/1     Running   5 (5d5h ago)    20d     10.244.0.57    k8s-prod-worker-0   <none>           <none>
+istio-system                    ztunnel-s2l2b                                                     1/1     Running   0               5d5h    10.244.3.31    k8s-prod-cp-0       <none>           <none>
+kube-system                     coredns-7bb49dc74c-8mbr8                                          1/1     Running   0               5d7h    10.244.1.91    k8s-prod-worker-1   <none>           <none>
+kube-system                     coredns-7bb49dc74c-kgw82                                          1/1     Running   0               11d     10.244.5.248   k8s-prod-worker-2   <none>           <none>
+kube-system                     kube-apiserver-k8s-prod-cp-0                                      1/1     Running   0               5d5h    10.30.0.2      k8s-prod-cp-0       <none>           <none>
+kube-system                     kube-apiserver-k8s-prod-cp-1                                      1/1     Running   0               16d     10.30.1.2      k8s-prod-cp-1       <none>           <none>
+kube-system                     kube-apiserver-k8s-prod-cp-2                                      1/1     Running   0               16d     10.30.2.2      k8s-prod-cp-2       <none>           <none>
+kube-system                     kube-controller-manager-k8s-prod-cp-0                             1/1     Running   2 (5d5h ago)    5d5h    10.30.0.2      k8s-prod-cp-0       <none>           <none>
+kube-system                     kube-controller-manager-k8s-prod-cp-1                             1/1     Running   9 (5d5h ago)    16d     10.30.1.2      k8s-prod-cp-1       <none>           <none>
+kube-system                     kube-controller-manager-k8s-prod-cp-2                             1/1     Running   7 (5d6h ago)    16d     10.30.2.2      k8s-prod-cp-2       <none>           <none>
+kube-system                     kube-flannel-5pzqh                                                1/1     Running   0               5d5h    10.30.0.2      k8s-prod-cp-0       <none>           <none>
+kube-system                     kube-flannel-7gdbx                                                1/1     Running   24 (16d ago)    130d    10.31.1.2      k8s-prod-worker-1   <none>           <none>
+kube-system                     kube-flannel-7ztqq                                                1/1     Running   8 (5d5h ago)    130d    10.31.0.2      k8s-prod-worker-0   <none>           <none>
+kube-system                     kube-flannel-jntck                                                1/1     Running   0               16d     10.31.2.2      k8s-prod-worker-2   <none>           <none>
+kube-system                     kube-flannel-jrxfw                                                1/1     Running   0               16d     10.30.2.2      k8s-prod-cp-2       <none>           <none>
+kube-system                     kube-flannel-px5x6                                                1/1     Running   4 (16d ago)     73d     10.30.1.2      k8s-prod-cp-1       <none>           <none>
+kube-system                     kube-proxy-4jgb8                                                  1/1     Running   0               5d5h    10.30.0.2      k8s-prod-cp-0       <none>           <none>
+kube-system                     kube-proxy-4tnbg                                                  1/1     Running   24 (16d ago)    130d    10.31.1.2      k8s-prod-worker-1   <none>           <none>
+kube-system                     kube-proxy-79zrf                                                  1/1     Running   0               16d     10.31.2.2      k8s-prod-worker-2   <none>           <none>
+kube-system                     kube-proxy-9ghpf                                                  1/1     Running   8 (5d5h ago)    130d    10.31.0.2      k8s-prod-worker-0   <none>           <none>
+kube-system                     kube-proxy-bspm4                                                  1/1     Running   4 (16d ago)     73d     10.30.1.2      k8s-prod-cp-1       <none>           <none>
+kube-system                     kube-proxy-pm2cw                                                  1/1     Running   0               16d     10.30.2.2      k8s-prod-cp-2       <none>           <none>
+kube-system                     kube-scheduler-k8s-prod-cp-0                                      1/1     Running   2 (5d5h ago)    5d5h    10.30.0.2      k8s-prod-cp-0       <none>           <none>
+kube-system                     kube-scheduler-k8s-prod-cp-1                                      1/1     Running   2 (5d14h ago)   16d     10.30.1.2      k8s-prod-cp-1       <none>           <none>
+kube-system                     kube-scheduler-k8s-prod-cp-2                                      1/1     Running   6 (5d5h ago)    16d     10.30.2.2      k8s-prod-cp-2       <none>           <none>
+kube-system                     metrics-server-75b5d87c9d-kzdj4                                   1/1     Running   0               11d     10.244.5.244   k8s-prod-worker-2   <none>           <none>
+kubelet-serving-cert-approver   kubelet-serving-cert-approver-5b6b7675f-w2wz8                     1/1     Running   0               11d     10.244.5.250   k8s-prod-worker-2   <none>           <none>
+metallb-system                  metallb-controller-765c495b75-w44lm                               1/1     Running   0               5d7h    10.244.1.93    k8s-prod-worker-1   <none>           <none>
+metallb-system                  metallb-speaker-6jzvr                                             4/4     Running   97 (16d ago)    115d    10.31.1.2      k8s-prod-worker-1   <none>           <none>
+metallb-system                  metallb-speaker-8pz7n                                             4/4     Running   32 (5d5h ago)   115d    10.31.0.2      k8s-prod-worker-0   <none>           <none>
+metallb-system                  metallb-speaker-p2wqr                                             4/4     Running   0               16d     10.31.2.2      k8s-prod-worker-2   <none>           <none>
+monitoring                      alertmanager-istio-6cdf5875f5-229cx                               1/1     Running   0               5d7h    10.244.1.98    k8s-prod-worker-1   <none>           <none>
+monitoring                      alertmanager-istio-6cdf5875f5-49h9t                               1/1     Running   0               11d     10.244.5.239   k8s-prod-worker-2   <none>           <none>
+monitoring                      alertmanager-kube-prometheus-stack-alertmanager-0                 3/3     Running   0               5d5h    10.244.1.103   k8s-prod-worker-1   <none>           <none>
+monitoring                      gotify-bridge-6d95df486f-66db6                                    2/2     Running   3 (3d18h ago)   5d7h    10.244.1.97    k8s-prod-worker-1   <none>           <none>
+monitoring                      grafana-istio-59fb9b97d-ntktv                                     1/1     Running   0               11d     10.244.5.242   k8s-prod-worker-2   <none>           <none>
+monitoring                      grafana-istio-59fb9b97d-tlx2k                                     1/1     Running   0               5d7h    10.244.1.90    k8s-prod-worker-1   <none>           <none>
+monitoring                      kube-prometheus-stack-grafana-65755785d6-srm87                    4/4     Running   0               3d4h    10.244.0.103   k8s-prod-worker-0   <none>           <none>
+monitoring                      kube-prometheus-stack-kube-state-metrics-7667495f46-jj2kl         2/2     Running   2 (5d15h ago)   7d4h    10.244.1.55    k8s-prod-worker-1   <none>           <none>
+monitoring                      kube-prometheus-stack-operator-685f7c855c-9cj75                   2/2     Running   0               3d4h    10.244.0.104   k8s-prod-worker-0   <none>           <none>
+monitoring                      kube-prometheus-stack-prometheus-node-exporter-ffsdq              1/1     Running   0               6d4h    10.31.1.2      k8s-prod-worker-1   <none>           <none>
+monitoring                      kube-prometheus-stack-prometheus-node-exporter-m666x              1/1     Running   0               6d4h    10.30.1.2      k8s-prod-cp-1       <none>           <none>
+monitoring                      kube-prometheus-stack-prometheus-node-exporter-n6gls              1/1     Running   0               5d5h    10.30.0.2      k8s-prod-cp-0       <none>           <none>
+monitoring                      kube-prometheus-stack-prometheus-node-exporter-pbzph              1/1     Running   2 (5d5h ago)    6d4h    10.31.0.2      k8s-prod-worker-0   <none>           <none>
+monitoring                      kube-prometheus-stack-prometheus-node-exporter-r47ps              1/1     Running   0               6d4h    10.31.2.2      k8s-prod-worker-2   <none>           <none>
+monitoring                      kube-prometheus-stack-prometheus-node-exporter-ztcwm              1/1     Running   0               6d4h    10.30.2.2      k8s-prod-cp-2       <none>           <none>
+monitoring                      loki-0                                                            3/3     Running   0               5d5h    10.244.5.31    k8s-prod-worker-2   <none>           <none>
+monitoring                      loki-gateway-6df7c96bc9-6fjnp                                     2/2     Running   0               11d     10.244.5.253   k8s-prod-worker-2   <none>           <none>
+monitoring                      prometheus-istio-7f6b65d9c4-hcsjd                                 1/1     Running   0               11d     10.244.5.243   k8s-prod-worker-2   <none>           <none>
+monitoring                      prometheus-istio-7f6b65d9c4-j2q7r                                 1/1     Running   0               5d7h    10.244.1.101   k8s-prod-worker-1   <none>           <none>
+monitoring                      prometheus-kube-prometheus-stack-prometheus-0                     3/3     Running   2 (2d22h ago)   5d5h    10.244.1.102   k8s-prod-worker-1   <none>           <none>
+monitoring                      promtail-2rg5k                                                    2/2     Running   0               16d     10.244.5.219   k8s-prod-worker-2   <none>           <none>
+monitoring                      promtail-cvhsk                                                    2/2     Running   23 (16d ago)    104d    10.244.1.234   k8s-prod-worker-1   <none>           <none>
+monitoring                      promtail-ktws7                                                    2/2     Running   8 (5d5h ago)    130d    10.244.0.55    k8s-prod-worker-0   <none>           <none>
+node-feature-discovery          node-feature-discovery-gc-f5d7fbdd-88hpc                          1/1     Running   0               12h     10.244.0.177   k8s-prod-worker-0   <none>           <none>
+node-feature-discovery          node-feature-discovery-master-656c56d855-h5r7s                    1/1     Running   0               12h     10.244.0.178   k8s-prod-worker-0   <none>           <none>
+node-feature-discovery          node-feature-discovery-worker-55j6b                               1/1     Running   0               12h     10.244.0.176   k8s-prod-worker-0   <none>           <none>
+node-feature-discovery          node-feature-discovery-worker-k68rl                               1/1     Running   0               12h     10.244.1.184   k8s-prod-worker-1   <none>           <none>
+node-feature-discovery          node-feature-discovery-worker-sxmdp                               1/1     Running   0               12h     10.244.5.103   k8s-prod-worker-2   <none>           <none>
+opentelemetry-operator-system   opentelemetry-kube-stack-daemon-collector-7w7mg                   1/1     Running   2 (5d5h ago)    5d19h   10.244.0.56    k8s-prod-worker-0   <none>           <none>
+opentelemetry-operator-system   opentelemetry-kube-stack-daemon-collector-lgnjk                   1/1     Running   0               5d19h   10.244.5.21    k8s-prod-worker-2   <none>           <none>
+opentelemetry-operator-system   opentelemetry-kube-stack-daemon-collector-v8mf4                   1/1     Running   0               5d19h   10.244.1.86    k8s-prod-worker-1   <none>           <none>
+opentelemetry-operator-system   opentelemetry-kube-stack-opentelemetry-operator-59bcbbbbd9bm948   2/2     Running   0               11d     10.244.5.251   k8s-prod-worker-2   <none>           <none>
+rook-ceph-external              rook-ceph-tools-77b9d469b-4ljdm                                   1/1     Running   0               5d7h    10.244.1.87    k8s-prod-worker-1   <none>           <none>
+rook-ceph                       ceph-csi-controller-manager-677788dd7c-bfk8c                      1/1     Running   0               2d21h   10.244.0.151   k8s-prod-worker-0   <none>           <none>
+rook-ceph                       rook-ceph-operator-78ffc874b4-vwqws                               1/1     Running   0               2d21h   10.244.0.148   k8s-prod-worker-0   <none>           <none>
+rook-ceph                       rook-ceph.cephfs.csi.ceph.com-ctrlplugin-574b469bfc-6fx6t         5/5     Running   0               2d3h    10.244.1.179   k8s-prod-worker-1   <none>           <none>
+rook-ceph                       rook-ceph.cephfs.csi.ceph.com-ctrlplugin-574b469bfc-p29kb         5/5     Running   0               2d3h    10.244.0.167   k8s-prod-worker-0   <none>           <none>
+rook-ceph                       rook-ceph.cephfs.csi.ceph.com-nodeplugin-cpf9l                    2/2     Running   0               2d21h   10.31.0.2      k8s-prod-worker-0   <none>           <none>
+rook-ceph                       rook-ceph.cephfs.csi.ceph.com-nodeplugin-kbwhp                    2/2     Running   0               16d     10.31.2.2      k8s-prod-worker-2   <none>           <none>
+rook-ceph                       rook-ceph.cephfs.csi.ceph.com-nodeplugin-m84qp                    2/2     Running   0               2d21h   10.31.1.2      k8s-prod-worker-1   <none>           <none>
+rook-ceph                       rook-ceph.rbd.csi.ceph.com-ctrlplugin-58f476fb4-4xxjh             5/5     Running   0               2d3h    10.244.0.170   k8s-prod-worker-0   <none>           <none>
+rook-ceph                       rook-ceph.rbd.csi.ceph.com-ctrlplugin-58f476fb4-7f4tn             5/5     Running   0               2d3h    10.244.1.182   k8s-prod-worker-1   <none>           <none>
+rook-ceph                       rook-ceph.rbd.csi.ceph.com-nodeplugin-cblkt                       2/2     Running   0               2d1h    10.31.1.2      k8s-prod-worker-1   <none>           <none>
+rook-ceph                       rook-ceph.rbd.csi.ceph.com-nodeplugin-thlpn                       2/2     Running   0               2d21h   10.31.0.2      k8s-prod-worker-0   <none>           <none>
+rook-ceph                       rook-ceph.rbd.csi.ceph.com-nodeplugin-xg8gx                       2/2     Running   0               2d3h    10.31.2.2      k8s-prod-worker-2   <none>           <none>
+synology-csi                    synology-csi-chart-controller-0                                   4/4     Running   0               16d     10.31.2.2      k8s-prod-worker-2   <none>           <none>
+synology-csi                    synology-csi-chart-node-9q9cg                                     2/2     Running   0               16d     10.31.2.2      k8s-prod-worker-2   <none>           <none>
+synology-csi                    synology-csi-chart-node-j6s4x                                     2/2     Running   16 (5d5h ago)   130d    10.31.0.2      k8s-prod-worker-0   <none>           <none>
+synology-csi                    synology-csi-chart-node-xxznv                                     2/2     Running   0               7d4h    10.31.1.2      k8s-prod-worker-1   <none>           <none>
+synology-csi                    synology-csi-chart-snapshotter-0                                  2/2     Running   0               5d5h    10.31.1.2      k8s-prod-worker-1   <none>           <none>
+vault-secrets-operator-system   vault-secrets-operator-controller-manager-746c5dd9bd-xt786        2/2     Running   13              16d     10.244.5.220   k8s-prod-worker-2   <none>           <none>

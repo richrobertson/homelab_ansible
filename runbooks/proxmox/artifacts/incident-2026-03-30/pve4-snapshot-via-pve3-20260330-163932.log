@@ -1,0 +1,59 @@
+Warning: Permanently added '192.168.11.4' (ED25519) to the list of known hosts.
+pve4
+Mon Mar 30 04:39:33 PM PDT 2026
+lo               UNKNOWN        127.0.0.1/8 10.0.0.84/32 fc00::84/128 ::1/128 
+enp88s0          UP             fe80::5a47:caff:fe7e:f44a/64 
+enp91s0          UP             fe80::5a47:caff:fe7e:f44b/64 
+enp3s0f0np0      DOWN           fe80::5a47:caff:fe7e:f448/64 
+enp3s0f1np1      DOWN           fe80::5a47:caff:fe7e:f449/64 
+enp1s0f0np0      UP             
+enp1s0f1np1      UP             fe80::6eb3:11ff:fe79:c3ff/64 
+wlp92s0          DOWN           
+enp88s0.11@enp88s0 UP             192.168.11.4/24 fe80::5a47:caff:fe7e:f44a/64 
+vmbr0            UP             192.168.88.4/24 fe80::6eb3:11ff:fe79:c3fe/64 
+vmbr1            UP             192.168.1.242/24 fe80::6eb3:11ff:fe79:c3fe/64 
+vxlan_prodctr    UNKNOWN        
+prodctr          UP             10.30.0.1/24 10.30.1.1/24 10.30.2.1/24 fe80::be24:11ff:fedd:c72e/64 
+vrf_prodl3       UP             
+vxlan_proddata   UNKNOWN        
+proddata         UP             10.31.0.1/24 10.31.1.1/24 10.31.2.1/24 fe80::be24:11ff:fedd:c72e/64 
+vrfvx_prodl3     UNKNOWN        
+vrfbr_prodl3     UP             fe80::7cdc:39ff:fe03:a107/64 
+vxlan_stgctr     UNKNOWN        
+stgctr           UP             10.20.0.1/24 10.20.1.1/24 10.20.2.1/24 fe80::be24:11ff:fe22:8024/64 
+vrf_stgl3        UP             
+vxlan_stgdata    UNKNOWN        
+stgdata          UP             10.21.0.1/24 10.21.1.1/24 10.21.2.1/24 fe80::be24:11ff:fe22:8024/64 
+vrfvx_stgl3      UNKNOWN        
+vrfbr_stgl3      UP             fe80::2c48:2aff:fefb:2f5a/64 
+enp1s0f0np0.88@enp1s0f0np0 UP             
+enp1s0f1np1.10@enp1s0f1np1 UP             192.168.10.4/24 fe80::6eb3:11ff:fe79:c3ff/64 
+tap211i0         UNKNOWN        
+tap213i0         UNKNOWN        
+veth137i0@if2    UP             
+tap129i0         UNKNOWN        
+tap101i0         UNKNOWN        
+tap129i1         UNKNOWN        
+fwbr101i0        UP             
+fwpr101p0@fwln101i0 UP             
+fwln101i0@fwpr101p0 UP             
+fwbr129i1        UP             
+fwpr129p1@fwln129i1 UP             
+fwln129i1@fwpr129p1 UP             
+veth102i0@if2    UP             
+veth216i0@if2    UP             
+10.31.1.2 from 192.168.10.4 dev vrf_prodl3 uid 0 
+    cache 
+LISTEN 0      512          192.168.10.4:3300      0.0.0.0:*    users:(("ceph-mon",pid=950267,fd=28))                                                                                                               
+LISTEN 0      512          192.168.10.4:6789      0.0.0.0:*    users:(("ceph-mon",pid=950267,fd=29))                                                                                                               
+-P INPUT ACCEPT
+-P FORWARD ACCEPT
+-P OUTPUT ACCEPT
+Chain INPUT (policy ACCEPT 893M packets, 3714G bytes)
+ pkts bytes target     prot opt in     out     source               destination         
+
+Chain FORWARD (policy ACCEPT 587M packets, 589G bytes)
+ pkts bytes target     prot opt in     out     source               destination         
+
+Chain OUTPUT (policy ACCEPT 924M packets, 2142G bytes)
+ pkts bytes target     prot opt in     out     source               destination         

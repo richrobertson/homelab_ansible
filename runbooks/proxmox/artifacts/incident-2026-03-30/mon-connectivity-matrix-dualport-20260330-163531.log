@@ -1,0 +1,23 @@
+timestamp=2026-03-30T16:35:31-07:00
+test=tcp_connect from rook-ceph rbd nodeplugin pods to mon endpoints ports 3300,6789
+[k8s-prod-worker-0] pod=rook-ceph.rbd.csi.ceph.com-nodeplugin-thlpn ip=10.31.0.2
+  192.168.10.3:3300 FAIL
+  192.168.10.3:6789 FAIL
+  192.168.10.4:3300 OK
+  192.168.10.4:6789 OK
+  192.168.10.5:3300 OK
+  192.168.10.5:6789 OK
+[k8s-prod-worker-1] pod=rook-ceph.rbd.csi.ceph.com-nodeplugin-x445z ip=10.31.1.2
+  192.168.10.3:3300 OK
+  192.168.10.3:6789 OK
+  192.168.10.4:3300 FAIL
+  192.168.10.4:6789 FAIL
+  192.168.10.5:3300 OK
+  192.168.10.5:6789 OK
+[k8s-prod-worker-2] pod=rook-ceph.rbd.csi.ceph.com-nodeplugin-xg8gx ip=10.31.2.2
+  192.168.10.3:3300 OK
+  192.168.10.3:6789 OK
+  192.168.10.4:3300 OK
+  192.168.10.4:6789 OK
+  192.168.10.5:3300 FAIL
+  192.168.10.5:6789 FAIL

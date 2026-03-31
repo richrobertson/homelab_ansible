@@ -1,0 +1,36 @@
+attempt=1
+ssh: connect to host 192.168.11.4 port 22: Operation timed out
+success=0
+attempt=2
+ssh: connect to host 192.168.11.4 port 22: Operation timed out
+success=0
+attempt=3
+ssh: connect to host 192.168.11.4 port 22: Operation timed out
+success=0
+attempt=4
+ssh: connect to host 192.168.11.4 port 22: Operation timed out
+success=0
+attempt=5
+ssh: connect to host 192.168.11.4 port 22: Operation timed out
+success=0
+attempt=6
+ssh: connect to host 192.168.11.4 port 22: Operation timed out
+success=0
+attempt=7
+ssh: connect to host 192.168.11.4 port 22: Operation timed out
+success=0
+attempt=8
+ssh: connect to host 192.168.11.4 port 22: Operation timed out
+success=0
+attempt=9
+ssh: connect to host 192.168.11.4 port 22: Operation timed out
+success=0
+attempt=10
+ssh: connect to host 192.168.11.4 port 22: Operation timed out
+success=0
+attempt=11
+ssh: connect to host 192.168.11.4 port 22: Operation timed out
+success=0
+attempt=12
+ssh: connect to host 192.168.11.4 port 22: Operation timed out
+success=0
