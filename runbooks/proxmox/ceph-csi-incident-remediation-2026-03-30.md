@@ -213,8 +213,8 @@ Success criteria:
   - Remaining warning stream is likely backlog and/or separate runtime churn issue, requiring continued observation before closure.
 - Extended monitoring started:
   - 2-hour watcher (15-minute samples, 8 points) is running in background.
-  - Live artifact:
-    - `runbooks/proxmox/artifacts/incident-2026-03-30/post-fix-trend-2h-20260330-170748.log`
+  - Live artifact path is generated locally at runtime and may not be committed:
+    - `runbooks/proxmox/artifacts/incident-2026-03-30/post-fix-trend-2h-<timestamp>.log`
 
 ### MON-host validation (new decisive evidence)
 - Verified on all cl0 Ceph MON hosts (`pve3`, `pve4`, `pve5`):
@@ -229,12 +229,17 @@ Success criteria:
 ### Network snapshot artifacts
 - Captured:
   - `runbooks/proxmox/artifacts/incident-2026-03-30/mon-network-snapshot-20260330-162316.log`
-- Partial/failed due intermittent reachability:
+- Partial/failed due to intermittent reachability:
   - `runbooks/proxmox/artifacts/incident-2026-03-30/mon-network-snapshot-pve4-20260330-162402.log`
 - Snapshot highlights:
   - pve3 and pve5 both show `vrf_prodl3` routes to worker subnets present.
   - pve3 can ICMP only worker-0; pve5 can ICMP only worker-2.
   - pve4 intermittently unreachable from operator host during validation.
+
+## Data Handling Note
+- This runbook and artifact set include private homelab infrastructure metadata (internal IPs, hostnames, cluster/pod identifiers, and policy snapshots).
+- Keep this evidence set in private access-controlled repositories only.
+- If sharing outside trusted operators, publish a sanitized export with redacted host/IP identifiers.
 
 ### Config observation
 - `rook-ceph-external/rook-ceph-mon-endpoints` currently lists monitors:
@@ -251,11 +256,12 @@ Success criteria:
 3. If timeout signatures recur despite restored connectivity, continue with Ceph build-hash alignment in maintenance window.
 4. If no recurrence during the 2-hour window, close this network-path incident and proceed with planned maintenance work (version alignment) separately.
 
-## Immediate Operator Checklist (next execution)
+## Immediate Operator Checklist (for recurrence / future clusters)
 1. Continue collecting 15-minute Kubernetes failure snapshots and compare new `ret=-110` event rate vs pre-fix baseline.
 2. Validate Ceph health and client I/O behavior remain stable while runtime sysctl change is active.
-3. Persist `net.ipv4.tcp_l3mdev_accept=1` on `pve3/pve4/pve5` (sysctl.d) after monitoring window.
-4. After persistence, rerun dual-port MON matrix and a final 30-minute Kubernetes event check.
+3. If not already persisted, set `net.ipv4.tcp_l3mdev_accept=1` on all MON hosts via sysctl.d.
+4. After any sysctl change, rerun dual-port MON matrix and a final 30-minute Kubernetes event check.
+5. Current incident status: persistence already applied on `pve3/pve4/pve5` (see `mon-tcp-l3mdev-persist-20260330-164640.log`).
 
 ## Execution Notes (Applied)
 
