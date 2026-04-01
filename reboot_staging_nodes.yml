@@ -4,12 +4,12 @@
   gather_facts: false
   tasks:
     - name: Reboot k8s-stg-cp-2 via SSH
-      command: ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@10.20.2.2 "reboot"
+      command: ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@10.20.2.2 "reboot"
       ignore_errors: yes
       register: cp2_result
 
     - name: Reboot k8s-stg-worker-2 via SSH
-      command: ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@10.21.2.2 "reboot"
+      command: ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@10.21.2.2 "reboot"
       ignore_errors: yes
       register: worker2_result
 
