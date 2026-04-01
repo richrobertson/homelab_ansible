@@ -32,7 +32,9 @@ done
 
 echo
 echo "== Kubernetes nodes =="
-kubectl get nodes -o wide
+if ! kubectl get nodes -o wide; then
+  echo "kubectl get nodes failed; continuing with Talos checks" >&2
+fi
 
 echo
 echo "== Talos checks =="
