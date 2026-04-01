@@ -96,10 +96,25 @@ def remote_exec(host: str, port: int, user: str, password: str, remote_cmd: str)
 
 
 def extract_json(raw_text: str) -> dict:
-    match = re.search(r"(?ms)\{.*\}\s*$", raw_text)
-    if not match:
+    decoder = json.JSONDecoder()
+    candidates: list[dict] = []
+    for index, ch in enumerate(raw_text):
+        if ch != "{":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(raw_text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            candidates.append(payload)
+
+    if not candidates:
         raise RuntimeError("Could not locate JSON payload in Synology API output")
-    return json.loads(match.group(0))
+
+    for payload in candidates:
+        if "success" in payload or "data" in payload:
+            return payload
+    return candidates[-1]
 
 
 def fetch_targets(host: str, port: int, user: str, password: str) -> list[dict]:
