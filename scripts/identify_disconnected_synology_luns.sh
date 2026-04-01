@@ -34,6 +34,10 @@ json_escape() {
   python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
 }
 
+is_valid_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] && (( "$1" >= 1 && "$1" <= 65535 ))
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --inventory)
@@ -108,6 +112,11 @@ if [[ -z "$OUTPUT" ]]; then
   OUTPUT="/tmp/orphan_luns_dry_run_report_$(date -u +%Y%m%dT%H%M%SZ).csv"
 fi
 
+if ! is_valid_port "$PORT"; then
+  echo "--port must be an integer between 1 and 65535" >&2
+  exit 1
+fi
+
 mkdir -p "$(dirname "$OUTPUT")"
 
 tmp_luns="$(mktemp)"
@@ -121,14 +130,25 @@ cleanup() {
 trap cleanup EXIT
 
 chmod 600 "$tmp_ansible_vars"
-cat > "$tmp_ansible_vars" <<EOF
-{
-  "ansible_user": $(json_escape "$USER"),
-  "ansible_port": $PORT,
-  "ansible_password": $(json_escape "$PASSWORD"),
-  "ansible_become_password": $(json_escape "$PASSWORD")
+python3 - "$tmp_ansible_vars" "$USER" "$PORT" "$PASSWORD" <<'PY'
+import json
+import pathlib
+import sys
+
+output_path = pathlib.Path(sys.argv[1])
+ansible_user = sys.argv[2]
+ansible_port = int(sys.argv[3])
+password = sys.argv[4]
+
+payload = {
+    "ansible_user": ansible_user,
+    "ansible_port": ansible_port,
+    "ansible_password": password,
+    "ansible_become_password": password,
 }
-EOF
+
+output_path.write_text(json.dumps(payload), encoding="utf-8")
+PY
 
 ansible "$HOST_GROUP" \
   -i "$INVENTORY" \
