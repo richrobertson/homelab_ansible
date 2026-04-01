@@ -30,6 +30,10 @@ Options:
 EOF
 }
 
+json_escape() {
+  python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --inventory)
@@ -110,18 +114,34 @@ tmp_luns="$(mktemp)"
 tmp_targets="$(mktemp)"
 tmp_mapping="$(mktemp)"
 tmp_ansible_vars="$(mktemp)"
+tmp_hosts="$(mktemp)"
 cleanup() {
-  rm -f "$tmp_luns" "$tmp_targets" "$tmp_mapping" "$tmp_ansible_vars"
+  rm -f "$tmp_luns" "$tmp_targets" "$tmp_mapping" "$tmp_ansible_vars" "$tmp_hosts"
 }
 trap cleanup EXIT
 
 chmod 600 "$tmp_ansible_vars"
 cat > "$tmp_ansible_vars" <<EOF
-ansible_user: "$USER"
-ansible_port: $PORT
-ansible_password: "$PASSWORD"
-ansible_become_password: "$PASSWORD"
+{
+  "ansible_user": $(json_escape "$USER"),
+  "ansible_port": $PORT,
+  "ansible_password": $(json_escape "$PASSWORD"),
+  "ansible_become_password": $(json_escape "$PASSWORD")
+}
 EOF
+
+ansible "$HOST_GROUP" \
+  -i "$INVENTORY" \
+  --list-hosts \
+  -e "@$tmp_ansible_vars" > "$tmp_hosts"
+
+host_count="$(awk '/^  / {count++} END {print count+0}' "$tmp_hosts")"
+if [[ "$host_count" != "1" ]]; then
+  echo "expected exactly one Synology host from --host-group; got $host_count" >&2
+  echo "ansible --list-hosts output:" >&2
+  cat "$tmp_hosts" >&2
+  exit 1
+fi
 
 run_raw() {
   local cmd="$1"

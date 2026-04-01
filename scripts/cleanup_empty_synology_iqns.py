@@ -4,7 +4,7 @@ import csv
 import json
 import os
 import re
-import subprocess
+import subprocess  # nosec B404 - operational script shells out to ssh/sshpass with fixed argv.
 import sys
 from pathlib import Path
 
@@ -61,7 +61,7 @@ def remote_exec(host: str, port: int, user: str, password: str, remote_cmd: str)
     remote_shell = f"sudo -S -p '' {remote_cmd}"
     env = os.environ.copy()
     env["SSHPASS"] = password
-    result = subprocess.run(
+    result = subprocess.run(  # nosec B603 - fixed executable/argv, no shell=True, used for remote operational commands.
         [
             "sshpass",
             "-e",
@@ -91,7 +91,7 @@ def remote_exec(host: str, port: int, user: str, password: str, remote_cmd: str)
 
 
 def extract_json(raw_text: str) -> dict:
-    match = re.search(r"(?ms)^\{.*\}\s*$", raw_text)
+    match = re.search(r"(?ms)\{.*\}\s*$", raw_text)
     if not match:
         raise RuntimeError("Could not locate JSON payload in Synology API output")
     return json.loads(match.group(0))
@@ -122,7 +122,11 @@ def identify_empty_targets(
     include_default_target: bool,
 ) -> list[dict]:
     empty_targets = []
-    for target in sorted(targets, key=lambda item: int(item.get("target_id", 0))):
+    def sort_key(item: dict) -> tuple[int, str]:
+        target_id = str(item.get("target_id") or "")
+        return (0, target_id) if target_id.isdigit() else (1, target_id)
+
+    for target in sorted(targets, key=sort_key):
         target_id = str(target.get("target_id", ""))
         if not target_id or target_id in mapped_target_ids:
             continue
@@ -178,8 +182,12 @@ def delete_target(host: str, port: int, user: str, password: str, target_id: str
 
     last_output = ""
     for command in commands:
-        output = remote_exec(host, port, user, password, command)
-        last_output = output.strip()
+        try:
+            output = remote_exec(host, port, user, password, command)
+            last_output = output.strip()
+        except RuntimeError as error:
+            last_output = str(error).strip()
+            continue
         try:
             payload = extract_json(output)
         except RuntimeError:

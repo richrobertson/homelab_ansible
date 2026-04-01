@@ -42,7 +42,7 @@
       ansible.builtin.set_fact:
         synology_luns_payload: >-
           {{
-            (synology_luns_raw.stdout | regex_search('(?ms)^\{.*\}\s*$'))
+            (synology_luns_raw.stdout | regex_search('(?ms)\{.*\}\s*$'))
             | from_json
           }}
 
@@ -64,7 +64,7 @@
       ansible.builtin.set_fact:
         synology_targets_payload: >-
           {{
-            (synology_targets_raw.stdout | regex_search('(?ms)^\{.*\}\s*$'))
+            (synology_targets_raw.stdout | regex_search('(?ms)\{.*\}\s*$'))
             | from_json
           }}
 
