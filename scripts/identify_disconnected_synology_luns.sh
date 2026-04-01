@@ -130,7 +130,7 @@ cleanup() {
 trap cleanup EXIT
 
 chmod 600 "$tmp_ansible_vars"
-python3 - "$tmp_ansible_vars" "$USER" "$PORT" "$PASSWORD" <<'PY'
+python3 - "$tmp_ansible_vars" "$USER" "$PORT" <<'PY' <<<"$PASSWORD"
 import json
 import pathlib
 import sys
@@ -138,7 +138,7 @@ import sys
 output_path = pathlib.Path(sys.argv[1])
 ansible_user = sys.argv[2]
 ansible_port = int(sys.argv[3])
-password = sys.argv[4]
+password = sys.stdin.read().rstrip("\n")
 
 payload = {
     "ansible_user": ansible_user,

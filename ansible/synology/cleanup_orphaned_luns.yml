@@ -62,11 +62,31 @@
       register: synology_luns_raw
       changed_when: false
 
+    - name: Extract LUN inventory JSON payload substring
+      ansible.builtin.set_fact:
+        synology_luns_json_raw: >-
+          {{
+            synology_luns_raw.stdout
+            | regex_search('(?ms)\{\s*"(?:success|data)".*\}\s*$')
+          }}
+
+    - name: Assert LUN inventory payload JSON was extracted
+      ansible.builtin.assert:
+        that:
+          - synology_luns_json_raw is string
+          - synology_luns_json_raw | length > 0
+        fail_msg: >-
+          Failed to parse LUN inventory payload from Synology: expected JSON object
+          with "success" or "data" at top level, but no such payload was found
+          in synowebapi output. Raw stdout (truncated): {{
+            synology_luns_raw.stdout | default('') | truncate(200, True, '...')
+          }}
+
     - name: Parse LUN inventory payload
       ansible.builtin.set_fact:
         synology_luns_payload: >-
           {{
-            (synology_luns_raw.stdout | regex_search('(?ms)\{\s*"(?:success|data)".*\}\s*$'))
+            synology_luns_json_raw
             | from_json
           }}
 
@@ -95,11 +115,31 @@
       register: synology_targets_raw
       changed_when: false
 
+    - name: Extract live target JSON payload substring
+      ansible.builtin.set_fact:
+        synology_targets_json_raw: >-
+          {{
+            synology_targets_raw.stdout
+            | regex_search('(?ms)\{\s*"(?:success|data)".*\}\s*$')
+          }}
+
+    - name: Assert live target payload JSON was extracted
+      ansible.builtin.assert:
+        that:
+          - synology_targets_json_raw is string
+          - synology_targets_json_raw | length > 0
+        fail_msg: >-
+          Failed to parse live target payload from Synology: expected JSON object
+          with "success" or "data" at top level, but no such payload was found
+          in synowebapi output. Raw stdout (truncated): {{
+            synology_targets_raw.stdout | default('') | truncate(200, True, '...')
+          }}
+
     - name: Parse live target payload
       ansible.builtin.set_fact:
         synology_targets_payload: >-
           {{
-            (synology_targets_raw.stdout | regex_search('(?ms)\{\s*"(?:success|data)".*\}\s*$'))
+            synology_targets_json_raw
             | from_json
           }}
 
