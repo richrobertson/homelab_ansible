@@ -79,6 +79,8 @@ def remote_exec(host: str, port: int, user: str, password: str, remote_cmd: str)
             "PubkeyAuthentication=no",
             "-o",
             "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
             "-p",
             str(port),
             f"{user}@{host}",

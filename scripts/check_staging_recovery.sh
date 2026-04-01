@@ -12,7 +12,7 @@ echo "RUN_AT=$(date -u)"
 echo "== Proxmox host reachability =="
 for host in 192.168.11.4 192.168.11.5; do
   printf "%s ssh=" "$host"
-  if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@"$host" 'echo OK' >/dev/null 2>&1; then
+  if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@"$host" 'echo OK' >/dev/null 2>&1; then
     echo OK
   else
     echo FAIL
