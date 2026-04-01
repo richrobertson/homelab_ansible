@@ -1,0 +1,291 @@
+---
+- name: Clean up orphaned Synology iSCSI LUNs
+  hosts: synology_nas
+  gather_facts: false
+  vars:
+    synology_nas_host: "{{ ansible_host | default(inventory_hostname) }}"
+
+    # Command used on the NAS to list LUN metadata as JSON.
+    # Override if your DSM build uses a different command/API version.
+    synology_remote_list_luns_cmd: >-
+      /usr/syno/bin/synowebapi
+      --exec
+      api=SYNO.Core.ISCSI.LUN
+      method=list
+      version=1
+
+    synology_remote_list_targets_cmd: >-
+      /usr/syno/bin/synowebapi
+      --exec
+      api=SYNO.Core.ISCSI.Target
+      method=list
+      version=1
+      additional='["status"]'
+
+    # DSM stores authoritative LUN-to-target mappings in this file.
+    synology_remote_iscsi_mapping_conf_path: /usr/syno/etc/iscsi_mapping.conf
+
+    # Kubernetes CSI targets use this prefix in Synology.
+    synology_k8s_target_name_prefix: k8s-csi-pvc-
+
+    # Command template used to delete a single LUN UUID.
+    # __LUN_UUID__ is replaced per-item in the loop below.
+    # Override if your NAS expects a different deletion command.
+    synology_remote_delete_lun_cmd_template: >-
+      /usr/syno/bin/synowebapi
+      --exec
+      api=SYNO.Core.ISCSI.LUN
+      method=delete
+      version=1
+      uuids='["__LUN_UUID__"]'
+
+    # Set these to the LUN UUIDs you confirmed are orphaned.
+    orphan_lun_uuids: []
+
+    # Safety switch: keep false for preview mode.
+    perform_cleanup: false
+
+    # Optional local audit log for deleted UUIDs.
+    synology_cleanup_audit_log_enabled: true
+    synology_cleanup_audit_log_path: ansible/synology/logs/lun_cleanup_audit.log
+
+  tasks:
+    - name: Require explicit orphan LUN UUID list
+      ansible.builtin.fail:
+        msg: >-
+          No orphan LUN UUIDs were provided. Pass -e 'orphan_lun_uuids=["uuid1","uuid2"]'
+          after confirming the LUNs are orphaned in DSM/SAN Manager.
+      when: orphan_lun_uuids | length == 0
+
+    - name: Fetch current LUN inventory from Synology
+      ansible.builtin.raw: "{{ synology_remote_list_luns_cmd }}"
+      register: synology_luns_raw
+      changed_when: false
+
+    - name: Extract LUN inventory JSON payload substring
+      ansible.builtin.set_fact:
+        synology_luns_json_raw: >-
+          {{
+            synology_luns_raw.stdout
+            | regex_search('(?ms)\{\s*"(?:success|data)".*\}\s*$')
+          }}
+
+    - name: Assert LUN inventory payload JSON was extracted
+      ansible.builtin.assert:
+        that:
+          - synology_luns_json_raw is string
+          - synology_luns_json_raw | length > 0
+        fail_msg: >-
+          Failed to parse LUN inventory payload from Synology: expected JSON object
+          with "success" or "data" at top level, but no such payload was found
+          in synowebapi output. Raw stdout (truncated): {{
+            synology_luns_raw.stdout | default('') | truncate(200, True, '...')
+          }}
+
+    - name: Parse LUN inventory payload
+      ansible.builtin.set_fact:
+        synology_luns_payload: >-
+          {{
+            synology_luns_json_raw
+            | from_json
+          }}
+
+    - name: Build list of known LUN UUIDs returned by DSM
+      ansible.builtin.set_fact:
+        synology_known_lun_uuids: >-
+          {{
+            (
+              synology_luns_payload.data.luns | default([])
+              | map(attribute='uuid')
+              | list
+            )
+            +
+            (
+              synology_luns_payload.data.luns | default([])
+              | map(attribute='lun_uuid')
+              | list
+            )
+            | select('string')
+            | unique
+            | list
+          }}
+
+    - name: Fetch live target metadata from Synology
+      ansible.builtin.raw: "{{ synology_remote_list_targets_cmd }}"
+      register: synology_targets_raw
+      changed_when: false
+
+    - name: Extract live target JSON payload substring
+      ansible.builtin.set_fact:
+        synology_targets_json_raw: >-
+          {{
+            synology_targets_raw.stdout
+            | regex_search('(?ms)\{\s*"(?:success|data)".*\}\s*$')
+          }}
+
+    - name: Assert live target payload JSON was extracted
+      ansible.builtin.assert:
+        that:
+          - synology_targets_json_raw is string
+          - synology_targets_json_raw | length > 0
+        fail_msg: >-
+          Failed to parse live target payload from Synology: expected JSON object
+          with "success" or "data" at top level, but no such payload was found
+          in synowebapi output. Raw stdout (truncated): {{
+            synology_targets_raw.stdout | default('') | truncate(200, True, '...')
+          }}
+
+    - name: Parse live target payload
+      ansible.builtin.set_fact:
+        synology_targets_payload: >-
+          {{
+            synology_targets_json_raw
+            | from_json
+          }}
+
+    - name: Fetch authoritative LUN mappings from DSM
+      ansible.builtin.raw: "cat {{ synology_remote_iscsi_mapping_conf_path }}"
+      register: synology_mapping_conf_raw
+      changed_when: false
+
+    - name: Extract mapping entries as tid and uuid pairs
+      ansible.builtin.set_fact:
+        synology_mapping_pairs: >-
+          {{
+            synology_mapping_conf_raw.stdout
+            | regex_findall('(?m)^\[iSCSI_MAP_T(\d+)_L([0-9a-fA-F-]{36})\]$')
+            | list
+          }}
+
+    - name: Build set of mapped LUN UUIDs from mapping config
+      ansible.builtin.set_fact:
+        synology_mapped_lun_uuids: >-
+          {{
+            synology_mapping_pairs
+            | map('last')
+            | map('lower')
+            | unique
+            | list
+          }}
+
+    - name: Build uuid to target-id mapping from config entries
+      ansible.builtin.set_fact:
+        synology_uuid_to_target_id: >-
+          {{
+            synology_uuid_to_target_id | default({})
+            | combine({ (item.1 | lower): (item.0 | string) })
+          }}
+      loop: "{{ synology_mapping_pairs }}"
+
+    - name: Build k8s target metadata by target-id
+      ansible.builtin.set_fact:
+        synology_k8s_targets_by_id: >-
+          {{
+            synology_k8s_targets_by_id | default({})
+            | combine({
+              (item.target_id | string): {
+                'name': (item.name | string),
+                'status': (item.status | default('unknown') | string),
+                'connected': ((item.status | default('unknown') | string) == 'connected')
+              }
+            })
+          }}
+      loop: "{{ synology_targets_payload.data.targets | default([]) }}"
+      when:
+        - item.name is defined
+        - item.name is match('^' ~ (synology_k8s_target_name_prefix | regex_escape))
+
+    - name: Show candidate orphan LUN UUIDs
+      ansible.builtin.debug:
+        msg:
+          - "Cleanup mode: {{ perform_cleanup }}"
+          - "Requested orphan UUIDs: {{ orphan_lun_uuids }}"
+          - "Known UUID count on NAS: {{ synology_known_lun_uuids | length }}"
+
+    - name: Fail when requested UUID is not present on NAS
+      ansible.builtin.fail:
+        msg: "Requested UUID {{ item }} was not found in current NAS LUN inventory."
+      loop: "{{ orphan_lun_uuids }}"
+      when: item not in synology_known_lun_uuids
+
+    - name: Fail when requested UUID is mapped to an ineligible target
+      ansible.builtin.fail:
+        msg: >-
+          Refusing to delete UUID {{ item }} because it is still mapped and is not
+          a disconnected k8s target eligible for cleanup.
+      loop: "{{ orphan_lun_uuids }}"
+      vars:
+        target_id: "{{ (synology_uuid_to_target_id | default({})).get(item | lower, '') }}"
+        target_meta: "{{ (synology_k8s_targets_by_id | default({})).get(target_id, {}) }}"
+        eligible_disconnected_k8s_mapping: >-
+          {{
+            (item | lower in synology_mapped_lun_uuids)
+            and (target_id | length > 0)
+            and (target_meta | length > 0)
+            and not (target_meta.connected | default(false) | bool)
+          }}
+      when:
+        - item | lower in synology_mapped_lun_uuids
+        - not eligible_disconnected_k8s_mapping
+
+    - name: Preview delete commands (dry run)
+      ansible.builtin.debug:
+        msg: >-
+          Would delete LUN UUID {{ item }} using command:
+          {{ synology_remote_delete_lun_cmd_template | replace('__LUN_UUID__', item) }}
+      loop: "{{ orphan_lun_uuids }}"
+      when: not perform_cleanup
+
+    - name: Delete orphaned LUNs
+      ansible.builtin.raw: "{{ synology_remote_delete_lun_cmd_template | replace('__LUN_UUID__', item) }}"
+      loop: "{{ orphan_lun_uuids }}"
+      register: synology_delete_results
+      when: perform_cleanup
+      changed_when: true
+
+    - name: Show deletion results
+      ansible.builtin.debug:
+        var: synology_delete_results.results
+      when: perform_cleanup
+
+    - name: Build deleted UUID list from cleanup results
+      ansible.builtin.set_fact:
+        synology_deleted_lun_uuids: >-
+          {{
+            synology_delete_results.results
+            | default([])
+            | selectattr('rc', 'equalto', 0)
+            | map(attribute='item')
+            | list
+          }}
+      when: perform_cleanup
+
+    - name: Ensure local Synology audit log directory exists
+      ansible.builtin.file:
+        path: "{{ synology_cleanup_audit_log_path | dirname }}"
+        state: directory
+        mode: '0750'
+      delegate_to: localhost
+      run_once: true
+      become: false
+      when:
+        - perform_cleanup
+        - synology_cleanup_audit_log_enabled
+
+    - name: Append Synology LUN cleanup audit entry
+      ansible.builtin.lineinfile:
+        path: "{{ synology_cleanup_audit_log_path }}"
+        create: true
+        mode: '0640'
+        insertafter: EOF
+        line: >-
+          {{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}
+          host={{ synology_nas_host }}
+          requested={{ orphan_lun_uuids | to_json }}
+          deleted={{ synology_deleted_lun_uuids | default([]) | to_json }}
+      delegate_to: localhost
+      run_once: true
+      become: false
+      when:
+        - perform_cleanup
+        - synology_cleanup_audit_log_enabled

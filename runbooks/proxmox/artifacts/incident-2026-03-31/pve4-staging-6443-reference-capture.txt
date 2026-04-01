@@ -1,0 +1,17 @@
+# pve4 staging 6443 reference capture (2026-03-31)
+
+Source command (executed via SSH on pve4):
+- run tcpdump on any interface filtering host 10.20.0.2 or 10.20.1.2 and tcp/6443
+- concurrently probe with nc to 10.20.0.2:6443 and 10.20.1.2:6443
+
+Probe result summary:
+- 10.20.0.2:6443 timed out in this specific run
+- 10.20.1.2:6443 opened successfully
+
+Key packet excerpts (from capture):
+- established bidirectional flow observed for 10.21.1.2 <-> 10.20.1.2:6443
+- payload and ACK exchange present, not just SYN retransmits
+
+Interpretation:
+- the probe method is valid and at least one healthy control-plane API endpoint is reachable from a non-pve5 host.
+- this supports the diagnosis that the pve5-local path is the primary blocker for cp-2 and worker-2 join traffic.

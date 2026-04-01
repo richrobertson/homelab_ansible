@@ -1,0 +1,221 @@
+---
+- name: Discover likely orphaned Synology iSCSI LUNs
+  hosts: synology_nas
+  gather_facts: false
+  vars:
+    synology_nas_host: "{{ ansible_host | default(inventory_hostname) }}"
+
+    # Command used on the NAS to list LUN metadata as JSON.
+    # Override if your DSM build uses a different command/API version.
+    synology_remote_list_luns_cmd: >-
+      /usr/syno/bin/synowebapi
+      --exec
+      api=SYNO.Core.ISCSI.LUN
+      method=list
+      version=1
+
+    # Query live target state, including DSM's status field used by SAN Manager.
+    synology_remote_list_targets_cmd: >-
+      /usr/syno/bin/synowebapi
+      --exec
+      api=SYNO.Core.ISCSI.Target
+      method=list
+      version=1
+      additional='["status"]'
+
+    # DSM stores authoritative LUN-to-target mappings in this file.
+    synology_remote_iscsi_mapping_conf_path: /usr/syno/etc/iscsi_mapping.conf
+
+    # Kubernetes CSI targets use this prefix in Synology.
+    synology_k8s_target_name_prefix: k8s-csi-pvc-
+
+    # Optional allow-list for names that should never be flagged as orphaned.
+    synology_lun_name_exclude_patterns: []
+
+    # Optional strict mode: fail when no likely orphan UUIDs are discovered.
+    synology_fail_when_none_found: false
+
+  tasks:
+    - name: Fetch current LUN inventory from Synology
+      ansible.builtin.raw: "{{ synology_remote_list_luns_cmd }}"
+      register: synology_luns_raw
+      changed_when: false
+
+    - name: Extract LUN inventory JSON payload substring
+      ansible.builtin.set_fact:
+        synology_luns_json_raw: >-
+          {{
+            synology_luns_raw.stdout
+            | regex_search('(?ms)\{\s*"(?:success|data)".*\}\s*$')
+          }}
+
+    - name: Assert LUN inventory payload JSON was extracted
+      ansible.builtin.assert:
+        that:
+          - synology_luns_json_raw is string
+          - synology_luns_json_raw | length > 0
+        fail_msg: >-
+          Failed to parse LUN inventory payload from Synology: expected JSON object
+          with "success" or "data" at top level, but no such payload was found
+          in synowebapi output. Raw stdout (truncated): {{
+            synology_luns_raw.stdout | default('') | truncate(200, True, '...')
+          }}
+
+    - name: Parse LUN inventory payload
+      ansible.builtin.set_fact:
+        synology_luns_payload: >-
+          {{
+            synology_luns_json_raw
+            | from_json
+          }}
+
+    - name: Build normalized LUN list
+      ansible.builtin.set_fact:
+        synology_luns: "{{ synology_luns_payload.data.luns | default([]) }}"
+
+    - name: Fetch authoritative LUN mappings from DSM
+      ansible.builtin.raw: "cat {{ synology_remote_iscsi_mapping_conf_path }}"
+      register: synology_mapping_conf_raw
+      changed_when: false
+
+    - name: Fetch live target metadata from Synology
+      ansible.builtin.raw: "{{ synology_remote_list_targets_cmd }}"
+      register: synology_targets_raw
+      changed_when: false
+
+    - name: Extract live target JSON payload substring
+      ansible.builtin.set_fact:
+        synology_targets_json_raw: >-
+          {{
+            synology_targets_raw.stdout
+            | regex_search('(?ms)\{\s*"(?:success|data)".*\}\s*$')
+          }}
+
+    - name: Assert live target payload JSON was extracted
+      ansible.builtin.assert:
+        that:
+          - synology_targets_json_raw is string
+          - synology_targets_json_raw | length > 0
+        fail_msg: >-
+          Failed to parse live target payload from Synology: expected JSON object
+          with "success" or "data" at top level, but no such payload was found
+          in synowebapi output. Raw stdout (truncated): {{
+            synology_targets_raw.stdout | default('') | truncate(200, True, '...')
+          }}
+
+    - name: Parse live target payload
+      ansible.builtin.set_fact:
+        synology_targets_payload: >-
+          {{
+            synology_targets_json_raw
+            | from_json
+          }}
+
+    - name: Extract mapping entries as tid and uuid pairs
+      ansible.builtin.set_fact:
+        synology_mapping_pairs: >-
+          {{
+            synology_mapping_conf_raw.stdout
+            | regex_findall('(?m)^\[iSCSI_MAP_T(\d+)_L([0-9a-fA-F-]{36})\]$')
+            | list
+          }}
+
+    - name: Build uuid to target-id mapping from config entries
+      ansible.builtin.set_fact:
+        synology_uuid_to_target_id: >-
+          {{
+            synology_uuid_to_target_id | default({})
+            | combine({ (item.1 | lower): (item.0 | string) })
+          }}
+      loop: "{{ synology_mapping_pairs }}"
+
+    - name: Build k8s target metadata by target-id
+      ansible.builtin.set_fact:
+        synology_k8s_targets_by_id: >-
+          {{
+            synology_k8s_targets_by_id | default({})
+            | combine({
+              (item.target_id | string): {
+                'name': (item.name | string),
+                'status': (item.status | default('unknown') | string),
+                'connected': ((item.status | default('unknown') | string) == 'connected')
+              }
+            })
+          }}
+      loop: "{{ synology_targets_payload.data.targets | default([]) }}"
+      when:
+        - item.name is defined
+        - item.name is match('^' ~ (synology_k8s_target_name_prefix | regex_escape))
+
+    - name: Build orphan discovery report
+      ansible.builtin.set_fact:
+        synology_lun_report: "{{ (synology_lun_report | default([])) + [lun_entry] }}"
+      vars:
+        lun_uuid: "{{ item.uuid | default(item.lun_uuid | default('')) }}"
+        lun_name: "{{ item.name | default(item.display_name | default('unnamed-lun')) }}"
+        lun_uuid_norm: "{{ lun_uuid | lower }}"
+        target_id: "{{ (synology_uuid_to_target_id | default({})).get(lun_uuid_norm, '') }}"
+        target_meta: "{{ (synology_k8s_targets_by_id | default({})).get(target_id, {}) }}"
+        is_k8s_mapping: "{{ target_id | length > 0 and target_meta | length > 0 }}"
+        target_connected: "{{ target_meta.connected | default(false) | bool }}"
+        excluded_by_name: >-
+          {{
+            synology_lun_name_exclude_patterns
+            | select('search', lun_name)
+            | list
+            | length > 0
+          }}
+        lun_entry:
+          uuid: "{{ lun_uuid }}"
+          name: "{{ lun_name }}"
+          mapped: "{{ target_id | length > 0 }}"
+          target_id: "{{ target_id }}"
+          target_name: "{{ target_meta.name | default('') }}"
+          target_status: "{{ target_meta.status | default('unknown') }}"
+          target_connected: "{{ target_connected }}"
+          is_k8s_mapping: "{{ is_k8s_mapping }}"
+          excluded_by_name: "{{ excluded_by_name }}"
+          likely_orphan: "{{ is_k8s_mapping and (not target_connected) and (lun_uuid | length > 0) and (not excluded_by_name) }}"
+      loop: "{{ synology_luns }}"
+
+    - name: Build list of likely orphan UUIDs
+      ansible.builtin.set_fact:
+        orphan_lun_uuids: >-
+          {{
+            synology_lun_report
+            | selectattr('likely_orphan', 'equalto', true)
+            | map(attribute='uuid')
+            | list
+          }}
+
+    - name: Show per-LUN discovery summary
+      ansible.builtin.debug:
+        var: synology_lun_report
+
+    - name: Show likely orphan UUIDs
+      ansible.builtin.debug:
+        msg:
+          - "Likely orphan UUIDs: {{ orphan_lun_uuids }}"
+          - >-
+            Cleanup command:
+            ansible-playbook ansible/synology/cleanup_orphaned_luns.yml
+            -i inventory/environments/synology.ini
+            -e 'orphan_lun_uuids={{ orphan_lun_uuids | to_json }}'
+            -e 'perform_cleanup=true'
+
+    - name: Show clean discovery summary when no likely orphan UUIDs are found
+      ansible.builtin.debug:
+        msg: >-
+          No likely orphan UUIDs were found with current heuristics.
+          Discovery completed successfully with no cleanup candidates.
+      when: orphan_lun_uuids | length == 0
+
+    - name: Optionally fail when no likely orphan UUIDs found
+      ansible.builtin.fail:
+        msg: >-
+          No k8s mapped but disconnected UUIDs were found with current heuristics.
+          Confirm mappings and session state in DSM/SAN Manager, then adjust
+          synology_lun_name_exclude_patterns or review synology_lun_report.
+      when:
+        - orphan_lun_uuids | length == 0
+        - synology_fail_when_none_found | bool

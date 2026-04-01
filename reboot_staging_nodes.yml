@@ -1,0 +1,28 @@
+---
+- name: Reboot targeted staging nodes
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Reboot k8s-stg-cp-2 via SSH
+      command: ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@10.20.2.2 "reboot"
+      ignore_errors: yes
+      register: cp2_result
+
+    - name: Reboot k8s-stg-worker-2 via SSH
+      command: ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@10.21.2.2 "reboot"
+      ignore_errors: yes
+      register: worker2_result
+
+    - name: Show results
+      debug:
+        msg:
+          - >-
+            CP-2 reboot:
+            {{ 'Success (command executed)' if (cp2_result.rc is defined and cp2_result.rc == 0)
+               else ('Unknown/likely disconnected (rc=255): ' ~ (cp2_result.stderr | default('no stderr'))) if (cp2_result.rc is defined and cp2_result.rc == 255)
+               else 'Failed: ' ~ (cp2_result.stderr | default('unknown error')) }}
+          - >-
+            Worker-2 reboot:
+            {{ 'Success (command executed)' if (worker2_result.rc is defined and worker2_result.rc == 0)
+               else ('Unknown/likely disconnected (rc=255): ' ~ (worker2_result.stderr | default('no stderr'))) if (worker2_result.rc is defined and worker2_result.rc == 255)
+               else 'Failed: ' ~ (worker2_result.stderr | default('unknown error')) }}

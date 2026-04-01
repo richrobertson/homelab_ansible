@@ -1,0 +1,8 @@
+# Synology Inventory Example
+# Copy this file to inventory/environments/synology.ini and customize as needed.
+
+[synology_nas]
+synology-main ansible_host=192.168.1.215 ansible_user=admin
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3

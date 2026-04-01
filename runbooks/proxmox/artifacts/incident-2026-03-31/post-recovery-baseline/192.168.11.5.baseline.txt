@@ -1,0 +1,68 @@
+pve5
+Wed Apr  1 01:01:52 AM UTC 2026
+--- pve-firewall status ---
+Status: disabled/running
+--- forwarding/rp_filter ---
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+--- bgp evpn summary ---
+BGP router identifier 192.168.1.243, local AS number 65000 VRF default vrf-id 0
+BGP table version 0
+RIB entries 39, using 4992 bytes of memory
+Peers 2, using 47 KiB of memory
+Peer groups 1, using 64 bytes of memory
+
+Neighbor            V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State/PfxRcd   PfxSnt Desc
+pve3(192.168.1.241) 4      65000       991       992       18    0    0 00:47:42           36       17 FRRouting/10.4.1
+pve4(192.168.1.242) 4      65000       986       998       18    0    0 00:47:42           18       17 FRRouting/10.4.1
+
+Total number of neighbors 2
+--- evpn vni ---
+VNI        Type VxLAN IF              # MACs   # ARPs   # Remote VTEPs  Tenant VRF                           
+1000       L2   vxlan_stgctr          3        6        2               vrf_stgl3                            
+2050       L2   vxlan_proddata        3        11       2               vrf_prodl3                           
+1050       L2   vxlan_prodctr         3        6        2               vrf_prodl3                           
+2000       L2   vxlan_stgdata         3        20       2               vrf_stgl3                            
+4050       L3   vrfvx_prodl3          0        0        n/a             vrf_prodl3                           
+4000       L3   vrfvx_stgl3           0        0        n/a             vrf_stgl3                            
+--- vrf route stgl3 ---
+10.20.0.0/24 dev stgctr proto kernel scope link src 10.20.0.1 
+10.20.1.0/24 dev stgctr proto kernel scope link src 10.20.1.1 
+10.20.2.0/24 dev stgctr proto kernel scope link src 10.20.2.1 
+10.21.0.0/24 dev stgdata proto kernel scope link src 10.21.0.1 
+10.21.1.0/24 dev stgdata proto kernel scope link src 10.21.1.1 
+10.21.2.0/24 dev stgdata proto kernel scope link src 10.21.2.1 
+blackhole 10.30.0.0/24 proto static metric 20 
+blackhole 10.30.1.0/24 proto static metric 20 
+blackhole 10.30.2.0/24 proto static metric 20 
+blackhole 10.31.0.0/24 proto static metric 20 
+blackhole 10.31.1.0/24 proto static metric 20 
+blackhole 10.31.2.0/24 proto static metric 20 
+--- vrf neighbors stgl3 ---
+10.21.0.74 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.78 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.66 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.76 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.64 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.70 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.1.2 dev stgdata lladdr bc:24:11:61:24:49 extern_learn NOARP proto zebra 
+10.21.0.82 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.2 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.20.2.2 dev stgctr lladdr bc:24:11:d7:2a:27 REACHABLE 
+10.21.0.75 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.73 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.79 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.77 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.67 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.20.1.2 dev stgctr lladdr bc:24:11:77:70:41 extern_learn NOARP proto zebra 
+10.21.0.69 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.81 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.20.0.2 dev stgctr lladdr bc:24:11:77:a1:a3 extern_learn NOARP proto zebra 
+10.21.2.2 dev stgdata lladdr bc:24:11:94:95:7d REACHABLE 
+fe80::be24:11ff:fe77:a1a3 dev stgctr lladdr bc:24:11:77:a1:a3 extern_learn NOARP proto zebra 
+fe80::be24:11ff:fe61:2449 dev stgdata lladdr bc:24:11:61:24:49 extern_learn NOARP proto zebra 
+fe80::be24:11ff:fed7:2a27 dev stgctr lladdr bc:24:11:d7:2a:27 STALE 
+fe80::be24:11ff:feae:bc85 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+fe80::be24:11ff:fe77:7041 dev stgctr lladdr bc:24:11:77:70:41 extern_learn NOARP proto zebra 
+fe80::be24:11ff:fe94:957d dev stgdata lladdr bc:24:11:94:95:7d STALE 
