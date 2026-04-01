@@ -1,3 +1,4 @@
+---
 - name: Discover and optionally clean orphaned Synology iSCSI LUNs
   hosts: synology_nas
   gather_facts: false
@@ -228,6 +229,9 @@
         path: "{{ synology_cleanup_audit_log_path | dirname }}"
         state: directory
         mode: '0750'
+      delegate_to: localhost
+      run_once: true
+      become: false
       when:
         - perform_cleanup
         - synology_cleanup_audit_log_enabled
@@ -243,6 +247,9 @@
           host={{ synology_nas_host }}
           discovered={{ orphan_lun_uuids | to_json }}
           deleted={{ synology_deleted_lun_uuids | default([]) | to_json }}
+      delegate_to: localhost
+      run_once: true
+      become: false
       when:
         - perform_cleanup
         - synology_cleanup_audit_log_enabled

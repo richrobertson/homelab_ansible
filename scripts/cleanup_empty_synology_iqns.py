@@ -172,6 +172,9 @@ def write_report(report_path: Path, targets: list[dict]) -> None:
 
 
 def delete_target(host: str, port: int, user: str, password: str, target_id: str) -> tuple[bool, str, str]:
+    if not target_id.isdigit():
+        return False, "", f"invalid target_id={target_id!r}"
+
     commands = [
         f"/usr/syno/bin/synowebapi --exec api=SYNO.Core.ISCSI.Target method=delete version=1 target_id_list='[{target_id}]'",
         f"/usr/syno/bin/synowebapi --exec api=SYNO.Core.ISCSI.Target method=delete version=1 target_id_list=[{target_id}]",

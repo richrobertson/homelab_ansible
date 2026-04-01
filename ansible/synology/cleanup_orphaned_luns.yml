@@ -14,8 +14,19 @@
       method=list
       version=1
 
+    synology_remote_list_targets_cmd: >-
+      /usr/syno/bin/synowebapi
+      --exec
+      api=SYNO.Core.ISCSI.Target
+      method=list
+      version=1
+      additional='["status"]'
+
     # DSM stores authoritative LUN-to-target mappings in this file.
     synology_remote_iscsi_mapping_conf_path: /usr/syno/etc/iscsi_mapping.conf
+
+    # Kubernetes CSI targets use this prefix in Synology.
+    synology_k8s_target_name_prefix: k8s-csi-pvc-
 
     # Command template used to delete a single LUN UUID.
     # __LUN_UUID__ is replaced per-item in the loop below.
@@ -79,21 +90,70 @@
             | list
           }}
 
+    - name: Fetch live target metadata from Synology
+      ansible.builtin.raw: "{{ synology_remote_list_targets_cmd }}"
+      register: synology_targets_raw
+      changed_when: false
+
+    - name: Parse live target payload
+      ansible.builtin.set_fact:
+        synology_targets_payload: >-
+          {{
+            (synology_targets_raw.stdout | regex_search('(?ms)\{.*\}\s*$'))
+            | from_json
+          }}
+
     - name: Fetch authoritative LUN mappings from DSM
       ansible.builtin.raw: "cat {{ synology_remote_iscsi_mapping_conf_path }}"
       register: synology_mapping_conf_raw
       changed_when: false
 
+    - name: Extract mapping entries as tid and uuid pairs
+      ansible.builtin.set_fact:
+        synology_mapping_pairs: >-
+          {{
+            synology_mapping_conf_raw.stdout
+            | regex_findall('(?m)^\[iSCSI_MAP_T(\d+)_L([0-9a-fA-F-]{36})\]$')
+            | list
+          }}
+
     - name: Build set of mapped LUN UUIDs from mapping config
       ansible.builtin.set_fact:
         synology_mapped_lun_uuids: >-
           {{
-            synology_mapping_conf_raw.stdout
-            | regex_findall('(?m)^uuid=([0-9a-fA-F-]{36})$')
+            synology_mapping_pairs
+            | map('last')
             | map('lower')
             | unique
             | list
           }}
+
+    - name: Build uuid to target-id mapping from config entries
+      ansible.builtin.set_fact:
+        synology_uuid_to_target_id: >-
+          {{
+            synology_uuid_to_target_id | default({})
+            | combine({ (item.1 | lower): (item.0 | string) })
+          }}
+      loop: "{{ synology_mapping_pairs }}"
+
+    - name: Build k8s target metadata by target-id
+      ansible.builtin.set_fact:
+        synology_k8s_targets_by_id: >-
+          {{
+            synology_k8s_targets_by_id | default({})
+            | combine({
+              (item.target_id | string): {
+                'name': (item.name | string),
+                'status': (item.status | default('unknown') | string),
+                'connected': ((item.status | default('unknown') | string) == 'connected')
+              }
+            })
+          }}
+      loop: "{{ synology_targets_payload.data.targets | default([]) }}"
+      when:
+        - item.name is defined
+        - item.name is match('^' ~ (synology_k8s_target_name_prefix | regex_escape))
 
     - name: Show candidate orphan LUN UUIDs
       ansible.builtin.debug:
@@ -108,13 +168,25 @@
       loop: "{{ orphan_lun_uuids }}"
       when: item not in synology_known_lun_uuids
 
-    - name: Fail when requested UUID is still mapped
+    - name: Fail when requested UUID is mapped to an ineligible target
       ansible.builtin.fail:
         msg: >-
-          Refusing to delete UUID {{ item }} because it is mapped according to
-          {{ synology_remote_iscsi_mapping_conf_path }}.
+          Refusing to delete UUID {{ item }} because it is still mapped and is not
+          a disconnected k8s target eligible for cleanup.
       loop: "{{ orphan_lun_uuids }}"
-      when: item | lower in synology_mapped_lun_uuids
+      vars:
+        target_id: "{{ (synology_uuid_to_target_id | default({})).get(item | lower, '') }}"
+        target_meta: "{{ (synology_k8s_targets_by_id | default({})).get(target_id, {}) }}"
+        eligible_disconnected_k8s_mapping: >-
+          {{
+            (item | lower in synology_mapped_lun_uuids)
+            and (target_id | length > 0)
+            and (target_meta | length > 0)
+            and not (target_meta.connected | default(false) | bool)
+          }}
+      when:
+        - item | lower in synology_mapped_lun_uuids
+        - not eligible_disconnected_k8s_mapping
 
     - name: Preview delete commands (dry run)
       ansible.builtin.debug:
@@ -153,6 +225,9 @@
         path: "{{ synology_cleanup_audit_log_path | dirname }}"
         state: directory
         mode: '0750'
+      delegate_to: localhost
+      run_once: true
+      become: false
       when:
         - perform_cleanup
         - synology_cleanup_audit_log_enabled
@@ -168,6 +243,9 @@
           host={{ synology_nas_host }}
           requested={{ orphan_lun_uuids | to_json }}
           deleted={{ synology_deleted_lun_uuids | default([]) | to_json }}
+      delegate_to: localhost
+      run_once: true
+      become: false
       when:
         - perform_cleanup
         - synology_cleanup_audit_log_enabled
