@@ -168,14 +168,21 @@ luns_raw_path, targets_raw_path, mapping_raw_path, output_path, k8s_prefix = sys
 
 def extract_json(raw_text: str):
   decoder = json.JSONDecoder()
+  candidates = []
   for index, char in enumerate(raw_text):
     if char != "{":
       continue
     try:
       payload, _ = decoder.raw_decode(raw_text[index:])
-      return payload
+      if isinstance(payload, dict):
+        candidates.append(payload)
     except json.JSONDecodeError:
       continue
+  for payload in reversed(candidates):
+    if "data" in payload or "success" in payload:
+      return payload
+  if candidates:
+    return candidates[-1]
   raise RuntimeError("Could not locate JSON payload in command output")
 
 
