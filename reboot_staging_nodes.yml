@@ -18,9 +18,11 @@
         msg:
           - >-
             CP-2 reboot:
-            {{ 'Success (expected disconnect)' if (cp2_result.rc is defined and cp2_result.rc in [0, 255])
+            {{ 'Success (command executed)' if (cp2_result.rc is defined and cp2_result.rc == 0)
+               else ('Unknown/likely disconnected (rc=255): ' ~ (cp2_result.stderr | default('no stderr'))) if (cp2_result.rc is defined and cp2_result.rc == 255)
                else 'Failed: ' ~ (cp2_result.stderr | default('unknown error')) }}
           - >-
             Worker-2 reboot:
-            {{ 'Success (expected disconnect)' if (worker2_result.rc is defined and worker2_result.rc in [0, 255])
+            {{ 'Success (command executed)' if (worker2_result.rc is defined and worker2_result.rc == 0)
+               else ('Unknown/likely disconnected (rc=255): ' ~ (worker2_result.stderr | default('no stderr'))) if (worker2_result.rc is defined and worker2_result.rc == 255)
                else 'Failed: ' ~ (worker2_result.stderr | default('unknown error')) }}
