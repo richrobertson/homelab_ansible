@@ -1,0 +1,884 @@
+UUID=231f4dbb-4c32-4cb1-95d1-d36873f085b4 TID=7
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[7],"uuid":"231f4dbb-4c32-4cb1-95d1-d36873f085b4"}, runner=SYSTEM_ADMIN
+    {
+       "error" : {
+          "code" : 18990531
+       },
+       "httpd_restart" : false,
+       "success" : false
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"231f4dbb-4c32-4cb1-95d1-d36873f085b4"}, runner=SYSTEM_ADMIN
+    {
+       "error" : {
+          "code" : 18990531
+       },
+       "httpd_restart" : false,
+       "success" : false
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"231f4dbb-4c32-4cb1-95d1-d36873f085b4"}, runner=SYSTEM_ADMIN
+    {
+       "error" : {
+          "code" : 18990531
+       },
+       "httpd_restart" : false,
+       "success" : false
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=b56b3379-dd76-4757-824b-db880a286750 TID=128
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[128],"uuid":"b56b3379-dd76-4757-824b-db880a286750"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"b56b3379-dd76-4757-824b-db880a286750"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"b56b3379-dd76-4757-824b-db880a286750"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=fcd9798e-2b4b-4334-b6af-1d9415ad3eda TID=34
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[34],"uuid":"fcd9798e-2b4b-4334-b6af-1d9415ad3eda"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"fcd9798e-2b4b-4334-b6af-1d9415ad3eda"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"fcd9798e-2b4b-4334-b6af-1d9415ad3eda"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=5166eb30-af0e-4d6f-ab02-fac0e44e78cb TID=15
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[15],"uuid":"5166eb30-af0e-4d6f-ab02-fac0e44e78cb"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"5166eb30-af0e-4d6f-ab02-fac0e44e78cb"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"5166eb30-af0e-4d6f-ab02-fac0e44e78cb"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=3eeb1633-d099-43fb-8916-b96049457427 TID=35
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[35],"uuid":"3eeb1633-d099-43fb-8916-b96049457427"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"3eeb1633-d099-43fb-8916-b96049457427"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"3eeb1633-d099-43fb-8916-b96049457427"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=f3b80e55-dbea-4ff8-8895-74b6a1083e59 TID=70
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[70],"uuid":"f3b80e55-dbea-4ff8-8895-74b6a1083e59"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"f3b80e55-dbea-4ff8-8895-74b6a1083e59"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"f3b80e55-dbea-4ff8-8895-74b6a1083e59"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=417c4484-ab54-4141-aacf-c2ee6d6bed56 TID=24
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[24],"uuid":"417c4484-ab54-4141-aacf-c2ee6d6bed56"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"417c4484-ab54-4141-aacf-c2ee6d6bed56"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"417c4484-ab54-4141-aacf-c2ee6d6bed56"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=3d325391-4c2a-4510-8f0d-6fb28f54f1bd TID=80
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[80],"uuid":"3d325391-4c2a-4510-8f0d-6fb28f54f1bd"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"3d325391-4c2a-4510-8f0d-6fb28f54f1bd"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"3d325391-4c2a-4510-8f0d-6fb28f54f1bd"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=4f38ef6b-5ef9-4ef2-b602-975fb588e31e TID=25
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[25],"uuid":"4f38ef6b-5ef9-4ef2-b602-975fb588e31e"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"4f38ef6b-5ef9-4ef2-b602-975fb588e31e"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"4f38ef6b-5ef9-4ef2-b602-975fb588e31e"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=18505f8e-86c6-4eb4-96ac-f62741f2fa85 TID=31
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[31],"uuid":"18505f8e-86c6-4eb4-96ac-f62741f2fa85"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"18505f8e-86c6-4eb4-96ac-f62741f2fa85"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"18505f8e-86c6-4eb4-96ac-f62741f2fa85"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=48f7abbe-338f-42c2-b6ad-8173c3b5ac79 TID=3
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[3],"uuid":"48f7abbe-338f-42c2-b6ad-8173c3b5ac79"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"48f7abbe-338f-42c2-b6ad-8173c3b5ac79"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"48f7abbe-338f-42c2-b6ad-8173c3b5ac79"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=4eb01219-f579-4de0-856c-3ef5a69f5e64 TID=8
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[8],"uuid":"4eb01219-f579-4de0-856c-3ef5a69f5e64"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"4eb01219-f579-4de0-856c-3ef5a69f5e64"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"4eb01219-f579-4de0-856c-3ef5a69f5e64"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=495c598c-46ec-48d2-aa18-c83908658767 TID=4
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[4],"uuid":"495c598c-46ec-48d2-aa18-c83908658767"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"495c598c-46ec-48d2-aa18-c83908658767"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"495c598c-46ec-48d2-aa18-c83908658767"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=091e8f9c-c943-41b7-bd2c-6e8607f6f97d TID=120
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[120],"uuid":"091e8f9c-c943-41b7-bd2c-6e8607f6f97d"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"091e8f9c-c943-41b7-bd2c-6e8607f6f97d"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"091e8f9c-c943-41b7-bd2c-6e8607f6f97d"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=83d40ebc-f735-40de-a5ba-40eb4a1678b3 TID=72
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[72],"uuid":"83d40ebc-f735-40de-a5ba-40eb4a1678b3"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"83d40ebc-f735-40de-a5ba-40eb4a1678b3"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"83d40ebc-f735-40de-a5ba-40eb4a1678b3"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=63a03fbd-7947-40dc-8942-eb7ec2bc7cad TID=92
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[92],"uuid":"63a03fbd-7947-40dc-8942-eb7ec2bc7cad"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"63a03fbd-7947-40dc-8942-eb7ec2bc7cad"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"63a03fbd-7947-40dc-8942-eb7ec2bc7cad"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=554eb464-8f23-43ab-96cb-ac404e789017 TID=32
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[32],"uuid":"554eb464-8f23-43ab-96cb-ac404e789017"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"554eb464-8f23-43ab-96cb-ac404e789017"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"554eb464-8f23-43ab-96cb-ac404e789017"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=a97adf86-969e-4fdd-8250-cc485c0f565c TID=10
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[10],"uuid":"a97adf86-969e-4fdd-8250-cc485c0f565c"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"a97adf86-969e-4fdd-8250-cc485c0f565c"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"a97adf86-969e-4fdd-8250-cc485c0f565c"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=17bb6614-71e1-48c3-8759-09a3080f82db TID=16
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[16],"uuid":"17bb6614-71e1-48c3-8759-09a3080f82db"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"17bb6614-71e1-48c3-8759-09a3080f82db"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"17bb6614-71e1-48c3-8759-09a3080f82db"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=23c3e643-163f-48c1-86ef-1f4944fe0d05 TID=30
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[30],"uuid":"23c3e643-163f-48c1-86ef-1f4944fe0d05"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"23c3e643-163f-48c1-86ef-1f4944fe0d05"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"23c3e643-163f-48c1-86ef-1f4944fe0d05"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=b24d97e6-a331-4cb9-bf07-a2c2972f1000 TID=6
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[6],"uuid":"b24d97e6-a331-4cb9-bf07-a2c2972f1000"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"b24d97e6-a331-4cb9-bf07-a2c2972f1000"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"b24d97e6-a331-4cb9-bf07-a2c2972f1000"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=a0e4e808-265b-4813-9f0f-8aeec0b86fd5 TID=33
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[33],"uuid":"a0e4e808-265b-4813-9f0f-8aeec0b86fd5"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"a0e4e808-265b-4813-9f0f-8aeec0b86fd5"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"a0e4e808-265b-4813-9f0f-8aeec0b86fd5"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=2da008b1-f860-41bc-aa70-c7f430e1eaf9 TID=121
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[121],"uuid":"2da008b1-f860-41bc-aa70-c7f430e1eaf9"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"2da008b1-f860-41bc-aa70-c7f430e1eaf9"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"2da008b1-f860-41bc-aa70-c7f430e1eaf9"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=cb7ade76-90bb-4e54-855d-305e890182b3 TID=28
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[28],"uuid":"cb7ade76-90bb-4e54-855d-305e890182b3"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"cb7ade76-90bb-4e54-855d-305e890182b3"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"cb7ade76-90bb-4e54-855d-305e890182b3"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+
+UUID=b2cc9fe8-5baf-4183-bcad-f95cfe9b3917 TID=12
+  STEP=unmap
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unmap_target, param={"target_ids":[12],"uuid":"b2cc9fe8-5baf-4183-bcad-f95cfe9b3917"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=unload
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=unload_lun, param={"uuid":"b2cc9fe8-5baf-4183-bcad-f95cfe9b3917"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+  STEP=delete
+    synology-main | CHANGED | rc=0 >>
+    Could not chdir to home directory /var/services/homes/rich: No such file or directory
+    
+    [Line 295] Exec WebAPI:  api=SYNO.Core.ISCSI.LUN, version=1, method=delete, param={"uuid":"b2cc9fe8-5baf-4183-bcad-f95cfe9b3917"}, runner=SYSTEM_ADMIN
+    {
+       "httpd_restart" : false,
+       "success" : true
+    }
+    Shared connection to 192.168.1.215 closed.
+    
+

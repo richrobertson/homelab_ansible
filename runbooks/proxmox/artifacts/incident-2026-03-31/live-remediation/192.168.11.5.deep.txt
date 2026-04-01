@@ -1,0 +1,61 @@
+===== HOST 192.168.11.5 =====
+Tue Mar 31 11:35:31 PM UTC 2026
+--- hostname ---
+pve5
+--- pve-firewall status ---
+Status: disabled/running
+--- ip_forward/rp_filter ---
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+--- evpn summary ---
+BGP router identifier 192.168.1.243, local AS number 65000 VRF default vrf-id 0
+BGP table version 0
+RIB entries 35, using 4480 bytes of memory
+Peers 2, using 47 KiB of memory
+Peer groups 1, using 64 bytes of memory
+
+Neighbor            V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State/PfxRcd   PfxSnt Desc
+pve3(192.168.1.241) 4      65000    179749    179762       82    0    0 6d05h30m           30       23 FRRouting/10.4.1
+pve4(192.168.1.242) 4      65000    179741    179748       82    0    0 6d05h45m           18       23 FRRouting/10.4.1
+
+Total number of neighbors 2
+--- evpn vni ---
+VNI        Type VxLAN IF              # MACs   # ARPs   # Remote VTEPs  Tenant VRF                           
+1000       L2   vxlan_stgctr          3        7        2               vrf_stgl3                            
+2050       L2   vxlan_proddata        3        11       2               vrf_prodl3                           
+1050       L2   vxlan_prodctr         3        6        2               vrf_prodl3                           
+2000       L2   vxlan_stgdata         3        21       2               vrf_stgl3                            
+4050       L3   vrfvx_prodl3          0        0        n/a             vrf_prodl3                           
+4000       L3   vrfvx_stgl3           2        2        n/a             vrf_stgl3                            
+--- route vrf ---
+10.20.0.0/24 dev stgctr proto kernel scope link src 10.20.0.1 
+10.20.0.2 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.20.1.0/24 dev stgctr proto kernel scope link src 10.20.1.1 
+10.20.1.2 nhid 78 via 192.168.1.242 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.20.2.0/24 dev stgctr proto kernel scope link src 10.20.2.1 
+10.21.0.0/24 dev stgdata proto kernel scope link src 10.21.0.1 
+10.21.0.2 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.64 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.66 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.67 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.69 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.70 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.73 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.74 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.75 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.76 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.77 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.78 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.79 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.81 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.82 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.1.0/24 dev stgdata proto kernel scope link src 10.21.1.1 
+10.21.1.2 nhid 78 via 192.168.1.242 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.2.0/24 dev stgdata proto kernel scope link src 10.21.2.1 
+blackhole 10.30.0.0/24 proto static metric 20 
+blackhole 10.30.1.0/24 proto static metric 20 
+blackhole 10.30.2.0/24 proto static metric 20 
+blackhole 10.31.0.0/24 proto static metric 20 
+blackhole 10.31.1.0/24 proto static metric 20 
+blackhole 10.31.2.0/24 proto static metric 20 

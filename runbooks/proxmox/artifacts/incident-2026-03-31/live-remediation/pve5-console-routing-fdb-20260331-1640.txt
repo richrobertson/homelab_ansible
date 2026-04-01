@@ -1,0 +1,85 @@
+=== routes ===
+10.20.0.0/24 dev stgctr proto kernel scope link src 10.20.0.1 
+10.20.0.2 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.20.1.0/24 dev stgctr proto kernel scope link src 10.20.1.1 
+10.20.1.2 nhid 78 via 192.168.1.242 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.20.2.0/24 dev stgctr proto kernel scope link src 10.20.2.1 
+10.21.0.0/24 dev stgdata proto kernel scope link src 10.21.0.1 
+10.21.0.2 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.64 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.66 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.67 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.69 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.70 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.73 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.74 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.75 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.76 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.77 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.78 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.79 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.81 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.0.82 nhid 83 via 192.168.1.241 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.1.0/24 dev stgdata proto kernel scope link src 10.21.1.1 
+10.21.1.2 nhid 78 via 192.168.1.242 dev vrfbr_stgl3 proto bgp metric 20 onlink 
+10.21.2.0/24 dev stgdata proto kernel scope link src 10.21.2.1 
+blackhole 10.30.0.0/24 proto static metric 20 
+blackhole 10.30.1.0/24 proto static metric 20 
+blackhole 10.30.2.0/24 proto static metric 20 
+blackhole 10.31.0.0/24 proto static metric 20 
+blackhole 10.31.1.0/24 proto static metric 20 
+blackhole 10.31.2.0/24 proto static metric 20 
+=== neighbors ===
+10.21.0.2 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.67 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.75 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.20.1.2 dev stgctr lladdr bc:24:11:77:70:41 extern_learn NOARP proto zebra 
+10.21.0.79 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.82 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.1.2 dev stgdata lladdr bc:24:11:61:24:49 extern_learn NOARP proto zebra 
+192.168.1.242 dev vrfbr_stgl3 lladdr 2e:48:2a:fb:2f:5a extern_learn NOARP proto zebra 
+10.20.0.2 dev stgctr lladdr bc:24:11:77:a1:a3 extern_learn NOARP proto zebra 
+10.21.0.66 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.70 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.74 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.78 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.20.2.0 dev stgctr FAILED 
+10.21.2.2 dev stgdata lladdr bc:24:11:94:95:7d REACHABLE 
+10.21.0.81 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+192.168.1.241 dev vrfbr_stgl3 lladdr 76:5a:9f:c9:93:90 extern_learn NOARP proto zebra 
+10.21.0.69 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.73 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.77 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.64 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.21.0.76 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+10.20.2.2 dev stgctr lladdr bc:24:11:d7:2a:27 REACHABLE 
+fe80::be24:11ff:fe94:957d dev stgdata lladdr bc:24:11:94:95:7d STALE 
+fe80::be24:11ff:fedf:1848 dev stgdata lladdr bc:24:11:df:18:48 STALE 
+fe80::be24:11ff:fe61:2449 dev stgdata lladdr bc:24:11:61:24:49 extern_learn NOARP proto zebra 
+fe80::be24:11ff:feae:bc85 dev stgdata lladdr bc:24:11:ae:bc:85 extern_learn NOARP proto zebra 
+fe80::be24:11ff:fe77:a1a3 dev stgctr lladdr bc:24:11:77:a1:a3 extern_learn NOARP proto zebra 
+fe80::be24:11ff:fe77:7041 dev stgctr lladdr bc:24:11:77:70:41 extern_learn NOARP proto zebra 
+fe80::be24:11ff:fe3c:96b8 dev stgctr lladdr bc:24:11:3c:96:b8 STALE 
+fe80::be24:11ff:fed7:2a27 dev stgctr lladdr bc:24:11:d7:2a:27 STALE 
+=== vxlan fdb stgctr ===
+bc:24:11:77:a1:a3 vlan 1 extern_learn master stgctr 
+bc:24:11:77:a1:a3 extern_learn master stgctr 
+bc:24:11:77:70:41 vlan 1 extern_learn master stgctr 
+bc:24:11:77:70:41 extern_learn master stgctr 
+32:1c:e9:66:93:cf vlan 1 master stgctr permanent
+32:1c:e9:66:93:cf master stgctr permanent
+bc:24:11:77:a1:a3 dst 192.168.1.241 self extern_learn 
+bc:24:11:77:70:41 dst 192.168.1.242 self extern_learn 
+00:00:00:00:00:00 dst 192.168.1.242 self permanent
+00:00:00:00:00:00 dst 192.168.1.241 self permanent
+=== vxlan fdb stgdata ===
+bc:24:11:61:24:49 vlan 1 extern_learn master stgdata 
+bc:24:11:61:24:49 extern_learn master stgdata 
+bc:24:11:ae:bc:85 vlan 1 extern_learn master stgdata 
+bc:24:11:ae:bc:85 extern_learn master stgdata 
+8a:57:a0:49:a0:1e vlan 1 master stgdata permanent
+8a:57:a0:49:a0:1e master stgdata permanent
+bc:24:11:61:24:49 dst 192.168.1.242 self extern_learn 
+bc:24:11:ae:bc:85 dst 192.168.1.241 self extern_learn 
+00:00:00:00:00:00 dst 192.168.1.242 self permanent
+00:00:00:00:00:00 dst 192.168.1.241 self permanent

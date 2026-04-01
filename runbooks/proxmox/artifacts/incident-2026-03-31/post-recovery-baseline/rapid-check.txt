@@ -1,0 +1,72 @@
+RUN_AT=Wed Apr  1 01:00:40 UTC 2026
+== Proxmox host reachability ==
+192.168.11.4 ssh=OK
+192.168.11.5 ssh=OK
+
+== Staging API/Talos ports ==
+10.20.0.2:6443 Connection to 10.20.0.2 port 6443 [tcp/sun-sr-https] succeeded!
+10.20.0.2:50000 Connection to 10.20.0.2 port 50000 [tcp/*] succeeded!
+10.20.1.2:6443 Connection to 10.20.1.2 port 6443 [tcp/sun-sr-https] succeeded!
+10.20.1.2:50000 Connection to 10.20.1.2 port 50000 [tcp/*] succeeded!
+10.20.2.2:6443 Connection to 10.20.2.2 port 6443 [tcp/sun-sr-https] succeeded!
+10.20.2.2:50000 Connection to 10.20.2.2 port 50000 [tcp/*] succeeded!
+10.21.2.2:6443 nc: connectx to 10.21.2.2 port 6443 (tcp) failed: Connection refused
+10.21.2.2:50000 Connection to 10.21.2.2 port 50000 [tcp/*] succeeded!
+
+== Kubernetes nodes ==
+NAME               STATUS   ROLES           AGE    VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE          KERNEL-VERSION   CONTAINER-RUNTIME
+k8s-stg-cp-0       Ready    control-plane   157d   v1.34.0   10.20.0.2     <none>        Talos (v1.11.1)   6.12.45-talos    containerd://2.1.4
+k8s-stg-cp-1       Ready    control-plane   157d   v1.34.0   10.20.1.2     <none>        Talos (v1.11.1)   6.12.45-talos    containerd://2.1.4
+k8s-stg-cp-2       Ready    control-plane   44m    v1.34.0   10.20.2.2     <none>        Talos (v1.11.1)   6.12.45-talos    containerd://2.1.4
+k8s-stg-worker-0   Ready    <none>          157d   v1.34.0   10.21.0.2     <none>        Talos (v1.11.1)   6.12.45-talos    containerd://2.1.4
+k8s-stg-worker-1   Ready    <none>          157d   v1.34.0   10.21.1.2     <none>        Talos (v1.11.1)   6.12.45-talos    containerd://2.1.4
+k8s-stg-worker-2   Ready    <none>          44m    v1.34.0   10.21.2.2     <none>        Talos (v1.11.1)   6.12.45-talos    containerd://2.1.4
+
+== Talos checks ==
+discovered nodes: ["10.20.0.2" "10.20.1.2" "10.20.2.2" "10.21.0.2" "10.21.1.2" "10.21.2.2"]
+waiting for etcd to be healthy: ...
+waiting for etcd to be healthy: OK
+waiting for etcd members to be consistent across nodes: ...
+waiting for etcd members to be consistent across nodes: OK
+waiting for etcd members to be control plane nodes: ...
+waiting for etcd members to be control plane nodes: OK
+waiting for apid to be ready: ...
+waiting for apid to be ready: OK
+waiting for all nodes memory sizes: ...
+waiting for all nodes memory sizes: OK
+waiting for all nodes disk sizes: ...
+waiting for all nodes disk sizes: OK
+waiting for no diagnostics: ...
+waiting for no diagnostics: OK
+waiting for kubelet to be healthy: ...
+waiting for kubelet to be healthy: OK
+waiting for all nodes to finish boot sequence: ...
+waiting for all nodes to finish boot sequence: OK
+waiting for all k8s nodes to report: ...
+waiting for all k8s nodes to report: OK
+waiting for all control plane static pods to be running: ...
+waiting for all control plane static pods to be running: OK
+waiting for all control plane components to be ready: ...
+waiting for all control plane components to be ready: OK
+waiting for all k8s nodes to report ready: ...
+waiting for all k8s nodes to report ready: OK
+waiting for kube-proxy to report ready: ...
+waiting for kube-proxy to report ready: OK
+waiting for coredns to report ready: ...
+waiting for coredns to report ready: OK
+waiting for all k8s nodes to report schedulable: ...
+waiting for all k8s nodes to report schedulable: OK
+NODE        NAMESPACE   TYPE            ID        VERSION   STAGE     READY
+10.21.2.2   runtime     MachineStatus   machine   13        running   true
+NODE     10.21.2.2
+ID       kubelet
+STATE    Running
+HEALTH   OK
+EVENTS   [Running]: Health check successful (44m30s ago)
+         [Running]: Started task kubelet (PID 2872) for container kubelet (44m32s ago)
+         [Preparing]: Creating service runner (44m32s ago)
+         [Preparing]: Running pre state (44m32s ago)
+         [Waiting]: Waiting for volume "/var/lib" to be mounted, volume "/var/lib/kubelet" to be mounted, volume "/var/log" to be mounted, volume "/var/log/audit" to be mounted, volume "/var/log/containers" to be mounted, volume "/var/log/pods" to be mounted, volume "/var/lib/kubelet/seccomp" to be mounted, volume "/var/lib/kubelet/seccomp/profiles" to be mounted, volume "/var/log/audit/kube" to be mounted, volume "/var/mnt" to be mounted, service "cri" to be "up", time sync, network (44m32s ago)
+         [Starting]: Starting service (44m32s ago)
+
+DONE

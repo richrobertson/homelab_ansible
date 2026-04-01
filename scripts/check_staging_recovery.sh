@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "RUN_AT=$(date -u)"
+
+echo "== Proxmox host reachability =="
+for host in 192.168.11.4 192.168.11.5; do
+  printf "%s ssh=" "$host"
+  if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@"$host" 'echo OK' >/dev/null 2>&1; then
+    echo OK
+  else
+    echo FAIL
+  fi
+done
+
+echo
+echo "== Staging API/Talos ports =="
+for ip in 10.20.0.2 10.20.1.2 10.20.2.2 10.21.2.2; do
+  printf "%s:6443 " "$ip"
+  nc -vz -w 3 "$ip" 6443 >/tmp/nc.out 2>&1 || true
+  tail -1 /tmp/nc.out || true
+  printf "%s:50000 " "$ip"
+  nc -vz -w 3 "$ip" 50000 >/tmp/nc.out 2>&1 || true
+  tail -1 /tmp/nc.out || true
+done
+
+echo
+echo "== Kubernetes nodes =="
+kubectl get nodes -o wide
+
+echo
+echo "== Talos checks =="
+talosctl --nodes 10.20.2.2 --endpoints 10.20.0.2 health || true
+talosctl --nodes 10.21.2.2 --endpoints 10.21.2.2 get machinestatus || true
+talosctl --nodes 10.21.2.2 --endpoints 10.21.2.2 service kubelet || true
+
+echo
+echo "DONE"

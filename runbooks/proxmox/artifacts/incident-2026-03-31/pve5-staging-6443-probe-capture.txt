@@ -1,0 +1,21 @@
+# pve5 staging 6443 probe capture (2026-03-31)
+
+Source command (executed via SSH on pve5):
+- run tcpdump on any interface filtering host 10.20.0.2 or 10.20.1.2 and tcp/6443
+- concurrently probe with nc to 10.20.0.2:6443 and 10.20.1.2:6443
+
+Probe result summary:
+- 10.20.0.2:6443 timed out
+- 10.20.1.2:6443 timed out
+
+Key packet excerpts (from capture):
+- 10.21.2.2.57592 > 10.20.0.2.6443: Flags [S]
+- 10.20.2.2.54098 > 10.20.0.2.6443: Flags [S]
+- repeated SYN retransmissions for the same flows
+- no successful 3-way handshake observed for the outbound probe flows before timeout
+
+Additional observed traffic:
+- inbound probes from remote control-plane nodes to 10.20.2.2:6443 reached pve5 and received RST from 10.20.2.2, confirming directional asymmetry and that the capture path itself was active.
+
+Interpretation:
+- traffic from recreated pve5-hosted staging nodes toward remote staging API endpoints did not establish TCP sessions during this window.

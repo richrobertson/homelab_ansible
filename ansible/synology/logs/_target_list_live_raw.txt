@@ -1,0 +1,1363 @@
+{
+   "data" : {
+      "targets" : [
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.default-target.ea061292341",
+            "is_default_target" : true,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "Synology iSCSI Target",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 2,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.Target-1.ea061292341",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "Proxmox-Target-1",
+            "network_portals" : [
+               {
+                  "interface_name" : "eth5",
+                  "ip" : "",
+                  "port" : 3260
+               },
+               {
+                  "interface_name" : "bond0",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 1,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-28c401ac-79f4-407f-875b-5ce27c4c2edd",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-28c401ac-79f4-407f-875b-5ce27c4c2edd",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 70,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-c4e2923a-0404-4166-820e-e5f53eef10f1",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-c4e2923a-0404-4166-820e-e5f53eef10f1",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 74,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-2da6561c-95fa-4a65-b69d-b0d08def3df2",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-2da6561c-95fa-4a65-b69d-b0d08def3df2",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 80,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-924779bb-bce5-4b71-b771-48e7a4a0841d",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-924779bb-bce5-4b71-b771-48e7a4a0841d",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 92,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-86167041-2e63-4ffa-97ed-4dea2f6555ed",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-86167041-2e63-4ffa-97ed-4dea2f6555ed",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 72,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-9fb1b782-0602-4be2-a00f-a283c8f22366",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-9fb1b782-0602-4be2-a00f-a283c8f22366",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 106,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-d803583e-b5af-44cb-8438-2ecf5f39ce88",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-d803583e-b5af-44cb-8438-2ecf5f39ce88",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 107,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-0cb341a7-6af8-4edb-b675-e5113796c542",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-0cb341a7-6af8-4edb-b675-e5113796c542",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 108,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-ad0f6a11-28e0-4dfe-bb24-c7b2e4c67de8",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-ad0f6a11-28e0-4dfe-bb24-c7b2e4c67de8",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 109,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-9c21c066-492b-475c-9e22-cb0fec10668d",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-9c21c066-492b-475c-9e22-cb0fec10668d",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 115,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-fb28a0a6-859e-4d1d-abbf-1e1a7bc33e12",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-fb28a0a6-859e-4d1d-abbf-1e1a7bc33e12",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 116,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-762faa11-7615-4840-8133-cee1b136520c",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-762faa11-7615-4840-8133-cee1b136520c",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 120,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-db01042d-c355-4a3d-baac-a5f0693885dd",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-db01042d-c355-4a3d-baac-a5f0693885dd",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 121,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-138df124-b5c8-4998-ab40-db7f86861278",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-138df124-b5c8-4998-ab40-db7f86861278",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 127,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-19a48412-ef3e-4764-88b1-01ac4cd6dd67",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-19a48412-ef3e-4764-88b1-01ac4cd6dd67",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 128,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-e6a86ee3-fda2-4743-9b8e-47a12171bef3",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-e6a86ee3-fda2-4743-9b8e-47a12171bef3",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 12,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-5bd29c4b-de74-4547-a824-8a1f48cea43a",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-5bd29c4b-de74-4547-a824-8a1f48cea43a",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 3,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-6a181aa7-2f42-4475-b960-9d624d5feca6",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-6a181aa7-2f42-4475-b960-9d624d5feca6",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 4,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-c1035a9d-b8b2-4859-af33-2b9edb386d0c",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-c1035a9d-b8b2-4859-af33-2b9edb386d0c",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 6,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-06b1ffbd-90f3-4002-b1f8-20e37a0c0b02",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-06b1ffbd-90f3-4002-b1f8-20e37a0c0b02",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 7,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-63e57a7c-d983-4be5-99b0-d0aa2c749e42",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-63e57a7c-d983-4be5-99b0-d0aa2c749e42",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 8,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-9edcadf4-a8b8-45a4-9a73-9d6b6b63df96",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-9edcadf4-a8b8-45a4-9a73-9d6b6b63df96",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 10,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-24ed6249-b0ac-40c8-a5eb-158f8755cdca",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-24ed6249-b0ac-40c8-a5eb-158f8755cdca",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 15,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-2bf25622-097e-46f4-b518-f1e940398819",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-2bf25622-097e-46f4-b518-f1e940398819",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 24,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-36029d5e-7306-4e7a-a097-cda30fecf4a4",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-36029d5e-7306-4e7a-a097-cda30fecf4a4",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 25,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-c6f3d1bd-16ee-4f8a-a15c-f085fe5dbabe",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-c6f3d1bd-16ee-4f8a-a15c-f085fe5dbabe",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 26,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-370e3e9c-a041-40b0-8262-516452bb0545",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-370e3e9c-a041-40b0-8262-516452bb0545",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 27,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-af4cfb7f-62eb-46bc-8cf3-d68e32eec615",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-af4cfb7f-62eb-46bc-8cf3-d68e32eec615",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 30,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-47c06749-0626-409b-9eed-ed2f660c9ac1",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-47c06749-0626-409b-9eed-ed2f660c9ac1",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 31,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-93794f5f-91c6-4db0-9587-e07be5a4960b",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-93794f5f-91c6-4db0-9587-e07be5a4960b",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 32,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-dadba4b3-75ca-46e3-98f9-644a5793f00a",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-dadba4b3-75ca-46e3-98f9-644a5793f00a",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 33,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-1b049ab6-6e97-4783-ba22-bd7999eaa19e",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-1b049ab6-6e97-4783-ba22-bd7999eaa19e",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 34,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-27c7a1b2-c0e5-4623-bd8a-2b4ea0273632",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-27c7a1b2-c0e5-4623-bd8a-2b4ea0273632",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 35,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-08a62c78-9c1c-434f-87c8-e8a8e82e6367",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-08a62c78-9c1c-434f-87c8-e8a8e82e6367",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 5,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-02d1de31-233f-453f-bfe0-9a8cf4891f24",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-02d1de31-233f-453f-bfe0-9a8cf4891f24",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 9,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-ed491737-1b73-4b2d-9650-c39ee65989a6",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-ed491737-1b73-4b2d-9650-c39ee65989a6",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 11,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-fe036397-7b82-4c0c-b567-11dd967a2cef",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-fe036397-7b82-4c0c-b567-11dd967a2cef",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 13,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-4bcdd7c3-1ce6-40f9-9991-3779496b56ff",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-4bcdd7c3-1ce6-40f9-9991-3779496b56ff",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 14,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-aebd1801-7eb3-44c8-8823-f8b8a7093b4d",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-aebd1801-7eb3-44c8-8823-f8b8a7093b4d",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 16,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-ea4b22fc-a83e-4356-92d9-9b6c9ae56c36",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-ea4b22fc-a83e-4356-92d9-9b6c9ae56c36",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 17,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-67e89bc7-77c2-4502-908d-f725ded5d398",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-67e89bc7-77c2-4502-908d-f725ded5d398",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 18,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-288a4f81-f22f-44c2-8771-c9da3287f4c5",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-288a4f81-f22f-44c2-8771-c9da3287f4c5",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 19,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-538cdb69-1831-4ea9-a09c-c26d56ba811c",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-538cdb69-1831-4ea9-a09c-c26d56ba811c",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 21,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-b7af2805-d130-4f8b-bb7d-6195a2548300",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-b7af2805-d130-4f8b-bb7d-6195a2548300",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 20,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-e54cac10-49cc-4931-a161-9922b69e0704",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 0,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-e54cac10-49cc-4931-a161-9922b69e0704",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 28,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-86380f38-4f6a-43a4-a26e-d0e3a68f6348",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-86380f38-4f6a-43a4-a26e-d0e3a68f6348",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 29,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-56e50551-5fce-4181-9b13-1cbd4a318447",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-56e50551-5fce-4181-9b13-1cbd4a318447",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 38,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-fbd46394-9545-42ef-b068-2fd366df31b2",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-fbd46394-9545-42ef-b068-2fd366df31b2",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 39,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-a3d871cb-2777-47ef-baed-cb73da5e8121",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-a3d871cb-2777-47ef-baed-cb73da5e8121",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 40,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-86eaa39a-8bf6-4068-bbfb-f1bf5d137ec3",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-86eaa39a-8bf6-4068-bbfb-f1bf5d137ec3",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 36,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-583db34d-18f7-44d5-b775-54f0e24150f3",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-583db34d-18f7-44d5-b775-54f0e24150f3",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 41,
+            "user" : ""
+         },
+         {
+            "auth_type" : 0,
+            "has_data_checksum" : false,
+            "has_header_checksum" : false,
+            "iqn" : "iqn.2000-01.com.synology:scooter.pvc-f54d98cc-86ef-4d02-ba48-9b0c257506ca",
+            "is_default_target" : false,
+            "is_enabled" : true,
+            "mapping_index" : -1,
+            "max_recv_seg_bytes" : 262144,
+            "max_send_seg_bytes" : 262144,
+            "max_sessions" : 1,
+            "mutual_password" : "",
+            "mutual_user" : "",
+            "name" : "k8s-csi-pvc-f54d98cc-86ef-4d02-ba48-9b0c257506ca",
+            "network_portals" : [
+               {
+                  "interface_name" : "all",
+                  "ip" : "",
+                  "port" : 3260
+               }
+            ],
+            "password" : "",
+            "target_id" : 42,
+            "user" : ""
+         }
+      ]
+   },
+   "httpd_restart" : false,
+   "success" : true
+}

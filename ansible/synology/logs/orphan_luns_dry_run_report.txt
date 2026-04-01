@@ -1,0 +1,1 @@
+uuid,name,description,mapped,target_connected,mapping

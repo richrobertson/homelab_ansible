@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INVENTORY="inventory/environments/synology.ini"
+HOST_GROUP="synology_nas"
+PORT="5022"
+USER=""
+PASSWORD=""
+OUTPUT="ansible/synology/logs/orphan_luns_dry_run_report.txt"
+K8S_PREFIX="k8s-csi-pvc-"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/identify_disconnected_synology_luns.sh --user USER --password PASS [options]
+
+Options:
+  --inventory PATH     Ansible inventory file (default: inventory/environments/synology.ini)
+  --host-group NAME    Inventory host/group to query (default: synology_nas)
+  --port PORT          SSH port (default: 5022)
+  --user USER          SSH username (required)
+  --password PASS      SSH/sudo password (required)
+  --output PATH        Output report path (default: ansible/synology/logs/orphan_luns_dry_run_report.txt)
+  --k8s-prefix PREFIX  Target name prefix to treat as k8s (default: k8s-csi-pvc-)
+  -h, --help           Show this help
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --inventory)
+      INVENTORY="$2"
+      shift 2
+      ;;
+    --host-group)
+      HOST_GROUP="$2"
+      shift 2
+      ;;
+    --port)
+      PORT="$2"
+      shift 2
+      ;;
+    --user)
+      USER="$2"
+      shift 2
+      ;;
+    --password)
+      PASSWORD="$2"
+      shift 2
+      ;;
+    --output)
+      OUTPUT="$2"
+      shift 2
+      ;;
+    --k8s-prefix)
+      K8S_PREFIX="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$USER" || -z "$PASSWORD" ]]; then
+  echo "--user and --password are required" >&2
+  usage
+  exit 1
+fi
+
+mkdir -p "$(dirname "$OUTPUT")"
+
+tmp_luns="$(mktemp)"
+tmp_targets="$(mktemp)"
+tmp_mapping="$(mktemp)"
+cleanup() {
+  rm -f "$tmp_luns" "$tmp_targets" "$tmp_mapping"
+}
+trap cleanup EXIT
+
+run_raw() {
+  local cmd="$1"
+  ansible "$HOST_GROUP" \
+    -i "$INVENTORY" \
+    -m raw \
+    -a "$cmd" \
+    -e "ansible_user=$USER ansible_port=$PORT ansible_password=$PASSWORD ansible_become_password=$PASSWORD" \
+    -b --become-method=sudo
+}
+
+run_raw "/usr/syno/bin/synowebapi --exec api=SYNO.Core.ISCSI.LUN method=list version=1" > "$tmp_luns"
+run_raw "/usr/syno/bin/synowebapi --exec api=SYNO.Core.ISCSI.Target method=list version=1 additional='[\"status\"]'" > "$tmp_targets"
+run_raw "cat /usr/syno/etc/iscsi_mapping.conf" > "$tmp_mapping"
+
+python3 - "$tmp_luns" "$tmp_targets" "$tmp_mapping" "$OUTPUT" "$K8S_PREFIX" <<'PY'
+import csv
+import json
+import re
+import sys
+
+luns_raw_path, targets_raw_path, mapping_raw_path, output_path, k8s_prefix = sys.argv[1:]
+
+
+def extract_json(raw_text: str):
+  match = re.search(r"(?ms)^\{.*\}\s*$", raw_text)
+  if not match:
+    raise RuntimeError("Could not locate JSON payload in command output")
+  return json.loads(match.group(0))
+
+
+with open(luns_raw_path, "r", encoding="utf-8", errors="ignore") as handle:
+  luns_payload = extract_json(handle.read())
+
+with open(targets_raw_path, "r", encoding="utf-8", errors="ignore") as handle:
+  targets_payload = extract_json(handle.read())
+
+with open(mapping_raw_path, "r", encoding="utf-8", errors="ignore") as handle:
+  mapping_raw = handle.read()
+
+uuid_to_tid = {}
+for tid, uuid in re.findall(r"(?m)^\[iSCSI_MAP_T(\d+)_L([0-9a-fA-F-]{36})\]$", mapping_raw):
+  uuid_to_tid[uuid.lower()] = tid
+
+targets_by_id = {}
+for target in targets_payload.get("data", {}).get("targets", []):
+  target_id = str(target.get("target_id", ""))
+  if not target_id:
+    continue
+  status = str(target.get("status", "unknown"))
+  targets_by_id[target_id] = {
+    "name": str(target.get("name", "")),
+    "status": status,
+    "connected": status == "connected",
+  }
+
+rows = []
+for lun in luns_payload.get("data", {}).get("luns", []):
+  uuid = str(lun.get("uuid") or lun.get("lun_uuid") or "").lower()
+  if not uuid:
+    continue
+  tid = uuid_to_tid.get(uuid, "")
+  target_meta = targets_by_id.get(tid, {})
+  target_name = target_meta.get("name", "")
+  target_status = str(target_meta.get("status", "unknown"))
+  is_k8s = bool(tid and target_name.startswith(k8s_prefix))
+  if not is_k8s or target_status == "connected":
+    continue
+  rows.append(
+    {
+      "uuid": uuid,
+      "name": str(lun.get("name") or lun.get("display_name") or "unnamed-lun"),
+      "description": str(lun.get("description") or ""),
+      "mapped": "true",
+      "target_connected": "false",
+      "mapping": f"tid={tid};target={target_name};status={target_status}",
+    }
+  )
+
+rows.sort(key=lambda item: item["uuid"])
+
+with open(output_path, "w", newline="", encoding="utf-8") as handle:
+  writer = csv.DictWriter(
+    handle,
+    fieldnames=["uuid", "name", "description", "mapped", "target_connected", "mapping"],
+  )
+  writer.writeheader()
+  writer.writerows(rows)
+
+print(f"disconnected_k8s_luns={len(rows)}")
+print(f"report={output_path}")
+PY

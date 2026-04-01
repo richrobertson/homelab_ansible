@@ -16,6 +16,9 @@ This directory contains Ansible inventory configurations for different environme
    
    # For Proxmox dynamic inventory
    cp inventory/proxmox.yml.example inventory/proxmox.yml
+
+   # For Synology NAS inventory
+   cp inventory/synology.ini.example inventory/environments/synology.ini
    ```
 
 2. **Update with your infrastructure details**:
@@ -81,6 +84,7 @@ Common groups used in this repository:
 | `powerdns` | PowerDNS authoritative servers |
 | `powerdns-recurse` | PowerDNS recursive resolvers |
 | `proxmox_nodes` | Proxmox hypervisor nodes |
+| `synology_nas` | Synology NAS hosts |
 
 ## Host Variables
 

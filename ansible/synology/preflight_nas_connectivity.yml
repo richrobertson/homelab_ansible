@@ -1,0 +1,80 @@
+---
+- name: Preflight checks for Synology NAS connectivity and LUN API
+  hosts: synology_nas
+  gather_facts: false
+  vars:
+    synology_nas_host: "{{ ansible_host | default(inventory_hostname) }}"
+
+    synology_remote_list_luns_cmd: >-
+      /usr/syno/bin/synowebapi
+      --exec
+      api=SYNO.Core.ISCSI.LUN
+      method=list
+      version=1
+
+    synology_remote_query_api_cmd: >-
+      /usr/syno/bin/synowebapi
+      --exec
+      api=SYNO.API.Info
+      method=query
+      version=1
+      query=SYNO.Core.ISCSI.LUN
+
+  tasks:
+    - name: Show target preflight host
+      ansible.builtin.debug:
+        msg: "Running Synology preflight against {{ ansible_user | default('admin') }}@{{ synology_nas_host }}"
+
+    - name: Check SSH connectivity and shell access
+      ansible.builtin.raw: "printf 'synology-preflight-ok'"
+      register: synology_ssh_check
+      changed_when: false
+
+    - name: Validate SSH check marker
+      ansible.builtin.assert:
+        that:
+          - synology_ssh_check.stdout is search('synology-preflight-ok')
+        fail_msg: >-
+          SSH preflight failed. Verify host reachability, firewall, SSH service,
+          and credentials for {{ ansible_user | default('admin') }}@{{ synology_nas_host }}.
+
+    - name: Check Synology LUN API availability
+      ansible.builtin.raw: "{{ synology_remote_query_api_cmd }}"
+      register: synology_api_info_raw
+      changed_when: false
+
+    - name: Parse Synology API info response
+      ansible.builtin.set_fact:
+        synology_api_info_payload: "{{ synology_api_info_raw.stdout | from_json }}"
+
+    - name: Assert LUN API query succeeded
+      ansible.builtin.assert:
+        that:
+          - synology_api_info_payload.success | default(false) | bool
+        fail_msg: >-
+          Synology API query failed. Verify the account has permissions to call
+          SYNO.Core.ISCSI.LUN APIs.
+
+    - name: Check LUN inventory endpoint and response shape
+      ansible.builtin.raw: "{{ synology_remote_list_luns_cmd }}"
+      register: synology_luns_raw
+      changed_when: false
+
+    - name: Parse LUN inventory payload
+      ansible.builtin.set_fact:
+        synology_luns_payload: "{{ synology_luns_raw.stdout | from_json }}"
+
+    - name: Assert LUN inventory query succeeded
+      ansible.builtin.assert:
+        that:
+          - synology_luns_payload.success | default(false) | bool
+          - synology_luns_payload.data is defined
+        fail_msg: >-
+          LUN inventory query failed or returned an unexpected payload.
+          Validate DSM API compatibility and update synology_remote_list_luns_cmd if needed.
+
+    - name: Show preflight summary
+      ansible.builtin.debug:
+        msg:
+          - "Preflight passed for {{ synology_nas_host }}"
+          - "Reported LUN count: {{ synology_luns_payload.data.luns | default([]) | length }}"

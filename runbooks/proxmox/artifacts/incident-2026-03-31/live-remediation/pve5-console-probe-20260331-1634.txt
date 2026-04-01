@@ -1,0 +1,58 @@
+10.20.0.2: inverse host lookup failed: Unknown host
+(UNKNOWN) [10.20.0.2] 6443 (?) : Connection timed out
+10.20.1.2: inverse host lookup failed: Unknown host
+(UNKNOWN) [10.20.1.2] 6443 (?) : Connection timed out
+PING 10.20.0.2 (10.20.0.2) 56(84) bytes of data.
+
+--- 10.20.0.2 ping statistics ---
+3 packets transmitted, 0 received, 100% packet loss, time 2087ms
+
+PING 10.20.1.2 (10.20.1.2) 56(84) bytes of data.
+
+tcpdump: WARNING: any: That device doesn't support promiscuous mode
+(Promiscuous mode not supported on the "any" device)
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on any, link-type LINUX_SLL2 (Linux cooked v2), snapshot length 262144 bytes
+16:34:19.520096 tap217i0 P   IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146931675 ecr 0,nop,wscale 7], length 0
+16:34:19.520098 stgctr In  IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146931675 ecr 0,nop,wscale 7], length 0
+16:34:19.520103 vrfbr_stgl3 Out IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146931675 ecr 0,nop,wscale 7], length 0
+16:34:19.520105 vrfvx_stgl3 Out IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146931675 ecr 0,nop,wscale 7], length 0
+16:34:20.544094 tap217i0 P   IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146932699 ecr 0,nop,wscale 7], length 0
+16:34:20.544096 stgctr In  IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146932699 ecr 0,nop,wscale 7], length 0
+16:34:20.544102 vrfbr_stgl3 Out IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146932699 ecr 0,nop,wscale 7], length 0
+16:34:20.544104 vrfvx_stgl3 Out IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146932699 ecr 0,nop,wscale 7], length 0
+16:34:20.638835 vxlan_stgctr P   IP 10.20.0.2.40996 > 10.20.2.2.6443: Flags [S], seq 1548694206, win 64860, options [mss 1410,sackOK,TS val 3245913106 ecr 0,nop,wscale 7], length 0
+16:34:20.638837 tap217i0 Out IP 10.20.0.2.40996 > 10.20.2.2.6443: Flags [S], seq 1548694206, win 64860, options [mss 1410,sackOK,TS val 3245913106 ecr 0,nop,wscale 7], length 0
+16:34:20.638919 tap217i0 P   IP 10.20.2.2.6443 > 10.20.0.2.40996: Flags [R.], seq 0, ack 1548694207, win 0, length 0
+16:34:20.638920 stgctr In  IP 10.20.2.2.6443 > 10.20.0.2.40996: Flags [R.], seq 0, ack 1, win 0, length 0
+16:34:20.638925 vrfbr_stgl3 Out IP 10.20.2.2.6443 > 10.20.0.2.40996: Flags [R.], seq 0, ack 1, win 0, length 0
+16:34:20.638926 vrfvx_stgl3 Out IP 10.20.2.2.6443 > 10.20.0.2.40996: Flags [R.], seq 0, ack 1, win 0, length 0
+16:34:21.311583 vrfbr_stgl3 Out IP 10.20.0.1.42538 > 10.20.0.2.6443: Flags [S], seq 3144544362, win 64860, options [mss 1410,sackOK,TS val 2461755677 ecr 0,nop,wscale 7], length 0
+16:34:21.311585 vrfvx_stgl3 Out IP 10.20.0.1.42538 > 10.20.0.2.6443: Flags [S], seq 3144544362, win 64860, options [mss 1410,sackOK,TS val 2461755677 ecr 0,nop,wscale 7], length 0
+16:34:21.492454 tap218i0 P   IP 10.21.2.2.56014 > 10.20.0.2.6443: Flags [S], seq 1657700877, win 64860, options [mss 1410,sackOK,TS val 2107482406 ecr 0,nop,wscale 7], length 0
+16:34:21.492457 stgdata In  IP 10.21.2.2.56014 > 10.20.0.2.6443: Flags [S], seq 1657700877, win 64860, options [mss 1410,sackOK,TS val 2107482406 ecr 0,nop,wscale 7], length 0
+16:34:21.492465 vrfbr_stgl3 Out IP 10.21.2.2.56014 > 10.20.0.2.6443: Flags [S], seq 1657700877, win 64860, options [mss 1410,sackOK,TS val 2107482406 ecr 0,nop,wscale 7], length 0
+16:34:21.492467 vrfvx_stgl3 Out IP 10.21.2.2.56014 > 10.20.0.2.6443: Flags [S], seq 1657700877, win 64860, options [mss 1410,sackOK,TS val 2107482406 ecr 0,nop,wscale 7], length 0
+16:34:21.568122 tap217i0 P   IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146933723 ecr 0,nop,wscale 7], length 0
+16:34:21.568124 stgctr In  IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146933723 ecr 0,nop,wscale 7], length 0
+16:34:21.568129 vrfbr_stgl3 Out IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146933723 ecr 0,nop,wscale 7], length 0
+16:34:21.568130 vrfvx_stgl3 Out IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146933723 ecr 0,nop,wscale 7], length 0
+16:34:22.317456 vrfbr_stgl3 Out IP 10.20.0.1.42538 > 10.20.0.2.6443: Flags [S], seq 3144544362, win 64860, options [mss 1410,sackOK,TS val 2461756683 ecr 0,nop,wscale 7], length 0
+16:34:22.317458 vrfvx_stgl3 Out IP 10.20.0.1.42538 > 10.20.0.2.6443: Flags [S], seq 3144544362, win 64860, options [mss 1410,sackOK,TS val 2461756683 ecr 0,nop,wscale 7], length 0
+16:34:22.592112 tap217i0 P   IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146934747 ecr 0,nop,wscale 7], length 0
+16:34:22.592114 stgctr In  IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146934747 ecr 0,nop,wscale 7], length 0
+16:34:22.592118 vrfbr_stgl3 Out IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146934747 ecr 0,nop,wscale 7], length 0
+16:34:22.592119 vrfvx_stgl3 Out IP 10.20.2.2.38222 > 10.20.0.2.6443: Flags [S], seq 1168035613, win 64860, options [mss 1410,sackOK,TS val 2146934747 ecr 0,nop,wscale 7], length 0
+16:34:23.340459 vrfbr_stgl3 Out IP 10.20.0.1.42538 > 10.20.0.2.6443: Flags [S], seq 3144544362, win 64860, options [mss 1410,sackOK,TS val 2461757706 ecr 0,nop,wscale 7], length 0
+16:34:23.340468 vrfvx_stgl3 Out IP 10.20.0.1.42538 > 10.20.0.2.6443: Flags [S], seq 3144544362, win 64860, options [mss 1410,sackOK,TS val 2461757706 ecr 0,nop,wscale 7], length 0
+16:34:23.502824 tap217i0 P   IP 10.20.2.2.52026 > 10.20.1.2.6443: Flags [S], seq 1484262131, win 64860, options [mss 1410,sackOK,TS val 2002081207 ecr 0,nop,wscale 7], length 0
+16:34:23.502826 stgctr In  IP 10.20.2.2.52026 > 10.20.1.2.6443: Flags [S], seq 1484262131, win 64860, options [mss 1410,sackOK,TS val 2002081207 ecr 0,nop,wscale 7], length 0
+16:34:23.502829 vrfbr_stgl3 Out IP 10.20.2.2.52026 > 10.20.1.2.6443: Flags [S], seq 1484262131, win 64860, options [mss 1410,sackOK,TS val 2002081207 ecr 0,nop,wscale 7], length 0
+16:34:23.502830 vrfvx_stgl3 Out IP 10.20.2.2.52026 > 10.20.1.2.6443: Flags [S], seq 1484262131, win 64860, options [mss 1410,sackOK,TS val 2002081207 ecr 0,nop,wscale 7], length 0
+16:34:24.312819 vrfbr_stgl3 Out IP 10.20.0.1.40072 > 10.20.1.2.6443: Flags [S], seq 1850686154, win 64860, options [mss 1410,sackOK,TS val 3712611178 ecr 0,nop,wscale 7], length 0
+16:34:24.312821 vrfvx_stgl3 Out IP 10.20.0.1.40072 > 10.20.1.2.6443: Flags [S], seq 1850686154, win 64860, options [mss 1410,sackOK,TS val 3712611178 ecr 0,nop,wscale 7], length 0
+16:34:24.512114 tap217i0 P   IP 10.20.2.2.52026 > 10.20.1.2.6443: Flags [S], seq 1484262131, win 64860, options [mss 1410,sackOK,TS val 2002082217 ecr 0,nop,wscale 7], length 0
+16:34:24.512115 stgctr In  IP 10.20.2.2.52026 > 10.20.1.2.6443: Flags [S], seq 1484262131, win 64860, options [mss 1410,sackOK,TS val 2002082217 ecr 0,nop,wscale 7], length 0
+40 packets captured
+88 packets received by filter
+0 packets dropped by kernel

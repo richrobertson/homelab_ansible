@@ -1,0 +1,173 @@
+---
+- name: Clean up orphaned Synology iSCSI LUNs
+  hosts: synology_nas
+  gather_facts: false
+  vars:
+    synology_nas_host: "{{ ansible_host | default(inventory_hostname) }}"
+
+    # Command used on the NAS to list LUN metadata as JSON.
+    # Override if your DSM build uses a different command/API version.
+    synology_remote_list_luns_cmd: >-
+      /usr/syno/bin/synowebapi
+      --exec
+      api=SYNO.Core.ISCSI.LUN
+      method=list
+      version=1
+
+    # DSM stores authoritative LUN-to-target mappings in this file.
+    synology_remote_iscsi_mapping_conf_path: /usr/syno/etc/iscsi_mapping.conf
+
+    # Command template used to delete a single LUN UUID.
+    # __LUN_UUID__ is replaced per-item in the loop below.
+    # Override if your NAS expects a different deletion command.
+    synology_remote_delete_lun_cmd_template: >-
+      /usr/syno/bin/synowebapi
+      --exec
+      api=SYNO.Core.ISCSI.LUN
+      method=delete
+      version=1
+      uuids='["__LUN_UUID__"]'
+
+    # Set these to the LUN UUIDs you confirmed are orphaned.
+    orphan_lun_uuids: []
+
+    # Safety switch: keep false for preview mode.
+    perform_cleanup: false
+
+    # Optional local audit log for deleted UUIDs.
+    synology_cleanup_audit_log_enabled: true
+    synology_cleanup_audit_log_path: ansible/synology/logs/lun_cleanup_audit.log
+
+  tasks:
+    - name: Require explicit orphan LUN UUID list
+      ansible.builtin.fail:
+        msg: >-
+          No orphan LUN UUIDs were provided. Pass -e 'orphan_lun_uuids=["uuid1","uuid2"]'
+          after confirming the LUNs are orphaned in DSM/SAN Manager.
+      when: orphan_lun_uuids | length == 0
+
+    - name: Fetch current LUN inventory from Synology
+      ansible.builtin.raw: "{{ synology_remote_list_luns_cmd }}"
+      register: synology_luns_raw
+      changed_when: false
+
+    - name: Parse LUN inventory payload
+      ansible.builtin.set_fact:
+        synology_luns_payload: >-
+          {{
+            (synology_luns_raw.stdout | regex_search('(?ms)^\{.*\}\s*$'))
+            | from_json
+          }}
+
+    - name: Build list of known LUN UUIDs returned by DSM
+      ansible.builtin.set_fact:
+        synology_known_lun_uuids: >-
+          {{
+            (
+              synology_luns_payload.data.luns | default([])
+              | map(attribute='uuid')
+              | list
+            )
+            +
+            (
+              synology_luns_payload.data.luns | default([])
+              | map(attribute='lun_uuid')
+              | list
+            )
+            | select('string')
+            | unique
+            | list
+          }}
+
+    - name: Fetch authoritative LUN mappings from DSM
+      ansible.builtin.raw: "cat {{ synology_remote_iscsi_mapping_conf_path }}"
+      register: synology_mapping_conf_raw
+      changed_when: false
+
+    - name: Build set of mapped LUN UUIDs from mapping config
+      ansible.builtin.set_fact:
+        synology_mapped_lun_uuids: >-
+          {{
+            synology_mapping_conf_raw.stdout
+            | regex_findall('(?m)^uuid=([0-9a-fA-F-]{36})$')
+            | map('lower')
+            | unique
+            | list
+          }}
+
+    - name: Show candidate orphan LUN UUIDs
+      ansible.builtin.debug:
+        msg:
+          - "Cleanup mode: {{ perform_cleanup }}"
+          - "Requested orphan UUIDs: {{ orphan_lun_uuids }}"
+          - "Known UUID count on NAS: {{ synology_known_lun_uuids | length }}"
+
+    - name: Fail when requested UUID is not present on NAS
+      ansible.builtin.fail:
+        msg: "Requested UUID {{ item }} was not found in current NAS LUN inventory."
+      loop: "{{ orphan_lun_uuids }}"
+      when: item not in synology_known_lun_uuids
+
+    - name: Fail when requested UUID is still mapped
+      ansible.builtin.fail:
+        msg: >-
+          Refusing to delete UUID {{ item }} because it is mapped according to
+          {{ synology_remote_iscsi_mapping_conf_path }}.
+      loop: "{{ orphan_lun_uuids }}"
+      when: item | lower in synology_mapped_lun_uuids
+
+    - name: Preview delete commands (dry run)
+      ansible.builtin.debug:
+        msg: >-
+          Would delete LUN UUID {{ item }} using command:
+          {{ synology_remote_delete_lun_cmd_template | replace('__LUN_UUID__', item) }}
+      loop: "{{ orphan_lun_uuids }}"
+      when: not perform_cleanup
+
+    - name: Delete orphaned LUNs
+      ansible.builtin.raw: "{{ synology_remote_delete_lun_cmd_template | replace('__LUN_UUID__', item) }}"
+      loop: "{{ orphan_lun_uuids }}"
+      register: synology_delete_results
+      when: perform_cleanup
+      changed_when: true
+
+    - name: Show deletion results
+      ansible.builtin.debug:
+        var: synology_delete_results.results
+      when: perform_cleanup
+
+    - name: Build deleted UUID list from cleanup results
+      ansible.builtin.set_fact:
+        synology_deleted_lun_uuids: >-
+          {{
+            synology_delete_results.results
+            | default([])
+            | selectattr('rc', 'equalto', 0)
+            | map(attribute='item')
+            | list
+          }}
+      when: perform_cleanup
+
+    - name: Ensure local Synology audit log directory exists
+      ansible.builtin.file:
+        path: "{{ synology_cleanup_audit_log_path | dirname }}"
+        state: directory
+        mode: '0750'
+      when:
+        - perform_cleanup
+        - synology_cleanup_audit_log_enabled
+
+    - name: Append Synology LUN cleanup audit entry
+      ansible.builtin.lineinfile:
+        path: "{{ synology_cleanup_audit_log_path }}"
+        create: true
+        mode: '0640'
+        insertafter: EOF
+        line: >-
+          {{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}
+          host={{ synology_nas_host }}
+          requested={{ orphan_lun_uuids | to_json }}
+          deleted={{ synology_deleted_lun_uuids | default([]) | to_json }}
+      when:
+        - perform_cleanup
+        - synology_cleanup_audit_log_enabled
