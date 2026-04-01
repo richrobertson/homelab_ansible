@@ -45,6 +45,9 @@
     # Safety switch: keep false to only discover and preview.
     perform_cleanup: false
 
+    # Optional strict mode: fail when no likely orphan UUIDs are discovered.
+    synology_fail_when_none_found: false
+
     # Additional safety gate for destructive action.
     cleanup_confirmation: ""
 
@@ -215,13 +218,22 @@
           - "Likely orphan UUIDs: {{ orphan_lun_uuids }}"
           - "Cleanup mode enabled: {{ perform_cleanup }}"
 
-    - name: Stop when no likely orphan UUIDs were found
+    - name: Show clean discovery summary when no likely orphan UUIDs were found
+      ansible.builtin.debug:
+        msg: >-
+          No likely orphan UUIDs were found with current heuristics.
+          Discovery completed successfully with no cleanup candidates.
+      when: orphan_lun_uuids | length == 0
+
+    - name: Optionally fail when no likely orphan UUIDs were found
       ansible.builtin.fail:
         msg: >-
           No k8s mapped but disconnected UUIDs were found with current heuristics.
           Confirm mappings and session state in DSM/SAN Manager, then adjust
           synology_lun_name_exclude_patterns or review synology_lun_report.
-      when: orphan_lun_uuids | length == 0
+      when:
+        - orphan_lun_uuids | length == 0
+        - synology_fail_when_none_found | bool
 
     - name: Require explicit confirmation before deletion
       ansible.builtin.fail:

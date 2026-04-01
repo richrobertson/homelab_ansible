@@ -32,6 +32,15 @@ ansible-playbook ansible/synology/discover_orphaned_luns.yml \
   -e 'synology_lun_name_exclude_patterns=["prod","backup"]'
 ```
 
+By default, discovery succeeds when no orphaned LUNs are found and reports an empty result.
+Enable strict non-empty behavior if your automation requires it:
+
+```bash
+ansible-playbook ansible/synology/discover_orphaned_luns.yml \
+  -i inventory/environments/synology.ini \
+  -e synology_fail_when_none_found=true
+```
+
 ## 3) Cleanup with explicit UUIDs
 
 Dry-run preview:
@@ -58,6 +67,15 @@ Discovery and preview only:
 ```bash
 ansible-playbook ansible/synology/discover_and_cleanup_orphaned_luns.yml \
   -i inventory/environments/synology.ini
+```
+
+The one-shot playbook also succeeds by default when no candidates are found.
+To force a non-zero exit when discovery returns no orphan UUIDs:
+
+```bash
+ansible-playbook ansible/synology/discover_and_cleanup_orphaned_luns.yml \
+  -i inventory/environments/synology.ini \
+  -e synology_fail_when_none_found=true
 ```
 
 Actual cleanup (requires explicit confirmation gate):

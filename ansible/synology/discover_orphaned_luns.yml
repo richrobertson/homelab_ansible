@@ -32,6 +32,9 @@
     # Optional allow-list for names that should never be flagged as orphaned.
     synology_lun_name_exclude_patterns: []
 
+    # Optional strict mode: fail when no likely orphan UUIDs are discovered.
+    synology_fail_when_none_found: false
+
   tasks:
     - name: Fetch current LUN inventory from Synology
       ansible.builtin.raw: "{{ synology_remote_list_luns_cmd }}"
@@ -200,10 +203,19 @@
             -e 'orphan_lun_uuids={{ orphan_lun_uuids | to_json }}'
             -e 'perform_cleanup=true'
 
-    - name: Fail when no likely orphan UUIDs found
+    - name: Show clean discovery summary when no likely orphan UUIDs are found
+      ansible.builtin.debug:
+        msg: >-
+          No likely orphan UUIDs were found with current heuristics.
+          Discovery completed successfully with no cleanup candidates.
+      when: orphan_lun_uuids | length == 0
+
+    - name: Optionally fail when no likely orphan UUIDs found
       ansible.builtin.fail:
         msg: >-
           No k8s mapped but disconnected UUIDs were found with current heuristics.
           Confirm mappings and session state in DSM/SAN Manager, then adjust
           synology_lun_name_exclude_patterns or review synology_lun_report.
-      when: orphan_lun_uuids | length == 0
+      when:
+        - orphan_lun_uuids | length == 0
+        - synology_fail_when_none_found | bool
