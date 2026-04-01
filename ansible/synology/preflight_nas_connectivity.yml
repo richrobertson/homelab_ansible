@@ -46,7 +46,7 @@
     - name: Parse Synology API info response
       ansible.builtin.set_fact:
         synology_api_info_json: >-
-          {{ synology_api_info_raw.stdout | regex_search('(?ms)\{.*\}\s*$') | default('', true) }}
+          {{ synology_api_info_raw.stdout | regex_search('(?ms)\{\s*"(?:success|data)".*\}\s*$') | default('', true) }}
 
     - name: Assert API info JSON payload is present
       ansible.builtin.assert:
@@ -74,7 +74,7 @@
     - name: Parse LUN inventory payload
       ansible.builtin.set_fact:
         synology_luns_json: >-
-          {{ synology_luns_raw.stdout | regex_search('(?ms)\{.*\}\s*$') | default('', true) }}
+          {{ synology_luns_raw.stdout | regex_search('(?ms)\{\s*"(?:success|data)".*\}\s*$') | default('', true) }}
 
     - name: Assert LUN inventory JSON payload is present
       ansible.builtin.assert:
