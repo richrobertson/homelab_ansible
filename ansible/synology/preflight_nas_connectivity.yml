@@ -45,7 +45,18 @@
 
     - name: Parse Synology API info response
       ansible.builtin.set_fact:
-        synology_api_info_payload: "{{ synology_api_info_raw.stdout | from_json }}"
+        synology_api_info_json: >-
+          {{ synology_api_info_raw.stdout | regex_search('(?ms)\{.*\}\s*$') | default('', true) }}
+
+    - name: Assert API info JSON payload is present
+      ansible.builtin.assert:
+        that:
+          - synology_api_info_json | length > 0
+        fail_msg: "Could not locate JSON payload in Synology API info response."
+
+    - name: Parse Synology API info payload
+      ansible.builtin.set_fact:
+        synology_api_info_payload: "{{ synology_api_info_json | from_json }}"
 
     - name: Assert LUN API query succeeded
       ansible.builtin.assert:
@@ -62,7 +73,18 @@
 
     - name: Parse LUN inventory payload
       ansible.builtin.set_fact:
-        synology_luns_payload: "{{ synology_luns_raw.stdout | from_json }}"
+        synology_luns_json: >-
+          {{ synology_luns_raw.stdout | regex_search('(?ms)\{.*\}\s*$') | default('', true) }}
+
+    - name: Assert LUN inventory JSON payload is present
+      ansible.builtin.assert:
+        that:
+          - synology_luns_json | length > 0
+        fail_msg: "Could not locate JSON payload in LUN inventory response."
+
+    - name: Parse LUN inventory JSON payload
+      ansible.builtin.set_fact:
+        synology_luns_payload: "{{ synology_luns_json | from_json }}"
 
     - name: Assert LUN inventory query succeeded
       ansible.builtin.assert:

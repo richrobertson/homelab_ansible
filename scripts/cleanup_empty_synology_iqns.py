@@ -2,6 +2,7 @@
 import argparse
 import csv
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -13,10 +14,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Identify and optionally delete Synology iSCSI IQNs with no mapped LUNs."
     )
-    parser.add_argument("--host", default="192.168.1.215")
+    parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, default=5022)
     parser.add_argument("--user", required=True)
-    parser.add_argument("--password", required=True)
+    parser.add_argument("--password")
+    parser.add_argument(
+        "--password-env",
+        help="Environment variable name containing the SSH/sudo password.",
+    )
+    parser.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="Read SSH/sudo password from stdin.",
+    )
     parser.add_argument(
         "--k8s-prefix",
         default="k8s-csi-pvc-",
@@ -49,13 +59,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def remote_exec(host: str, port: int, user: str, password: str, remote_cmd: str) -> str:
-    quoted_password = shlex.quote(password)
-    remote_shell = f"printf '%s\\n' {quoted_password} | sudo -S {remote_cmd} 2>/dev/null"
+    remote_shell = f"sudo -S -p '' {remote_cmd}"
+    env = os.environ.copy()
+    env["SSHPASS"] = password
     result = subprocess.run(
         [
             "sshpass",
-            "-p",
-            password,
+            "-e",
             "ssh",
             "-o",
             "LogLevel=ERROR",
@@ -70,6 +80,8 @@ def remote_exec(host: str, port: int, user: str, password: str, remote_cmd: str)
             f"{user}@{host}",
             remote_shell,
         ],
+        input=f"{password}\n",
+        env=env,
         capture_output=True,
         text=True,
         check=False,
@@ -189,8 +201,16 @@ def append_log(log_path: Path, lines: list[str]) -> None:
 def main() -> int:
     args = parse_args()
 
-    targets = fetch_targets(args.host, args.port, args.user, args.password)
-    mapped_target_ids = fetch_mapped_target_ids(args.host, args.port, args.user, args.password)
+    password = args.password or ""
+    if not password and args.password_env:
+        password = os.environ.get(args.password_env, "")
+    if not password and args.password_stdin:
+        password = sys.stdin.readline().rstrip("\n")
+    if not password:
+        raise RuntimeError("Provide password via --password, --password-env, or --password-stdin")
+
+    targets = fetch_targets(args.host, args.port, args.user, password)
+    mapped_target_ids = fetch_mapped_target_ids(args.host, args.port, args.user, password)
     empty_targets = identify_empty_targets(
         targets,
         mapped_target_ids,
@@ -211,7 +231,7 @@ def main() -> int:
     deleted_ids = []
     for target in empty_targets:
         target_id = target["target_id"]
-        success, command, output = delete_target(args.host, args.port, args.user, args.password, target_id)
+        success, command, output = delete_target(args.host, args.port, args.user, password, target_id)
         status = "deleted" if success else "failed"
         log_lines.extend(
             [
@@ -225,7 +245,7 @@ def main() -> int:
 
     append_log(Path(args.log), log_lines)
 
-    remaining_targets = fetch_targets(args.host, args.port, args.user, args.password)
+    remaining_targets = fetch_targets(args.host, args.port, args.user, password)
     remaining_target_ids = {str(target.get('target_id', '')) for target in remaining_targets}
     not_removed = [target_id for target_id in deleted_ids if target_id in remaining_target_ids]
 

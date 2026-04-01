@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+tmp_nc_out="$(mktemp)"
+cleanup() {
+  rm -f "$tmp_nc_out"
+}
+trap cleanup EXIT
+
 echo "RUN_AT=$(date -u)"
 
 echo "== Proxmox host reachability =="
@@ -17,11 +23,11 @@ echo
 echo "== Staging API/Talos ports =="
 for ip in 10.20.0.2 10.20.1.2 10.20.2.2 10.21.2.2; do
   printf "%s:6443 " "$ip"
-  nc -vz -w 3 "$ip" 6443 >/tmp/nc.out 2>&1 || true
-  tail -1 /tmp/nc.out || true
+  nc -vz -w 3 "$ip" 6443 >"$tmp_nc_out" 2>&1 || true
+  tail -1 "$tmp_nc_out" || true
   printf "%s:50000 " "$ip"
-  nc -vz -w 3 "$ip" 50000 >/tmp/nc.out 2>&1 || true
-  tail -1 /tmp/nc.out || true
+  nc -vz -w 3 "$ip" 50000 >"$tmp_nc_out" 2>&1 || true
+  tail -1 "$tmp_nc_out" || true
 done
 
 echo

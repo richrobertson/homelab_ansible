@@ -6,21 +6,25 @@ HOST_GROUP="synology_nas"
 PORT="5022"
 USER=""
 PASSWORD=""
-OUTPUT="ansible/synology/logs/orphan_luns_dry_run_report.txt"
+PASSWORD_ENV=""
+PASSWORD_STDIN="false"
+OUTPUT=""
 K8S_PREFIX="k8s-csi-pvc-"
 
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/identify_disconnected_synology_luns.sh --user USER --password PASS [options]
+  scripts/identify_disconnected_synology_luns.sh --user USER [--password PASS|--password-env VAR|--password-stdin] [options]
 
 Options:
   --inventory PATH     Ansible inventory file (default: inventory/environments/synology.ini)
   --host-group NAME    Inventory host/group to query (default: synology_nas)
   --port PORT          SSH port (default: 5022)
   --user USER          SSH username (required)
-  --password PASS      SSH/sudo password (required)
-  --output PATH        Output report path (default: ansible/synology/logs/orphan_luns_dry_run_report.txt)
+  --password PASS      SSH/sudo password
+  --password-env VAR   Read SSH/sudo password from environment variable VAR
+  --password-stdin     Read SSH/sudo password from stdin
+  --output PATH        Output report path (default: /tmp/orphan_luns_dry_run_report_<timestamp>.csv)
   --k8s-prefix PREFIX  Target name prefix to treat as k8s (default: k8s-csi-pvc-)
   -h, --help           Show this help
 EOF
@@ -48,6 +52,14 @@ while [[ $# -gt 0 ]]; do
       PASSWORD="$2"
       shift 2
       ;;
+    --password-env)
+      PASSWORD_ENV="$2"
+      shift 2
+      ;;
+    --password-stdin)
+      PASSWORD_STDIN="true"
+      shift
+      ;;
     --output)
       OUTPUT="$2"
       shift 2
@@ -68,10 +80,28 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$USER" || -z "$PASSWORD" ]]; then
-  echo "--user and --password are required" >&2
+if [[ -z "$USER" ]]; then
+  echo "--user is required" >&2
   usage
   exit 1
+fi
+
+if [[ -n "$PASSWORD_ENV" ]]; then
+  PASSWORD="${!PASSWORD_ENV:-}"
+fi
+
+if [[ "$PASSWORD_STDIN" == "true" ]]; then
+  IFS= read -r PASSWORD
+fi
+
+if [[ -z "$PASSWORD" ]]; then
+  echo "one of --password, --password-env, or --password-stdin is required" >&2
+  usage
+  exit 1
+fi
+
+if [[ -z "$OUTPUT" ]]; then
+  OUTPUT="/tmp/orphan_luns_dry_run_report_$(date -u +%Y%m%dT%H%M%SZ).csv"
 fi
 
 mkdir -p "$(dirname "$OUTPUT")"
@@ -79,10 +109,19 @@ mkdir -p "$(dirname "$OUTPUT")"
 tmp_luns="$(mktemp)"
 tmp_targets="$(mktemp)"
 tmp_mapping="$(mktemp)"
+tmp_ansible_vars="$(mktemp)"
 cleanup() {
-  rm -f "$tmp_luns" "$tmp_targets" "$tmp_mapping"
+  rm -f "$tmp_luns" "$tmp_targets" "$tmp_mapping" "$tmp_ansible_vars"
 }
 trap cleanup EXIT
+
+chmod 600 "$tmp_ansible_vars"
+cat > "$tmp_ansible_vars" <<EOF
+ansible_user: "$USER"
+ansible_port: $PORT
+ansible_password: "$PASSWORD"
+ansible_become_password: "$PASSWORD"
+EOF
 
 run_raw() {
   local cmd="$1"
@@ -90,7 +129,7 @@ run_raw() {
     -i "$INVENTORY" \
     -m raw \
     -a "$cmd" \
-    -e "ansible_user=$USER ansible_port=$PORT ansible_password=$PASSWORD ansible_become_password=$PASSWORD" \
+    -e "@$tmp_ansible_vars" \
     -b --become-method=sudo
 }
 
@@ -108,10 +147,16 @@ luns_raw_path, targets_raw_path, mapping_raw_path, output_path, k8s_prefix = sys
 
 
 def extract_json(raw_text: str):
-  match = re.search(r"(?ms)^\{.*\}\s*$", raw_text)
-  if not match:
-    raise RuntimeError("Could not locate JSON payload in command output")
-  return json.loads(match.group(0))
+  decoder = json.JSONDecoder()
+  for index, char in enumerate(raw_text):
+    if char != "{":
+      continue
+    try:
+      payload, _ = decoder.raw_decode(raw_text[index:])
+      return payload
+    except json.JSONDecodeError:
+      continue
+  raise RuntimeError("Could not locate JSON payload in command output")
 
 
 with open(luns_raw_path, "r", encoding="utf-8", errors="ignore") as handle:
