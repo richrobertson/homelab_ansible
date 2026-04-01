@@ -6,11 +6,15 @@ import os
 import re
 import subprocess  # nosec B404 - operational script shells out to ssh/sshpass with fixed argv.
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:
+    ts = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    default_report = Path(tempfile.gettempdir()) / f"empty_iqn_targets_report_{ts}.csv"
+
     parser = argparse.ArgumentParser(
         description="Identify and optionally delete Synology iSCSI IQNs with no mapped LUNs."
     )
@@ -34,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--report",
-        default=f"/tmp/empty_iqn_targets_report_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv",
+        default=str(default_report),
     )
     parser.add_argument(
         "--log",
