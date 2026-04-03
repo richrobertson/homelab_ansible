@@ -1,0 +1,45 @@
+---
+- name: Regular maintenance for Proxmox hosts
+  hosts: "{{ proxmox_maintenance_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+
+  vars:
+    apt_cache_valid_time: 3600
+
+  tasks:
+    - name: Refresh apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: "{{ apt_cache_valid_time }}"
+
+    - name: Apply available package upgrades
+      ansible.builtin.apt:
+        upgrade: dist
+
+    - name: Remove unused packages
+      ansible.builtin.apt:
+        autoremove: true
+
+    - name: Clean local apt package cache
+      ansible.builtin.apt:
+        autoclean: true
+
+    - name: Check if reboot is required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+
+    - name: Reboot if required by updates
+      ansible.builtin.reboot:
+        reboot_timeout: 900
+        msg: "Reboot initiated by Ansible maintenance playbook"
+      when: reboot_required.stat.exists
+
+    - name: Report maintenance completion
+      ansible.builtin.debug:
+        msg: >-
+          Maintenance complete on {{ inventory_hostname }}.
+          Reboot required: {{ reboot_required.stat.exists | bool }}
