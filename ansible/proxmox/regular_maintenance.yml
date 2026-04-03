@@ -2,7 +2,7 @@
 - name: Regular maintenance for Proxmox hosts
   hosts: "{{ proxmox_maintenance_hosts | default('proxmox_nodes') }}"
   become: true
-  gather_facts: true
+  gather_facts: false
   serial: 1
   any_errors_fatal: true
 
