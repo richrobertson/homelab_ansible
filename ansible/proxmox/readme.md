@@ -6,6 +6,7 @@ This directory contains playbooks, roles, and templates for managing Proxmox clu
 - **ceph_admin_portal.yml**: Configure Ceph Dashboard (admin portal) bind settings and admin login credentials
 - **ceph_object_gw.yml**: Deploy Ceph Object Gateway on Proxmox nodes
 - **rolling_restart.yml**: Safely reboot Proxmox nodes one at a time
+- **regular_maintenance.yml**: Apply rolling package updates, cleanup, and reboot only when required (targets `proxmox_nodes` by default; override with `-e proxmox_maintenance_hosts=<group_or_hosts>`)
 - **intel_vpro.yml**: Configure Intel vPro interfaces on Proxmox nodes
 - **provision_certificates.yml**: Configure Vault PKI + Vault Agent automation for Proxmox API certificates
 - **disable_vlan_hw_filtering.yml**: Disable VLAN hardware filtering on Proxmox interfaces and keep it persistent across reboots
@@ -35,6 +36,7 @@ The `handlers/` directory is for custom handlers (e.g., service restarts or noti
   ansible-playbook -i ../../inventory/proxmox.yml ceph_admin_portal.yml --extra-vars @../../inventory/ceph_dashboard_credentials.vault.yml --ask-vault-pass
    ansible-playbook -i ../../inventory/proxmox.yml ceph_object_gw.yml
    ansible-playbook -i ../../inventory/proxmox.yml rolling_restart.yml
+    ansible-playbook -i ../../inventory/proxmox.yml regular_maintenance.yml
    ansible-playbook -i ../../inventory/proxmox.yml intel_vpro.yml
    ansible-playbook -i ../../inventory/proxmox.yml provision_certificates.yml
    ansible-playbook -i ../../inventory/proxmox.yml disable_vlan_hw_filtering.yml
