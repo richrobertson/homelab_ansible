@@ -1,0 +1,25 @@
+# Managed by Ansible: ansible/domain/fix_dc_time_drift.yml
+
+# Upstream authoritative sources.
+{% for server in dc_ntp_upstream_servers %}
+server {{ server }} iburst
+{% endfor %}
+
+# Allow fast recovery when drift is high.
+makestep 1.0 3
+rtcsync
+
+# Serve time to domain clients.
+{% for cidr in dc_ntp_allow_cidrs %}
+allow {{ cidr }}
+{% endfor %}
+
+# Keep serving local time if all upstream sources are temporarily unreachable.
+local stratum 10
+
+# Samba signed NTP socket support for domain environments.
+ntpsigndsocket /var/lib/samba/ntp_signd
+
+# Standard Chrony state and logs.
+driftfile /var/lib/chrony/drift
+logdir /var/log/chrony

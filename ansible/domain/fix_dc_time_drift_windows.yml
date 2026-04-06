@@ -1,0 +1,105 @@
+---
+- name: Fix time drift on Windows AD domain controllers
+  hosts: domain_controllers_windows
+  gather_facts: false
+
+  vars:
+    dc_w32time_ntp_peers:
+      - "time.cloudflare.com"
+      - "time.google.com"
+      - "pool.ntp.org"
+    dc_w32time_special_poll_interval: 900
+    dc_w32time_announce_flags: 5
+    dc_w32time_max_pos_phase_correction: 4294967295
+    dc_w32time_max_neg_phase_correction: 4294967295
+
+  pre_tasks:
+    - name: Build w32time peer list with client mode flags
+      ansible.builtin.set_fact:
+        dc_w32time_peer_list: "{{ dc_w32time_ntp_peers | map('regex_replace', '$', ',0x8') | join(' ') }}"
+
+  tasks:
+    - name: Configure w32time NTP peer list
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters
+        name: NtpServer
+        data: "{{ dc_w32time_peer_list }}"
+        type: string
+      notify: Restart w32time
+
+    - name: Configure w32time source type to manual NTP
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters
+        name: Type
+        data: NTP
+        type: string
+      notify: Restart w32time
+
+    - name: Mark domain controller as reliable time source
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config
+        name: AnnounceFlags
+        data: "{{ dc_w32time_announce_flags }}"
+        type: dword
+      notify: Restart w32time
+
+    - name: Allow large positive phase corrections
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config
+        name: MaxPosPhaseCorrection
+        data: "{{ dc_w32time_max_pos_phase_correction }}"
+        type: dword
+      notify: Restart w32time
+
+    - name: Allow large negative phase corrections
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config
+        name: MaxNegPhaseCorrection
+        data: "{{ dc_w32time_max_neg_phase_correction }}"
+        type: dword
+      notify: Restart w32time
+
+    - name: Enable NTP server provider
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpServer
+        name: Enabled
+        data: 1
+        type: dword
+      notify: Restart w32time
+
+    - name: Enable NTP client provider
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpClient
+        name: Enabled
+        data: 1
+        type: dword
+      notify: Restart w32time
+
+    - name: Configure w32time poll interval
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpClient
+        name: SpecialPollInterval
+        data: "{{ dc_w32time_special_poll_interval }}"
+        type: dword
+      notify: Restart w32time
+
+    - name: Ensure w32time service is running and set to auto start
+      ansible.windows.win_service:
+        name: W32Time
+        start_mode: auto
+        state: started
+
+    - name: Apply w32time runtime config
+      ansible.windows.win_command: w32tm /config /update
+      changed_when: false
+
+    - name: Force immediate rediscover and resync
+      ansible.windows.win_command: w32tm /resync /rediscover /force
+      changed_when: false
+      failed_when: false
+
+  handlers:
+    - name: Restart w32time
+      ansible.windows.win_service:
+        name: W32Time
+        state: restarted

@@ -1,0 +1,66 @@
+---
+- name: Fix time drift on domain controllers
+  hosts: domain_controllers
+  become: true
+  gather_facts: true
+
+  vars:
+    dc_ntp_upstream_servers:
+      - "time.cloudflare.com"
+      - "time.google.com"
+      - "pool.ntp.org"
+    dc_ntp_allow_cidrs:
+      - "192.168.0.0/16"
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+    dc_timezone: "UTC"
+
+  pre_tasks:
+    - name: Select Chrony configuration path and service name
+      ansible.builtin.set_fact:
+        dc_chrony_config_path: "{{ '/etc/chrony/chrony.conf' if ansible_os_family == 'Debian' else '/etc/chrony.conf' }}"
+        dc_chrony_service_name: "{{ 'chrony' if ansible_os_family == 'Debian' else 'chronyd' }}"
+
+  tasks:
+    - name: Install Chrony
+      ansible.builtin.package:
+        name: chrony
+        state: present
+
+    - name: Ensure Samba NTP signing socket directory exists
+      ansible.builtin.file:
+        path: /var/lib/samba/ntp_signd
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Configure Chrony for domain controller time service
+      ansible.builtin.template:
+        src: templates/chrony-domain-controller.conf.j2
+        dest: "{{ dc_chrony_config_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart Chrony
+
+    - name: Set controller timezone
+      ansible.builtin.command: timedatectl set-timezone {{ dc_timezone }}
+      changed_when: false
+
+    - name: Ensure Chrony is enabled and running
+      ansible.builtin.service:
+        name: "{{ dc_chrony_service_name }}"
+        enabled: true
+        state: started
+
+    - name: Force immediate clock correction
+      ansible.builtin.command: chronyc -a makestep
+      changed_when: false
+      failed_when: false
+
+  handlers:
+    - name: Restart Chrony
+      ansible.builtin.service:
+        name: "{{ dc_chrony_service_name }}"
+        state: restarted
