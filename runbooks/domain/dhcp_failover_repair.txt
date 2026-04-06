@@ -1,0 +1,158 @@
+DHCP failover repair commands
+=============================
+
+Run these in an elevated PowerShell session.
+
+On both RHONDA and DNS01
+------------------------
+
+Check port 647 reachability:
+
+Test-NetConnection rhonda.myrobertson.net -Port 647
+Test-NetConnection dns01.myrobertson.net -Port 647
+
+Check existing firewall rules:
+
+Get-NetFirewallRule | Where-Object { $_.DisplayName -match 'DHCP|dhcp|Failover' } | Select-Object DisplayName, Enabled, Direction, Action
+
+Open DHCP failover port 647:
+
+New-NetFirewallRule -DisplayName "DHCP Failover TCP 647 In" -Direction Inbound -Protocol TCP -LocalPort 647 -Action Allow
+New-NetFirewallRule -DisplayName "DHCP Failover TCP 647 Out" -Direction Outbound -Protocol TCP -RemotePort 647 -Action Allow
+
+Re-test after firewall changes:
+
+Test-NetConnection rhonda.myrobertson.net -Port 647
+Test-NetConnection dns01.myrobertson.net -Port 647
+
+On RHONDA
+---------
+
+Inspect the current DHCP failover relationship:
+
+Get-DhcpServerv4Failover | Format-List Name,PartnerServer,Mode,State,ScopeId
+
+If it still shows CommunicationInterrupted, remove the existing relationship:
+
+Remove-DhcpServerv4Failover -Name "rhonda.myrobertson.net-dns01.myrobertson.net" -Force
+
+On your Mac
+-----------
+
+Get the shared secret from Vault:
+
+source ~/.bash_profile
+vault kv get -field=shared_secret secret/windows/domain/dhcp_failover
+
+Back on RHONDA
+--------------
+
+Recreate the relationship in hot standby mode.
+Replace <paste-secret-here> with the Vault shared secret value:
+
+Add-DhcpServerv4Failover -Name "rhonda.myrobertson.net-dns01.myrobertson.net" -PartnerServer "dns01.myrobertson.net" -ScopeId 192.168.1.0,192.168.2.0,192.168.7.0,192.168.8.0,192.168.10.0,192.168.11.0,192.168.12.0,192.168.20.0,192.168.88.0 -SharedSecret "<paste-secret-here>" -ServerRole Active -ReservePercent 5 -MaxClientLeadTime "01:00:00" -AutoStateTransition $true -StateSwitchInterval "01:00:00"
+
+Validate the recreated relationship:
+
+Get-DhcpServerv4Failover | Format-List Name,PartnerServer,Mode,State,ScopeId
+
+Expected result
+---------------
+
+- Mode should be HotStandby.
+- State should no longer be CommunicationInterrupted.
+- All 9 scopes should still be attached.
+
+Additional diagnostics
+======================
+
+If port 647 is still failing or the relationship remains CommunicationInterrupted,
+run the following additional diagnostics.
+
+On both RHONDA and DNS01
+------------------------
+
+Check whether anything is listening on TCP 647:
+
+Get-NetTCPConnection -LocalPort 647 -State Listen
+
+Check with netstat as a fallback:
+
+netstat -ano | findstr :647
+
+Check DHCP-related firewall rules again:
+
+Get-NetFirewallRule | Where-Object { $_.DisplayName -match 'DHCP|dhcp|Failover' } | Select-Object DisplayName, Enabled, Direction, Action
+
+Restart the DHCP service after firewall changes:
+
+Restart-Service DHCPServer -Force
+
+Re-test connectivity after the restart:
+
+Test-NetConnection rhonda.myrobertson.net -Port 647
+Test-NetConnection dns01.myrobertson.net -Port 647
+
+DNS resolution diagnostics
+-------------------------
+
+On RHONDA and DNS01, inspect all records returned for each host name:
+
+Resolve-DnsName rhonda.myrobertson.net
+Resolve-DnsName dns01.myrobertson.net
+
+What to look for
+----------------
+
+- rhonda.myrobertson.net should resolve to 192.168.1.245
+- dns01.myrobertson.net should ideally resolve to 192.168.1.101 only for DHCP failover traffic
+- If dns01.myrobertson.net also resolves to 192.168.88.19 or other interface addresses, failover may try the wrong path
+- If nothing is listening on 647, DHCP failover communication is not healthy even if the DHCP service is running
+
+No listener on TCP 647 (focused recovery)
+=========================================
+
+If `Get-NetTCPConnection -LocalPort 647 -State Listen` returns no results,
+run this exact sequence on RHONDA first.
+
+On RHONDA
+---------
+
+Inspect current relationship:
+
+Get-DhcpServerv4Failover | Format-List Name,PartnerServer,Mode,State,ScopeId
+
+Remove the stale relationship:
+
+Remove-DhcpServerv4Failover -Name "rhonda.myrobertson.net-dns01.myrobertson.net" -Force
+
+Restart DHCP service:
+
+Restart-Service DHCPServer -Force
+
+Check for listener:
+
+Get-NetTCPConnection -LocalPort 647 -State Listen
+
+If still no listener, recreate failover relationship:
+
+Add-DhcpServerv4Failover -Name "rhonda.myrobertson.net-dns01.myrobertson.net" -PartnerServer "dns01.myrobertson.net" -ScopeId 192.168.1.0,192.168.2.0,192.168.7.0,192.168.8.0,192.168.10.0,192.168.11.0,192.168.12.0,192.168.20.0,192.168.88.0 -SharedSecret "<paste-secret-here>" -ServerRole Active -ReservePercent 5 -MaxClientLeadTime "01:00:00" -AutoStateTransition $true -StateSwitchInterval "01:00:00"
+
+Validate relationship and listener:
+
+Get-DhcpServerv4Failover | Format-List Name,PartnerServer,Mode,State,ScopeId
+Get-NetTCPConnection -LocalPort 647 -State Listen
+
+On RHONDA and DNS01
+-------------------
+
+Validate bidirectional connectivity:
+
+Test-NetConnection rhonda.myrobertson.net -Port 647
+Test-NetConnection dns01.myrobertson.net -Port 647
+
+On your Mac (for secret value)
+------------------------------
+
+source ~/.bash_profile
+vault kv get -field=shared_secret secret/windows/domain/dhcp_failover

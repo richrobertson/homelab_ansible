@@ -24,6 +24,33 @@ postgresql01.staging.example.com
 pve01.staging.example.com
 pve02.staging.example.com
 
+[domain_controllers_windows]
+rhonda.myrobertson.net
+
+[dhcp_primary_windows]
+rhonda.myrobertson.net
+
+[dhcp_partner_windows]
+beatrice.myrobertson.net
+
+[dhcp_servers_windows:children]
+dhcp_primary_windows
+dhcp_partner_windows
+
+[domain_controllers_windows:vars]
+ansible_connection=winrm
+ansible_port=5986
+ansible_winrm_transport=ntlm
+ansible_winrm_server_cert_validation=ignore
+ansible_user=Administrator
+
+[dhcp_servers_windows:vars]
+ansible_connection=winrm
+ansible_port=5986
+ansible_winrm_transport=ntlm
+ansible_winrm_server_cert_validation=ignore
+ansible_user=Administrator
+
 [all:vars]
 # Connection settings
 ansible_user=admin

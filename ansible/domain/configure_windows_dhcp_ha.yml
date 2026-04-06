@@ -1,0 +1,264 @@
+---
+- name: Configure Windows DHCP high availability
+  hosts: dhcp_servers_windows
+  gather_facts: false
+
+  vars:
+    dhcp_failover_name: dhcp-ha
+    dhcp_failover_mode: loadbalance
+    dhcp_failover_load_balance_percent: 50
+    dhcp_failover_max_client_lead_time: 01:00:00
+    dhcp_failover_auto_state_transition: true
+    dhcp_failover_state_switch_interval: 01:00:00
+    dhcp_domain_name: ""
+    dhcp_dns_servers: []
+    dhcp_scopes: []
+    dhcp_manage_scopes: true
+    dhcp_manage_scope_options: true
+    dhcp_manage_exclusions: true
+    dhcp_manage_server_options: true
+
+  pre_tasks:
+    - name: Validate DHCP inventory groups
+      ansible.builtin.assert:
+        that:
+          - groups['dhcp_primary_windows'] | default([]) | length == 1
+          - groups['dhcp_partner_windows'] | default([]) | length == 1
+          - groups['dhcp_primary_windows'][0] != groups['dhcp_partner_windows'][0]
+        fail_msg: >-
+          Define exactly one host in each of dhcp_primary_windows and
+          dhcp_partner_windows, and do not reuse the same host in both groups.
+
+    - name: Validate DHCP scope definitions
+      ansible.builtin.assert:
+        that:
+          - dhcp_scopes | length > 0
+          - dhcp_failover_shared_secret is defined
+          - dhcp_failover_shared_secret | length > 0
+          - dhcp_failover_mode in ['loadbalance', 'hotstandby']
+        fail_msg: >-
+          Set dhcp_scopes and dhcp_failover_shared_secret before running this
+          playbook. dhcp_failover_mode must be loadbalance or hotstandby.
+
+    - name: Set DHCP topology facts
+      ansible.builtin.set_fact:
+        dhcp_primary_server: "{{ groups['dhcp_primary_windows'][0] }}"
+        dhcp_partner_server: "{{ groups['dhcp_partner_windows'][0] }}"
+        dhcp_scope_ids: "{{ dhcp_scopes | map(attribute='scope_id') | list }}"
+
+  tasks:
+    - name: Ensure DHCP role is installed
+      ansible.windows.win_feature:
+        name: DHCP
+        state: present
+        include_management_tools: true
+      register: dhcp_role_result
+
+    - name: Ensure DHCP Server PowerShell module is available
+      ansible.windows.win_powershell:
+        script: |
+          if (-not (Get-Module -ListAvailable -Name DhcpServer)) {
+            throw 'DhcpServer PowerShell module is not available after DHCP role installation.'
+          }
+          'DhcpServer module available'
+      changed_when: false
+
+    - name: Authorize DHCP servers in Active Directory from primary
+      when: inventory_hostname == dhcp_primary_server
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          $servers = @(
+            @{ DnsName = {{ dhcp_primary_server | to_json }}; IPAddress = {{ hostvars[dhcp_primary_server].ansible_host | default(dhcp_primary_server) | to_json }} },
+            @{ DnsName = {{ dhcp_partner_server | to_json }}; IPAddress = {{ hostvars[dhcp_partner_server].ansible_host | default(dhcp_partner_server) | to_json }} }
+          )
+
+          $changed = $false
+          foreach ($server in $servers) {
+            $existing = Get-DhcpServerInDC -ErrorAction SilentlyContinue |
+              Where-Object {
+                $_.DnsName -ieq $server.DnsName -or $_.IPAddress -eq $server.IPAddress
+              }
+
+            if (-not $existing) {
+              Add-DhcpServerInDC -DnsName $server.DnsName -IPAddress $server.IPAddress
+              $changed = $true
+            }
+          }
+
+          if ($changed) {
+            Write-Output 'Authorized'
+          }
+          else {
+            Write-Output 'Already authorized'
+          }
+      register: dhcp_authorize_result
+      changed_when: "'Authorized' in dhcp_authorize_result.output"
+
+    - name: Restart DHCP service when role changed
+      ansible.windows.win_service:
+        name: DHCPServer
+        start_mode: auto
+        state: restarted
+      when: dhcp_role_result.changed
+
+    - name: Ensure DHCP service is running
+      ansible.windows.win_service:
+        name: DHCPServer
+        start_mode: auto
+        state: started
+
+    - name: Create and update IPv4 DHCP scopes on primary
+      when: inventory_hostname == dhcp_primary_server and dhcp_manage_scopes | bool
+      loop: "{{ dhcp_scopes }}"
+      loop_control:
+        label: "{{ item.scope_id }}"
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          $scopeId = {{ item.scope_id | to_json }}
+          $name = {{ item.name | to_json }}
+          $startRange = {{ item.start_range | to_json }}
+          $endRange = {{ item.end_range | to_json }}
+          $subnetMask = {{ item.subnet_mask | to_json }}
+          $state = {{ item.state | default('active') | to_json }}
+          $leaseDuration = {{ item.lease_duration | default('') | to_json }}
+          if ($leaseDuration) {
+            $leaseSpan = [TimeSpan]::Parse($leaseDuration)
+          }
+          else {
+            $leaseDays = {{ item.lease_duration_days | default(8) }}
+            $leaseSpan = New-TimeSpan -Days $leaseDays
+          }
+
+          $existing = Get-DhcpServerv4Scope -ScopeId $scopeId -ErrorAction SilentlyContinue
+          if (-not $existing) {
+            Add-DhcpServerv4Scope -ScopeId $scopeId -Name $name -StartRange $startRange -EndRange $endRange -SubnetMask $subnetMask -LeaseDuration $leaseSpan -State $state
+            Write-Output 'Created'
+          }
+          else {
+            Set-DhcpServerv4Scope -ScopeId $scopeId -Name $name -StartRange $startRange -EndRange $endRange -LeaseDuration $leaseSpan -State $state
+            Write-Output 'Updated'
+          }
+      register: dhcp_scope_result
+      changed_when: true
+
+    - name: Configure DHCP scope options on primary
+      when: inventory_hostname == dhcp_primary_server and dhcp_manage_scope_options | bool
+      loop: "{{ dhcp_scopes }}"
+      loop_control:
+        label: "{{ item.scope_id }}"
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          $scopeId = {{ item.scope_id | to_json }}
+          $optionParams = @{
+            ScopeId = $scopeId
+          }
+
+          {% if item.router is defined and item.router | length > 0 %}
+          $optionParams['Router'] = @({{ item.router | map('to_json') | join(', ') }})
+          {% endif %}
+          {% if item.dns_servers is defined and item.dns_servers | length > 0 %}
+          $optionParams['DnsServer'] = @({{ item.dns_servers | map('to_json') | join(', ') }})
+          {% elif dhcp_dns_servers | length > 0 %}
+          $optionParams['DnsServer'] = @({{ dhcp_dns_servers | map('to_json') | join(', ') }})
+          {% endif %}
+          {% if item.dns_domain is defined and item.dns_domain | length > 0 %}
+          $optionParams['DnsDomain'] = {{ item.dns_domain | to_json }}
+          {% elif dhcp_domain_name | length > 0 %}
+          $optionParams['DnsDomain'] = {{ dhcp_domain_name | to_json }}
+          {% endif %}
+
+          if ($optionParams.Count -gt 1) {
+            Set-DhcpServerv4OptionValue @optionParams
+          }
+      changed_when: false
+
+    - name: Configure DHCP scope exclusions on primary
+      when: inventory_hostname == dhcp_primary_server and dhcp_manage_exclusions | bool
+      loop: "{{ dhcp_scopes | subelements('exclusions', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.scope_id }} {{ item.1.start_range }}-{{ item.1.end_range }}"
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          $scopeId = {{ item.0.scope_id | to_json }}
+          $startRange = {{ item.1.start_range | to_json }}
+          $endRange = {{ item.1.end_range | to_json }}
+          $existing = Get-DhcpServerv4ExclusionRange -ScopeId $scopeId -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.StartRange.IPAddressToString -eq $startRange -and
+              $_.EndRange.IPAddressToString -eq $endRange
+            }
+
+          if ($existing) {
+            Write-Output 'Present'
+            exit 0
+          }
+
+          Add-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $startRange -EndRange $endRange
+          Write-Output 'Created'
+      register: dhcp_exclusion_result
+      changed_when: "'Created' in dhcp_exclusion_result.output"
+
+    - name: Configure server-level DHCP DNS options
+      when: inventory_hostname == dhcp_primary_server and dhcp_manage_server_options | bool and (dhcp_dns_servers | length > 0 or dhcp_domain_name | length > 0)
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          $optionParams = @{}
+
+          {% if dhcp_dns_servers | length > 0 %}
+          $optionParams['DnsServer'] = @({{ dhcp_dns_servers | map('to_json') | join(', ') }})
+          {% endif %}
+          {% if dhcp_domain_name | length > 0 %}
+          $optionParams['DnsDomain'] = {{ dhcp_domain_name | to_json }}
+          {% endif %}
+
+          if ($optionParams.Count -gt 0) {
+            Set-DhcpServerv4OptionValue @optionParams
+          }
+      changed_when: false
+
+    - name: Create DHCP failover relationship on primary
+      when: inventory_hostname == dhcp_primary_server
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          $name = {{ dhcp_failover_name | to_json }}
+          $partnerServer = {{ dhcp_partner_server | to_json }}
+          $mode = {{ dhcp_failover_mode | to_json }}
+          $sharedSecret = {{ dhcp_failover_shared_secret | to_json }}
+          $scopeIds = @({{ dhcp_scope_ids | map('to_json') | join(', ') }})
+          $existing = Get-DhcpServerv4Failover -Name $name -ErrorAction SilentlyContinue
+
+          if ($existing) {
+            Write-Output 'Present'
+            exit 0
+          }
+
+          $params = @{
+            Name = $name
+            PartnerServer = $partnerServer
+            ScopeId = $scopeIds
+            SharedSecret = $sharedSecret
+            MaxClientLeadTime = {{ dhcp_failover_max_client_lead_time | to_json }}
+            AutoStateTransition = [System.Convert]::ToBoolean('{{ dhcp_failover_auto_state_transition | bool | ternary("true", "false") }}')
+            StateSwitchInterval = {{ dhcp_failover_state_switch_interval | to_json }}
+          }
+
+          if ($mode -ieq 'loadbalance') {
+            $params['LoadBalancePercent'] = {{ dhcp_failover_load_balance_percent }}
+          }
+          else {
+            $params['ServerRole'] = 'Active'
+            {% if dhcp_failover_reserve_percent is defined %}
+            $params['ReservePercent'] = {{ dhcp_failover_reserve_percent }}
+            {% endif %}
+          }
+
+          Add-DhcpServerv4Failover @params
+          Write-Output 'Created'
+      register: dhcp_failover_result
+      changed_when: "'Created' in dhcp_failover_result.output"
