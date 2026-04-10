@@ -1,0 +1,12 @@
+[Unit]
+Description=Proxmox Phase 2 - Monthly Maintenance Tasks Timer
+Documentation=file:///Users/rich/Documents/GitHub/homelab_ansible/ansible/proxmox/MAINTENANCE_GUIDE.md
+Requires=proxmox-phase2-maintenance.service
+
+[Timer]
+OnCalendar=1 *-*-* 03:00:00
+Persistent=true
+Unit=proxmox-phase2-maintenance.service
+
+[Install]
+WantedBy=timers.target

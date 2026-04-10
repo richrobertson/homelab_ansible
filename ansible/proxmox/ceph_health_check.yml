@@ -1,0 +1,139 @@
+---
+- name: Ceph Cluster Health Check
+  hosts: "{{ ceph_check_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars:
+    ceph_health_warn_threshold: 300  # seconds for slow ops
+    ceph_osd_variance_warn: 10  # percent variance in OSD utilization
+
+  tasks:
+    - name: Get Ceph cluster status
+      ansible.builtin.shell: |
+        ceph status --format=json
+      register: ceph_status_json
+      changed_when: false
+      failed_when: false
+
+    - name: Parse Ceph status
+      ansible.builtin.set_fact:
+        ceph_status: "{{ ceph_status_json.stdout | from_json }}"
+      when: ceph_status_json.rc == 0
+
+    - name: Check Ceph cluster health
+      ansible.builtin.debug:
+        msg: |
+          Ceph Cluster Health Report
+          ===========================
+          Health: {{ ceph_status.health.status | default('UNKNOWN') }}
+          Cluster: {{ ceph_status.fsid | default('UNKNOWN') }}
+          Monitors: {{ ceph_status.monmap.num_mons | default('UNKNOWN') }} (quorum: {{ ceph_status.quorum | default([]) | length }})
+          OSDs: {{ ceph_status.osdmap.num_osds | default('UNKNOWN') }} total, {{ ceph_status.osdmap.num_up_osds | default('UNKNOWN') }} up, {{ ceph_status.osdmap.num_in_osds | default('UNKNOWN') }} in
+          
+          PG Stats:
+            Total PGs: {{ ceph_status.pgmap.num_pgs | default('UNKNOWN') }}
+            Active+Clean: {{ ceph_status.pgmap.pgs_by_state | default([]) | selectattr('state_name', 'match', 'active\\+clean') | map(attribute='count') | sum(start=0) | default('UNKNOWN') }}
+            Pools: {{ ceph_status.pgmap.num_pools | default('UNKNOWN') }}
+            
+          Data Usage:
+            Total: {{ (ceph_status.pgmap.bytes_total | default(0) / 1099511627776) | round(2) }} TB
+            Used: {{ (ceph_status.pgmap.bytes_used | default(0) / 1099511627776) | round(2) }} TB
+            Available: {{ (ceph_status.pgmap.bytes_avail | default(0) / 1099511627776) | round(2) }} TB
+            Usage: {{ (ceph_status.pgmap.bytes_used | default(0) / ceph_status.pgmap.bytes_total | default(1) * 100) | round(2) }}%
+      when: ceph_status is defined
+
+    - name: Check OSD status
+      ansible.builtin.shell: |
+        ceph osd tree --format=json
+      register: ceph_osd_tree_json
+      changed_when: false
+      failed_when: false
+      when: ceph_status_json.rc == 0
+
+    - name: Parse OSD tree
+      ansible.builtin.set_fact:
+        ceph_osds: "{{ ceph_osd_tree_json.stdout | from_json }}"
+      when: ceph_osd_tree_json.rc == 0
+
+    - name: Report OSD status
+      ansible.builtin.debug:
+        msg: |
+          OSD Status:
+          {% for node in ceph_osds.nodes | selectattr('type', 'equalto', 'host') %}
+          {{ node.name }}:
+            {% for osd_id in node.children %}
+            {% set osd = ceph_osds.nodes | selectattr('id', 'equalto', osd_id) | first %}
+              OSD {{ osd_id }}: status={{ osd.status | default('unknown') }} weight={{ osd.crush_weight | default('N/A') }}
+            {% endfor %}
+          {% endfor %}
+      when: ceph_osds is defined
+
+    - name: Get detailed health status
+      ansible.builtin.shell: |
+        ceph health detail --format=json
+      register: ceph_health_detail_json
+      changed_when: false
+      failed_when: false
+      when: ceph_status_json.rc == 0
+
+    - name: Display health details
+      ansible.builtin.debug:
+        msg: |
+          Health Details:
+          {{ ceph_health_detail_json.stdout | from_json | to_nice_json }}
+      when: ceph_health_detail_json.rc == 0 and ceph_health_detail_json.stdout | length > 0
+
+    - name: Check for critical Ceph issues
+      ansible.builtin.fail:
+        msg: |
+          CRITICAL: Ceph cluster health is {{ ceph_status.health.status }}
+          Immediate action required!
+      when: 
+        - ceph_status_json.rc == 0
+        - ceph_status.health.status != "HEALTH_OK"
+        - ceph_status.health.status != "HEALTH_WARN"  # Allow warnings without failure
+      ignore_errors: true
+
+    - name: Warn on Ceph health issues
+      ansible.builtin.debug:
+        msg: |
+          WARNING: Ceph cluster health is {{ ceph_status.health.status }}
+          Review the health details above for required actions.
+      when:
+        - ceph_status_json.rc == 0
+        - ceph_status.health.status == "HEALTH_WARN"
+
+    - name: Check if Ceph is not responding
+      ansible.builtin.fail:
+        msg: |
+          FAILED: Could not connect to Ceph cluster.
+          Return code: {{ ceph_status_json.rc }}
+          Stderr: {{ ceph_status_json.stderr }}
+      when: ceph_status_json.rc != 0
+      ignore_errors: true
+
+    - name: Get monitor quorum status
+      ansible.builtin.shell: |
+        ceph quorum_status --format=json
+      register: ceph_quorum_json
+      changed_when: false
+      failed_when: false
+      when: ceph_status_json.rc == 0
+
+    - name: Report monitor quorum
+      ansible.builtin.debug:
+        msg: |
+          Monitor Quorum:
+          {{ ceph_quorum_json.stdout | from_json | to_nice_json }}
+      when: ceph_quorum_json.rc == 0
+
+    - name: Ceph health check summary
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          Ceph Health Check Complete on {{ inventory_hostname }}
+          Status: {{ 'PASS' if ceph_status_json.rc == 0 else 'FAIL' }}
+          ============================================
+      when: true

@@ -1,0 +1,12 @@
+---
+# Phase 1: Weekly Critical Health Checks
+# Import and run all Phase 1 health check playbooks in sequence
+
+- name: Import and run Ceph health check
+  ansible.builtin.import_playbook: ceph_health_check.yml
+
+- name: Import and run HA cluster verification
+  ansible.builtin.import_playbook: ha_cluster_verification.yml
+
+- name: Import and run certificate expiry check
+  ansible.builtin.import_playbook: certificate_expiry_check.yml

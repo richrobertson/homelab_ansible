@@ -1,0 +1,164 @@
+---
+- name: Storage Utilization Report
+  hosts: "{{ storage_check_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: true
+  serial: 1
+
+  vars:
+    storage_warn_percent: 80
+    storage_critical_percent: 90
+    snapshot_warn_count: 20
+    ceph_osd_variance_threshold: 10
+
+  tasks:
+    - name: Get Proxmox storage list
+      ansible.builtin.shell: |
+        pvesh get /storage --output json 2>/dev/null || echo '{"data": []}'
+      register: storage_list_json
+      changed_when: false
+      failed_when: false
+
+    - name: Parse storage list
+      ansible.builtin.set_fact:
+        storage_list: "{{ storage_list_json.stdout | from_json }}"
+      when: storage_list_json.rc == 0
+
+    - name: Get datastore usage
+      ansible.builtin.shell: |
+        pvesh get /nodes/{{ ansible_hostname }}/storage --output json 2>/dev/null || echo '{"data": []}'
+      register: datastore_usage_json
+      changed_when: false
+      failed_when: false
+
+    - name: Parse datastore usage
+      ansible.builtin.set_fact:
+        datastore_usage: "{{ datastore_usage_json.stdout | from_json }}"
+      when: datastore_usage_json.rc == 0
+
+    - name: Display datastore usage
+      ansible.builtin.debug:
+        msg: |
+          Storage Utilization Report - {{ inventory_hostname }}
+          =====================================================
+          {% for ds in datastore_usage | default([]) %}
+          Storage: {{ ds.storage }}
+            Type: {{ ds.type }}
+            Content: {{ ds.content }}
+            Used: {{ (ds.used | default(0) / 1024 / 1024 / 1024) | round(2) }} GB
+            Available: {{ (ds.avail | default(0) / 1024 / 1024 / 1024) | round(2) }} GB
+            Total: {{ ((ds.used | default(0) + ds.avail | default(0)) / 1024 / 1024 / 1024) | round(2) }} GB
+            {% if (ds.used | default(0) + ds.avail | default(0)) > 0 %}
+            Usage: {{ ((ds.used | default(0) | float / ((ds.used | default(0) | float) + (ds.avail | default(0) | float))) * 100) | round(2) }}%
+            {% else %}
+            Usage: 0%
+            {% endif %}
+          {% endfor %}
+      when: datastore_usage is defined and datastore_usage | length > 0
+
+    - name: Warn on high datastore usage
+      ansible.builtin.debug:
+        msg: |
+          WARNING: Storage {{ item.storage }} is {{ (((item.used | default(0) | float) / ((item.used | default(0) | float) + (item.avail | default(0) | float))) * 100) | round(2) }}% full
+      loop: "{{ datastore_usage | default([]) }}"
+      when:
+        - item.used is defined
+        - item.avail is defined
+        - (item.used | default(0) + item.avail | default(0)) > 0
+        - (((item.used | default(0) | float) / ((item.used | default(0) | float) + (item.avail | default(0) | float))) * 100) | int >= storage_warn_percent
+        - (((item.used | default(0) | float) / ((item.used | default(0) | float) + (item.avail | default(0) | float))) * 100) | int < storage_critical_percent
+
+    - name: Critical alert on datastore full
+      ansible.builtin.fail:
+        msg: |
+          CRITICAL: Storage {{ item.storage }} is {{ (((item.used | default(0) | float) / ((item.used | default(0) | float) + (item.avail | default(0) | float))) * 100) | round(2) }}% full
+          Immediate cleanup required!
+      loop: "{{ datastore_usage | default([]) }}"
+      when:
+        - item.used is defined
+        - item.avail is defined
+        - (item.used | default(0) + item.avail | default(0)) > 0
+        - (((item.used | default(0) | float) / ((item.used | default(0) | float) + (item.avail | default(0) | float))) * 100) | int >= storage_critical_percent
+      ignore_errors: true
+
+    - name: Get VM snapshot count
+      ansible.builtin.shell: |
+        pvesh get /nodes/{{ ansible_hostname }}/qemu --output json 2>/dev/null | \
+        jq '[.data[] | {vmid: .vmid, snapshots: (.snapshots // 0)}] | group_by(.snapshots > 0) | .[] | select(.[0].snapshots > 0)' || echo '[]'
+      register: snapshot_count_json
+      changed_when: false
+      failed_when: false
+
+    - name: Parse snapshot data
+      ansible.builtin.set_fact:
+        vms_with_snapshots: "{{ snapshot_count_json.stdout | from_json }}"
+      when:
+        - snapshot_count_json.rc == 0
+        - snapshot_count_json.stdout != '[]'
+
+    - name: Get volume usage for thin-provisioned disks
+      ansible.builtin.shell: |
+        for ds in /var/lib/vz /mnt/pbs 2>/dev/null; do
+          if [ -d "$ds" ]; then
+            echo "=== $ds ==="
+            du -sh "$ds"/* 2>/dev/null | sort -hr | head -20
+          fi
+        done
+      register: volume_usage
+      changed_when: false
+      failed_when: false
+
+    - name: Display volume usage
+      ansible.builtin.debug:
+        msg: |
+          Volume Disk Usage (Top 20 largest):
+          {{ volume_usage.stdout }}
+      when: volume_usage.stdout | length > 0
+
+    - name: Check for Ceph OSD utilization variance
+      block:
+        - name: Get Ceph OSD utilization
+          ansible.builtin.shell: |
+            ceph osd df json 2>/dev/null | jq '.nodes[] | select(.id >= 0) | .utilization' | \
+            awk '{s+=$1} END {if(NR>0) {mean=s/NR; print mean}}' || echo "0"
+          register: ceph_osd_mean
+          changed_when: false
+          failed_when: false
+
+        - name: Get Ceph OSD variance
+          ansible.builtin.shell: |
+            ceph osd df json 2>/dev/null | jq '[.nodes[] | select(.id >= 0) | .utilization] | 
+            (add/length) as $mean | ((map(. - $mean | . * .) | add / length) | sqrt) as $std | 
+            (($std / $mean) * 100)' | head -1 || echo "0"
+          register: ceph_osd_variance
+          changed_when: false
+          failed_when: false
+
+        - name: Report Ceph OSD balance
+          ansible.builtin.debug:
+            msg: |
+              Ceph OSD Utilization Balance:
+              Mean utilization: {{ ceph_osd_mean.stdout }}%
+              Variance: {{ ceph_osd_variance.stdout }}%
+              {% if ceph_osd_variance.stdout | float > ceph_osd_variance_threshold %}
+              WARNING: High OSD utilization variance detected
+              Consider rebalancing with: ceph osd reweight-by-utilization
+              {% endif %}
+          when: ceph_osd_mean.rc == 0
+      when: true
+      ignore_errors: true
+
+    - name: Storage utilization summary
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          Storage Utilization Report Complete
+          Host: {{ inventory_hostname }}
+          ============================================
+          Review warnings and critical alerts above.
+          For CephFS storage issues, check:
+            ceph df
+            ceph fs status
+          For thin-provisioned disk issues, check:
+            pvesh get /storage/<storage>/content
+      when: true

@@ -1,0 +1,14 @@
+---
+# Phase 2: Monthly Maintenance Tasks
+# Import and run all Phase 2 maintenance playbooks in sequence
+# Note: To enable cert renewal, run with: -e run_cert_renewal=true
+
+- name: Import and run log maintenance
+  ansible.builtin.import_playbook: log_maintenance.yml
+
+- name: Import and run storage utilization report
+  ansible.builtin.import_playbook: storage_utilization_report.yml
+
+- name: Import and run certificate renewal (optional)
+  ansible.builtin.import_playbook: provision_certificates.yml
+  when: run_cert_renewal | default(false) | bool

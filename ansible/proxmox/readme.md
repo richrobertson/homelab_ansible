@@ -2,6 +2,8 @@
 
 This directory contains playbooks, roles, and templates for managing Proxmox clusters and related Ceph infrastructure.
 
+## Core Playbooks
+
 - **proxmox.yml**: Inventory configuration for Proxmox nodes, uses the `community.proxmox.proxmox` dynamic inventory plugin (see `inventory/proxmox.yml`)
 - **ceph_admin_portal.yml**: Configure Ceph Dashboard (admin portal) bind settings and admin login credentials
 - **ceph_object_gw.yml**: Deploy Ceph Object Gateway on Proxmox nodes
@@ -10,6 +12,36 @@ This directory contains playbooks, roles, and templates for managing Proxmox clu
 - **intel_vpro.yml**: Configure Intel vPro interfaces on Proxmox nodes
 - **provision_certificates.yml**: Configure Vault PKI + Vault Agent automation for Proxmox API certificates
 - **disable_vlan_hw_filtering.yml**: Disable VLAN hardware filtering on Proxmox interfaces and keep it persistent across reboots
+
+## Scheduled Maintenance Playbooks (Phase 1 & 2)
+
+See **MAINTENANCE_GUIDE.md** for details on scheduling and alerting.
+
+### Phase 1: Weekly Critical Health Checks
+
+Run **every Monday** (recommended during maintenance window):
+
+- **phase1_health_checks.yml**: Composite playbook running all Phase 1 checks below
+  - **ceph_health_check.yml**: Verify Ceph cluster status, OSDs, PGs, monitors, and quorum
+  - **ha_cluster_verification.yml**: Check Proxmox HA quorum, node status, services, and resources
+  - **certificate_expiry_check.yml**: Alert on certs expiring within 7/30 days, Vault connectivity
+
+### Phase 2: Monthly Maintenance Tasks
+
+Run **first Monday of each month** (recommended at 3 AM):
+
+- **phase2_monthly_maintenance.yml**: Composite playbook running all Phase 2 tasks below
+  - **log_maintenance.yml**: Compress, archive, and delete old logs; manage disk usage
+  - **storage_utilization_report.yml**: Monitor datastore usage, snapshots, Ceph OSD balance
+  - **provision_certificates.yml** (optional): Renew Proxmox API certificates via Vault
+
+### Automated Scheduling
+
+See **scripts/proxmox-maintenance-scheduler.sh** for:
+- Cron task setup (simple scheduling)
+- Systemd timer setup (recommended for production)
+- Manual credential loading from Vault
+- Log aggregation and failure reporting
 
 
 ## Roles and Templates

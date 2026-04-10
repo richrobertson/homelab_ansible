@@ -1,0 +1,19 @@
+[Unit]
+Description=Proxmox Phase 1 - Weekly Critical Health Checks
+Documentation=file:///Users/rich/Documents/GitHub/homelab_ansible/ansible/proxmox/MAINTENANCE_GUIDE.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/Users/rich/Documents/GitHub/homelab_ansible
+EnvironmentFile=/etc/default/proxmox-maintenance
+ExecStart=/bin/bash -c 'source bin/activate && ansible-playbook -u root -i ansible/proxmox/proxmox.yml ansible/proxmox/phase1_health_checks.yml'
+StandardOutput=append:/var/log/proxmox-maintenance/phase1.log
+StandardError=append:/var/log/proxmox-maintenance/phase1-error.log
+SyslogIdentifier=proxmox-phase1-check
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Proxmox Certificate Renewal Timer (Optional, runs after Phase 2)
+Documentation=file:///Users/rich/Documents/GitHub/homelab_ansible/ansible/proxmox/MAINTENANCE_GUIDE.md
+Requires=proxmox-cert-renewal.service
+
+[Timer]
+OnCalendar=1 *-*-* 03:30:00
+Persistent=true
+Unit=proxmox-cert-renewal.service
+
+[Install]
+WantedBy=timers.target

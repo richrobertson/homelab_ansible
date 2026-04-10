@@ -1,0 +1,19 @@
+# Proxmox Maintenance Scheduler Configuration
+# Copy to /etc/default/proxmox-maintenance and adjust as needed
+
+# Vault configuration (if using Vault for credentials)
+# VAULT_ADDR=https://vault.myrobertson.net:8200
+# VAULT_TOKEN=<your-token-here>
+# VAULT_SKIP_VERIFY=false
+
+# Ansible configuration
+# ANSIBLE_LOG_PATH=/var/log/proxmox-maintenance/ansible.log
+# ANSIBLE_VERBOSITY=0
+
+# Environment paths
+# PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Alert configuration (example for email notifications)
+# ALERT_EMAIL=admin@example.com
+# ALERT_ON_CRITICAL=true
+# ALERT_ON_WARNING=false

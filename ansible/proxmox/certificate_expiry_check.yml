@@ -1,0 +1,167 @@
+---
+- name: Certificate Expiry Check
+  hosts: "{{ cert_check_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: true
+  serial: 1
+
+  vars:
+    expiry_warn_days: 30
+    expiry_critical_days: 7
+    vault_addr: "{{ lookup('env', 'VAULT_ADDR') | default('https://vault.myrobertson.net:8200', true) }}"
+    vault_token: "{{ lookup('env', 'VAULT_TOKEN') | default('', true) }}"
+    certs_to_check:
+      - /etc/pve/nodes/{{ ansible_hostname }}/pveproxy-ssl.pem
+      - /etc/pve/nodes/{{ ansible_hostname }}/pveproxy-ssl.key
+      - /etc/pve/pve-root-ca.pem
+
+  tasks:
+    - name: Check if certificate files exist
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: cert_files
+      loop: "{{ certs_to_check }}"
+      changed_when: false
+
+    - name: Get certificate expiry dates
+      ansible.builtin.shell: |
+        set -e
+        if [ -f "{{ item.stat.path }}" ]; then
+          openssl x509 -in "{{ item.stat.path }}" -noout -dates 2>/dev/null || \
+          openssl pkcs12 -in "{{ item.stat.path }}" -noout -info 2>/dev/null | grep -i "not after" || \
+          openssl pkey -in "{{ item.stat.path }}" -noout -text 2>/dev/null | grep -i "not" || \
+          echo "unable_to_parse"
+        else
+          echo "file_not_found"
+        fi
+      register: cert_info
+      loop: "{{ cert_files.results }}"
+      changed_when: false
+      failed_when: false
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Parse certificate expiry dates
+      ansible.builtin.shell: |
+        if [ -f "{{ item.stat.path }}" ]; then
+          openssl x509 -in "{{ item.stat.path }}" -noout -enddate 2>/dev/null | cut -d= -f2 || echo "unable_to_parse"
+        else
+          echo "file_not_found"
+        fi
+      register: cert_notafter
+      loop: "{{ cert_files.results | selectattr('stat.exists', 'equalto', true) | list }}"
+      changed_when: false
+      failed_when: false
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Calculate days until expiry
+      ansible.builtin.shell: |
+        if [ "{{ item.stdout }}" != "file_not_found" ] && [ "{{ item.stdout }}" != "unable_to_parse" ]; then
+          notafter=$(date -d "{{ item.stdout }}" +%s)
+          now=$(date +%s)
+          days=$(( (notafter - now) / 86400 ))
+          echo "$days"
+        else
+          echo "-1"
+        fi
+      register: days_until_expiry
+      loop: "{{ cert_notafter.results }}"
+      changed_when: false
+      loop_control:
+        label: "{{ item.item.item }}"
+
+    - name: Report certificates in good health
+      ansible.builtin.debug:
+        msg: |
+          OK: {{ item.item.item.stat.path }} - {{ item.stdout | int }} days until expiry
+      when:
+        - item.stdout | int > expiry_warn_days
+      loop: "{{ days_until_expiry.results }}"
+
+    - name: Check Vault connectivity for renewal
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/auth/token/lookup-self"
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+        method: GET
+        validate_certs: false
+      register: vault_health
+      failed_when: false
+      changed_when: false
+      when:
+        - vault_token | length > 0
+
+    - name: Report Vault health
+      ansible.builtin.debug:
+        msg: |
+          Vault Status: {{ 'REACHABLE' if vault_health.status == 200 else 'UNREACHABLE' }}
+          Token Valid: {{ 'YES' if vault_health.status == 200 else 'NO' }}
+      when:
+        - vault_health is defined
+        - vault_health is not skipped
+
+    - name: Summary report
+      ansible.builtin.debug:
+        msg: |
+          Certificate Expiry Check Complete
+          ====================================
+          Critical threshold: {{ expiry_critical_days }} days
+          Warning threshold: {{ expiry_warn_days }} days
+          Check time: {{ ansible_date_time.iso8601 }}
+
+    - name: Alert on expiring certificates (CRITICAL)
+      ansible.builtin.fail:
+        msg: |
+          CRITICAL: {{ item.item.item.stat.path }} expiring in {{ item.stdout | int }} days or less!
+      when:
+        - item.stdout | int >= 0
+        - item.stdout | int <= expiry_critical_days
+      loop: "{{ days_until_expiry.results }}"
+      ignore_errors: true
+
+    - name: Warn on certificates expiring soon (WARNING)
+      ansible.builtin.debug:
+        msg: |
+          WARNING: {{ item.item.item.stat.path }} expiring in {{ item.stdout | int }} days
+          Recommend: Run provision_certificates.yml soon
+      when:
+        - item.stdout | int > expiry_critical_days
+        - item.stdout | int <= expiry_warn_days
+      loop: "{{ days_until_expiry.results }}"
+
+    - name: Check Vault connectivity for cert renewal
+      block:
+        - name: Test Vault CLI availability
+          ansible.builtin.shell: |
+            which vault
+          register: vault_cli
+          changed_when: false
+          failed_when: false
+
+        - name: Check Vault AppRole configuration
+          ansible.builtin.stat:
+            path: /etc/vault-agent.d/proxmox-secret-id
+          register: vault_approle_config
+          changed_when: false
+
+        - name: Report Vault status
+          ansible.builtin.debug:
+            msg: |
+              Vault Status:
+                CLI available: {{ vault_cli.rc == 0 }}
+                AppRole configured: {{ vault_approle_config.stat.exists }}
+                Vault Agent running: (check with systemctl status vault-agent-proxmox-pveproxy)
+      when: days_until_expiry.results | map(attribute='stdout') | map('int') | select('<=', expiry_warn_days) | list | length > 0
+      ignore_errors: true
+
+    - name: Certificate check complete
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          Certificate Expiry Check Complete
+          ============================================
+          Review any CRITICAL or WARNING messages above.
+          For certificate renewal, run:
+          ansible-playbook -i inventory/proxmox.yml ansible/proxmox/provision_certificates.yml
+      when: true

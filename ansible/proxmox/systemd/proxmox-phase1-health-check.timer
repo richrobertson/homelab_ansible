@@ -1,0 +1,12 @@
+[Unit]
+Description=Proxmox Phase 1 - Weekly Critical Health Checks Timer
+Documentation=file:///Users/rich/Documents/GitHub/homelab_ansible/ansible/proxmox/MAINTENANCE_GUIDE.md
+Requires=proxmox-phase1-health-check.service
+
+[Timer]
+OnCalendar=Mon *-*-* 02:00:00
+Persistent=true
+Unit=proxmox-phase1-health-check.service
+
+[Install]
+WantedBy=timers.target

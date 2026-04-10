@@ -1,0 +1,167 @@
+---
+- name: Proxmox Log Maintenance
+  hosts: "{{ log_maintain_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars:
+    log_dirs:
+      - /var/log/pve
+      - /var/log/ceph
+      - /var/log/corosync
+      - /var/log/pveproxy
+    compress_after_days: 30
+    archive_after_days: 90
+    delete_after_days: 365
+    archive_dir: /var/log/archives
+
+  tasks:
+    - name: Create archive directory if it doesn't exist
+      ansible.builtin.file:
+        path: "{{ archive_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Get current disk usage for /var/log
+      ansible.builtin.shell: |
+        du -sh /var/log 2>/dev/null | awk '{print $1}'
+      register: log_disk_before
+      changed_when: false
+
+    - name: Display starting disk usage
+      ansible.builtin.debug:
+        msg: "Starting /var/log disk usage: {{ log_disk_before.stdout }}"
+
+    - name: Find and compress old logs
+      ansible.builtin.shell: |
+        find {{ item }} -type f -name "*.log" -mtime +{{ compress_after_days }} ! -name "*.gz" -print0 2>/dev/null | \
+        xargs -0 -r gzip -v 2>&1 | wc -l
+      register: compressed_count
+      changed_when: compressed_count.stdout | int > 0
+      failed_when: false
+      loop: "{{ log_dirs }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Report compressed logs
+      ansible.builtin.debug:
+        msg: "Compressed {{ item.stdout }} logs in {{ item.item }} older than {{ compress_after_days }} days"
+      loop: "{{ compressed_count.results }}"
+      when: item.stdout | int > 0
+
+    - name: Find and move archived logs
+      ansible.builtin.shell: |
+        find {{ item }} -type f \( -name "*.log.*.gz" -o -name "*.log.*.bz2" \) -mtime +{{ archive_after_days }} 2>/dev/null | \
+        while read file; do
+          mkdir -p "{{ archive_dir }}/$(dirname "$file" | sed 's|/var/log/||')"
+          mv "$file" "{{ archive_dir }}/$(dirname "$file" | sed 's|/var/log/||')/$(basename "$file")"
+          echo "Moved: $file"
+        done | wc -l
+      register: archived_count
+      changed_when: archived_count.stdout | int > 0
+      failed_when: false
+      loop: "{{ log_dirs }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Report archived logs
+      ansible.builtin.debug:
+        msg: "Archived {{ item.stdout }} log files from {{ item.item }}"
+      loop: "{{ archived_count.results }}"
+      when: item.stdout | int > 0
+
+    - name: Find and delete very old logs
+      ansible.builtin.shell: |
+        find {{ item }} -type f -name "*.log*" -mtime +{{ delete_after_days }} -delete -print 2>/dev/null | wc -l
+      register: deleted_count
+      changed_when: deleted_count.stdout | int > 0
+      failed_when: false
+      loop: "{{ log_dirs }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Report deleted logs
+      ansible.builtin.debug:
+        msg: "Deleted {{ item.stdout }} log files from {{ item.item }} older than {{ delete_after_days }} days"
+      loop: "{{ deleted_count.results }}"
+      when: item.stdout | int > 0
+
+    - name: Clean empty log directories
+      ansible.builtin.shell: |
+        find {{ item }} -type d -empty -delete -print 2>/dev/null | wc -l
+      register: deleted_dirs
+      changed_when: deleted_dirs.stdout | int > 0
+      failed_when: false
+      loop: "{{ log_dirs }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Report deleted directories
+      ansible.builtin.debug:
+        msg: "Removed {{ item.stdout }} empty directories in {{ item.item }}"
+      loop: "{{ deleted_dirs.results }}"
+      when: item.stdout | int > 0
+
+    - name: Rotate journal logs
+      ansible.builtin.shell: |
+        journalctl --vacuum=90d
+      register: journal_vacuum
+      changed_when: journal_vacuum.rc == 0
+      failed_when: false
+
+    - name: Report journal vacuum
+      ansible.builtin.debug:
+        msg: "{{ journal_vacuum.stderr }}"
+      when: journal_vacuum.stderr | length > 0
+
+    - name: Check Proxmox task log directory
+      ansible.builtin.shell: |
+        find /var/log/pve/tasks -type f -mtime +90 -delete -print 2>/dev/null | wc -l
+      register: task_log_cleanup
+      changed_when: task_log_cleanup.stdout | int > 0
+      failed_when: false
+
+    - name: Report task log cleanup
+      ansible.builtin.debug:
+        msg: "Deleted {{ task_log_cleanup.stdout }} old task logs (>90 days)"
+      when: task_log_cleanup.stdout | int > 0
+
+    - name: Get final disk usage for /var/log
+      ansible.builtin.shell: |
+        du -sh /var/log 2>/dev/null | awk '{print $1}'
+      register: log_disk_after
+      changed_when: false
+
+    - name: Display final disk usage
+      ansible.builtin.debug:
+        msg: |
+          Final /var/log disk usage: {{ log_disk_after.stdout }}
+          (was {{ log_disk_before.stdout }})
+
+    - name: Check /var/log disk usage percentage
+      ansible.builtin.shell: |
+        df /var/log | tail -1 | awk '{print $5}' | sed 's/%//'
+      register: log_disk_percent
+      changed_when: false
+
+    - name: Warn if /var/log is getting full
+      ansible.builtin.debug:
+        msg: |
+          WARNING: /var/log is {{ log_disk_percent.stdout }}% full
+          Consider increasing storage or reducing log retention
+      when: log_disk_percent.stdout | int > 80
+
+    - name: Log maintenance complete
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          Log Maintenance Complete on {{ inventory_hostname }}
+          ============================================
+          Summary:
+            Compressed logs: {{ compressed_count.results | map(attribute='stdout') | map('int') | sum(start=0) }}
+            Archived logs: {{ archived_count.results | map(attribute='stdout') | map('int') | sum(start=0) }}
+            Deleted logs: {{ deleted_count.results | map(attribute='stdout') | map('int') | sum(start=0) }}
+            Deleted dirs: {{ deleted_dirs.results | map(attribute='stdout') | map('int') | sum(start=0) }}
+          ============================================
+      when: true

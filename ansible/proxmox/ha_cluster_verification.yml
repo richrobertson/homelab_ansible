@@ -1,0 +1,175 @@
+---
+- name: Proxmox HA Cluster Verification
+  hosts: "{{ ha_check_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars:
+    min_cluster_nodes: 3
+
+  tasks:
+    - name: Get Proxmox cluster status
+      ansible.builtin.shell: |
+        pvecm status
+      register: cluster_status
+      changed_when: false
+      failed_when: false
+
+    - name: Display cluster status
+      ansible.builtin.debug:
+        msg: "{{ cluster_status.stdout }}"
+      when: cluster_status.rc == 0
+
+    - name: Get cluster nodes JSON
+      ansible.builtin.shell: |
+        pvesh get /nodes --output json
+      register: nodes_json
+      changed_when: false
+      failed_when: false
+
+    - name: Parse nodes status
+      ansible.builtin.set_fact:
+        cluster_nodes: "{{ nodes_json.stdout | from_json }}"
+      when: nodes_json.rc == 0
+
+    - name: Report cluster node status
+      ansible.builtin.debug:
+        msg: |
+          Cluster Nodes:
+          {% for node in cluster_nodes %}
+          - {{ node.node }}: status={{ node.status }} mem={{ (node.mem | default(0) / 1073741824) | round(2) }}GB/{{ (node.maxmem | default(0) / 1073741824) | round(2) }}GB uptime={{ (node.uptime | default(0) / 86400) | round(2) }} days
+          {% endfor %}
+      when: cluster_nodes is defined
+
+    - name: Check minimum cluster size
+      ansible.builtin.fail:
+        msg: "CRITICAL: Cluster has only {{ cluster_nodes | length }} nodes, minimum {{ min_cluster_nodes }} required"
+      when:
+        - cluster_nodes is defined
+        - cluster_nodes | length < min_cluster_nodes
+      ignore_errors: true
+
+    - name: Get cluster corosync status
+      ansible.builtin.shell: |
+        corosync-quorumtool -p
+      register: corosync_status
+      changed_when: false
+      failed_when: false
+
+    - name: Display corosync status
+      ansible.builtin.debug:
+        msg: "{{ corosync_status.stdout }}"
+      when: corosync_status.rc == 0
+
+    - name: Get HA status
+      ansible.builtin.shell: |
+        pvesh get /cluster/ha --output json 2>/dev/null || echo '{"not_available": true}'
+      register: ha_status_json
+      changed_when: false
+      failed_when: false
+
+    - name: Parse HA status
+      ansible.builtin.set_fact:
+        ha_status: "{{ ha_status_json.stdout | from_json }}"
+      when: ha_status_json.rc == 0
+
+    - name: Display HA configuration
+      ansible.builtin.debug:
+        msg: |
+          HA Status:
+          {{ ha_status | to_nice_json }}
+      when:
+        - ha_status is defined
+        - ha_status.not_available is not defined
+
+    - name: Check HA resources status
+      ansible.builtin.shell: |
+        pvesh get /cluster/ha/resources --output json 2>/dev/null || echo '{"data": []}'
+      register: ha_resources_json
+      changed_when: false
+      failed_when: false
+
+    - name: Parse HA resources
+      ansible.builtin.set_fact:
+        ha_resources: "{{ ha_resources_json.stdout | from_json }}"
+      when: ha_resources_json.rc == 0
+
+    - name: Report HA resources
+      ansible.builtin.debug:
+        msg: |
+          HA-Protected Resources:
+          {% if ha_resources | length > 0 %}
+          {% for resource in ha_resources %}
+          - {{ resource.sid }}: type={{ resource.type }} state={{ resource.state | default('unknown') }}
+          {% endfor %}
+          {% else %}
+          No HA-protected resources configured or HA not enabled.
+          {% endif %}
+      when: ha_resources is defined
+
+    - name: Check fence daemon status
+      ansible.builtin.systemd:
+        name: pve-ha-lrm
+        state: started
+      check_mode: true
+      register: fence_daemon_check
+      changed_when: false
+
+    - name: Report fence daemon
+      ansible.builtin.debug:
+        msg: |
+          HA Fence Daemon (pve-ha-lrm):
+          State: {{ fence_daemon_check.status.ActiveState }}
+          Enabled: {{ fence_daemon_check.status.UnitFileState }}
+      when: fence_daemon_check.status is defined
+
+    - name: Check HA manager status
+      ansible.builtin.systemd:
+        name: pve-ha-crm
+        state: started
+      check_mode: true
+      register: ha_manager_check
+      changed_when: false
+
+    - name: Report HA manager
+      ansible.builtin.debug:
+        msg: |
+          HA Manager (pve-ha-crm):
+          State: {{ ha_manager_check.status.ActiveState }}
+          Enabled: {{ ha_manager_check.status.UnitFileState }}
+      when: ha_manager_check.status is defined
+
+    - name: Check for failed HA services
+      ansible.builtin.fail:
+        msg: |
+          WARNING: HA services may not be operational
+          pve-ha-lrm: {{ fence_daemon_check.status.ActiveState | default('unknown') }}
+          pve-ha-crm: {{ ha_manager_check.status.ActiveState | default('unknown') }}
+      when:
+        - (fence_daemon_check.status.ActiveState is defined and fence_daemon_check.status.ActiveState != "active")
+           or
+           (ha_manager_check.status.ActiveState is defined and ha_manager_check.status.ActiveState != "active")
+      ignore_errors: true
+
+    - name: Check quorum status
+      ansible.builtin.shell: |
+        grep -c "Yes" <(corosync-quorumtool -p | grep "This node" | (grep "Yes" || echo "No"))
+      register: quorum_check
+      changed_when: false
+      failed_when: false
+
+    - name: Report quorum
+      ansible.builtin.debug:
+        msg: |
+          Node Quorum: {{ 'YES' if quorum_check.stdout == '1' else 'NO' }}
+      when: quorum_check.rc == 0
+
+    - name: HA verification summary
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          HA Cluster Verification Complete on {{ inventory_hostname }}
+          Cluster Health: {{ 'GOOD' if cluster_nodes is defined and cluster_nodes | length >= min_cluster_nodes else 'CHECK_REQUIRED' }}
+          ============================================
+      when: true
