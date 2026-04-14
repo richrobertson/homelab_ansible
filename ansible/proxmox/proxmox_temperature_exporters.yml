@@ -1,0 +1,56 @@
+---
+- name: Ensure Proxmox temperature exporters are installed and running
+  hosts: "{{ proxmox_monitoring_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+
+  vars:
+    apt_cache_valid_time: 3600
+    proxmox_temperature_packages:
+      - prometheus-node-exporter
+      - lm-sensors
+      - smartmontools
+
+  tasks:
+    - name: Refresh apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: "{{ apt_cache_valid_time }}"
+
+    - name: Install temperature exporter dependencies
+      ansible.builtin.apt:
+        name: "{{ proxmox_temperature_packages }}"
+        state: present
+
+    - name: Ensure smartmontools service is enabled and running
+      ansible.builtin.service:
+        name: smartmontools
+        enabled: true
+        state: started
+
+    - name: Ensure node exporter service is enabled and running
+      ansible.builtin.service:
+        name: prometheus-node-exporter
+        enabled: true
+        state: started
+
+    - name: Wait for node exporter endpoint to be reachable
+      ansible.builtin.uri:
+        url: http://127.0.0.1:9100/metrics
+        method: GET
+        return_content: true
+        status_code: 200
+      register: proxmox_node_exporter_metrics
+      retries: 10
+      delay: 3
+      until: proxmox_node_exporter_metrics.status == 200
+      changed_when: false
+
+    - name: Assert temperature metrics are present
+      ansible.builtin.assert:
+        that:
+          - "'node_hwmon_temp_celsius' in proxmox_node_exporter_metrics.content or 'node_thermal_zone_temp' in proxmox_node_exporter_metrics.content"
+        fail_msg: "Node exporter is up but temperature metrics were not found in /metrics output."
+        success_msg: "Node exporter endpoint includes temperature metrics."
