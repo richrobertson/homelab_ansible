@@ -168,10 +168,12 @@
     pbs_host: pbs.myrobertson.net
     pbs_port: 8007
     pbs_url: "https://{{ pbs_host }}:{{ pbs_port }}"
+    pbs_apply_system_updates: true
+    pbs_apply_cert_to_proxy: true
     # These should be loaded from vault or environment
-    pbs_user: "{{ pbs_user | default('maintenance@pam') }}"
-    pbs_password: "{{ pbs_password | default(lookup('env', 'PBS_PASSWORD', default='')) }}"
-    pbs_verify_ssl: "{{ pbs_verify_ssl | default(false) }}"
+    pbs_user: "{{ lookup('env', 'PBS_USER', default='maintenance@pam') }}"
+    pbs_password: "{{ lookup('env', 'PBS_PASSWORD', default='') }}"
+    pbs_verify_ssl: false
     
   tasks:
     - name: PBS Maintenance Playbook
@@ -182,10 +184,9 @@
             method: GET
             validate_certs: "{{ pbs_verify_ssl }}"
             timeout: 10
+            status_code: [200, 401]
           register: pbs_status
           changed_when: false
-          failed_when:
-            - pbs_status.status != 200
           ignore_errors: yes
         
         - name: Display PBS status
@@ -193,7 +194,7 @@
             msg: |
               PBS Status: {{ pbs_status.status | default('UNREACHABLE') }}
               Response: {{ pbs_status.json | default({}) }}
-          when: pbs_status is succeeded
+          when: pbs_status is defined
         
         - name: PBS Authentication
           block:
@@ -214,12 +215,13 @@
             - name: Set authentication facts
               set_fact:
                 pbs_ticket: "{{ pbs_auth.json.data.ticket }}"
-                pbs_csrf_token: "{{ pbs_auth.json.data.csrf_token }}"
+                pbs_csrf_token: "{{ pbs_auth.json.data.CSRFPreventionToken | default(pbs_auth.json.data.csrf_token | default('')) }}"
               changed_when: false
               no_log: true
           when:
             - pbs_password | length > 0
-            - pbs_status is succeeded
+            - pbs_status is defined
+            - pbs_status.status | int in [200, 401]
         
         - name: Get PBS Datastore Status
           block:
@@ -228,7 +230,6 @@
                 url: "{{ pbs_url }}/api2/json/admin/datastore"
                 method: GET
                 headers:
-                  Authorization: "PBSAPIToken={{ pbs_ticket | default(omit) }}"
                   Cookie: "PBSAuthCookie={{ pbs_ticket | default(omit) }}"
                 validate_certs: "{{ pbs_verify_ssl }}"
                 timeout: 10
@@ -238,15 +239,13 @@
             - name: Display datastore information
               debug:
                 msg: |
-                  Datastore: {{ ds.name }}
-                  Location: {{ ds.path }}
-                  Content: {{ ds.content | default('mixed') }}
-                  Enabled: {{ ds.enabled | default(true) }}
-                  Type: {{ ds.type }}
+                  Datastore: {{ ds.store | default(ds.name | default('unknown')) }}
+                  Comment: {{ ds.comment | default('') }}
+                  Mount Status: {{ ds['mount-status'] | default('unknown') }}
               loop: "{{ pbs_datastores.json.data | default([]) }}"
               loop_control:
                 loop_var: ds
-                label: "{{ ds.name }}"
+                label: "{{ ds.store | default(ds.name | default('unknown')) }}"
             
             - name: Calculate datastore usage
               set_fact:
@@ -261,7 +260,6 @@
                 url: "{{ pbs_url }}/api2/json/admin/prune"
                 method: GET
                 headers:
-                  Authorization: "PBSAPIToken={{ pbs_ticket | default(omit) }}"
                   Cookie: "PBSAuthCookie={{ pbs_ticket | default(omit) }}"
                 validate_certs: "{{ pbs_verify_ssl }}"
                 timeout: 10
@@ -274,7 +272,6 @@
                 url: "{{ pbs_url }}/api2/json/status/datastore-metrics"
                 method: GET
                 headers:
-                  Authorization: "PBSAPIToken={{ pbs_ticket | default(omit) }}"
                   Cookie: "PBSAuthCookie={{ pbs_ticket | default(omit) }}"
                 validate_certs: "{{ pbs_verify_ssl }}"
                 timeout: 10
@@ -296,10 +293,13 @@
               uri:
                 url: "{{ pbs_url }}/api2/json/version"
                 method: GET
+                headers:
+                  Cookie: "PBSAuthCookie={{ pbs_ticket | default(omit) }}"
                 validate_certs: "{{ pbs_verify_ssl }}"
                 timeout: 10
               register: pbs_version
               changed_when: false
+              ignore_errors: yes
             
             - name: Display PBS version
               debug:
@@ -308,7 +308,22 @@
                   Release: {{ pbs_version.json.data.release | default('Unknown') }}
                   Repoid: {{ pbs_version.json.data.repoid | default('Unknown') }}
               when: pbs_version is succeeded
-          when: pbs_status is succeeded
+          when: pbs_status is succeeded and pbs_ticket is defined
+
+        - name: Apply PBS system updates
+          ansible.builtin.apt:
+            update_cache: true
+            upgrade: dist
+            autoremove: true
+          delegate_to: "{{ pbs_host }}"
+          become: true
+          register: pbs_updates
+          when: pbs_apply_system_updates | bool
+
+        - name: Display update result
+          debug:
+            msg: "System updates applied on {{ pbs_host }} (changed={{ pbs_updates.changed | default(false) }})"
+          when: pbs_apply_system_updates | bool
         
         - name: Certificate Management from Vault
           block:
@@ -317,8 +332,44 @@
                 path: "/etc/proxmox-backup/vault-approle.env"
               register: pbs_approle_file
               delegate_to: "{{ pbs_host }}"
+
+            - name: Check if generated Vault cert files exist
+              stat:
+                path: "{{ item }}"
+              register: pbs_generated_cert_files
+              delegate_to: "{{ pbs_host }}"
+              loop:
+                - /etc/proxmox-backup/default/pbs-api.pem
+                - /etc/proxmox-backup/default/pbs-api-key.pem
+
+            - name: Install Vault certificate as active PBS proxy certificate
+              ansible.builtin.shell: |
+                set -euo pipefail
+                ts="$(date +%s)"
+                cp -a /etc/proxmox-backup/proxy.pem "/etc/proxmox-backup/proxy.pem.bak.${ts}" || true
+                cp -a /etc/proxmox-backup/proxy.key "/etc/proxmox-backup/proxy.key.bak.${ts}" || true
+                cp -f /etc/proxmox-backup/default/pbs-api.pem /etc/proxmox-backup/proxy.pem
+                cp -f /etc/proxmox-backup/default/pbs-api-key.pem /etc/proxmox-backup/proxy.key
+                chown root:backup /etc/proxmox-backup/proxy.pem /etc/proxmox-backup/proxy.key
+                chmod 640 /etc/proxmox-backup/proxy.pem /etc/proxmox-backup/proxy.key
+                systemctl restart proxmox-backup-proxy
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_proxy_cert_apply
+              changed_when: true
+              when:
+                - pbs_apply_cert_to_proxy | bool
+                - pbs_approle_file.stat.exists
+                - pbs_generated_cert_files.results[0].stat.exists
+                - pbs_generated_cert_files.results[1].stat.exists
+
+            - name: Display certificate apply result
+              debug:
+                msg: "Vault certificate installed as active PBS WebUI certificate (proxy.pem/proxy.key)."
+              when: pbs_proxy_cert_apply is defined and pbs_proxy_cert_apply is succeeded
             
             - name: Display certificate renewal instructions
+              when: not (ansible_check_mode | default(false))
               debug:
                 msg: |
                   ====== PBS Certificate Management via Vault ======
@@ -343,7 +394,6 @@
                      See: /usr/local/sbin/pbs-cert-renewal.sh template in this playbook
                   
                   Status: {{ 'CONFIGURED' if pbs_approle_file.stat.exists else 'NOT CONFIGURED' }}
-              when: not check_mode
         
         - name: Verify Key Backup Datastores
           block:
@@ -357,11 +407,11 @@
             
             - name: Warn on low disk space (>80% usage)
               debug:
-                msg: "WARNING: Datastore {{ ds.name }} usage is high (check capacity)"
+                msg: "WARNING: Datastore {{ ds.store | default(ds.name | default('unknown')) }} usage is high (check capacity)"
               loop: "{{ datastore_stats }}"
               loop_control:
                 loop_var: ds
-                label: "{{ ds.name }}"
+                label: "{{ ds.store | default(ds.name | default('unknown')) }}"
               when:
                 - ds.usage is defined
                 - ds.avail is defined
@@ -375,9 +425,9 @@
               PBS Host: {{ pbs_host }}
               API Status: {{ 'HEALTHY' if pbs_status is succeeded else 'UNREACHABLE' }}
               Authenticated: {{ 'Yes' if pbs_ticket is defined else 'No' }}
-              Datastores: {{ datastore_stats | length | default(0) }}
+              Datastores: {{ (datastore_stats | default([])) | length }}
+              Updates Applied: {{ pbs_updates.changed | default(false) }}
               ==========================================
-          always: true
       
       rescue:
         - name: Handle errors
@@ -418,7 +468,7 @@
     pbs_host: pbs.myrobertson.net
     cert_script_path: /usr/local/sbin/pbs-cert-renewal.sh
     vault_approle_env: /etc/proxmox-backup/vault-approle.env
-    pbs_cert_dir: /etc/proxmox-backup/default
+    pbs_cert_dir: /etc/proxmox-backup
     pbs_api_port: 8007
   tasks:
     - name: Generate PBS certificate renewal script template
@@ -479,25 +529,25 @@
                 exit 1
               fi
               
-              # Backup current certificate
-              mkdir -p {{ pbs_cert_dir }}/backup
+                # Backup current certificate
+                mkdir -p {{ pbs_cert_dir }}/backup
               timestamp=$(date +%s)
               
-              if [[ -f {{ pbs_cert_dir }}/pbs-api.pem ]]; then
-                cp {{ pbs_cert_dir }}/pbs-api.pem \
-                   {{ pbs_cert_dir }}/backup/pbs-api.pem.${timestamp}
-                cp {{ pbs_cert_dir }}/pbs-api-key.pem \
-                   {{ pbs_cert_dir }}/backup/pbs-api-key.pem.${timestamp}
+                if [[ -f {{ pbs_cert_dir }}/proxy.pem ]]; then
+                 cp {{ pbs_cert_dir }}/proxy.pem \
+                   {{ pbs_cert_dir }}/backup/proxy.pem.${timestamp}
+                 cp {{ pbs_cert_dir }}/proxy.key \
+                   {{ pbs_cert_dir }}/backup/proxy.key.${timestamp}
               fi
               
               # Write new certificate and key
-              echo "$CERT" > {{ pbs_cert_dir }}/pbs-api.pem
-              echo "$KEY" > {{ pbs_cert_dir }}/pbs-api-key.pem
-              echo "$CA" >> {{ pbs_cert_dir }}/pbs-api.pem
+                echo "$CERT" > {{ pbs_cert_dir }}/proxy.pem
+                echo "$KEY" > {{ pbs_cert_dir }}/proxy.key
+                echo "$CA" >> {{ pbs_cert_dir }}/proxy.pem
               
               # Set permissions
-              chmod 0600 {{ pbs_cert_dir }}/pbs-api.pem
-              chmod 0600 {{ pbs_cert_dir }}/pbs-api-key.pem
+                chown root:backup {{ pbs_cert_dir }}/proxy.pem {{ pbs_cert_dir }}/proxy.key
+                chmod 0640 {{ pbs_cert_dir }}/proxy.pem {{ pbs_cert_dir }}/proxy.key
               
               # Restart PBS API service
               systemctl restart proxmox-backup-proxy
