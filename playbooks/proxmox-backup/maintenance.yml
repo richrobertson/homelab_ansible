@@ -1,0 +1,522 @@
+---
+- name: Bootstrap Vault PKI/AppRole for PBS API certs
+  hosts: vault
+  become: true
+  gather_facts: false
+  tags:
+    - certs
+    - pbs_certs
+  vars:
+    pbs_cert_manage_vault_bootstrap: true
+    pbs_vault_addr: https://127.0.0.1:8200
+    pbs_vault_skip_verify: true
+    pbs_pki_allowed_domain: myrobertson.net
+    pbs_vault_root_token_file: /root/.vault-token
+    pbs_pki_mount: pki_int
+    pbs_pki_issuer_id: ""
+    pbs_pki_role_name: pbs-api
+    pbs_pki_policy_name: pbs-api-cert
+    pbs_pki_approle_name: pbs-api-cert
+    pbs_cert_ttl: 720h
+  tasks:
+    - name: Skip vault bootstrap when disabled
+      ansible.builtin.meta: end_play
+      when: not pbs_cert_manage_vault_bootstrap
+
+    - name: Check Vault root token file exists
+      ansible.builtin.stat:
+        path: "{{ pbs_vault_root_token_file }}"
+      register: pbs_vault_token_stat
+
+    - name: Fail when Vault root token file is missing
+      ansible.builtin.fail:
+        msg: "Vault root token file {{ pbs_vault_root_token_file }} is required for certificate bootstrap."
+      when: not pbs_vault_token_stat.stat.exists
+
+    - name: Ensure vault CLI is installed on vault host
+      ansible.builtin.shell: command -v vault
+      register: pbs_vault_cli_check
+      changed_when: false
+      failed_when: pbs_vault_cli_check.rc != 0
+
+    - name: Ensure AppRole auth method is enabled
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ pbs_vault_addr }}"
+        export VAULT_SKIP_VERIFY={{ pbs_vault_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ pbs_vault_root_token_file }})"
+        if ! vault auth list | awk '{print $1}' | grep -q '^approle/'; then
+          vault auth enable approle
+          echo "ENABLED"
+        else
+          echo "SKIPPED"
+        fi
+      args:
+        executable: /bin/bash
+      register: approle_enable
+      changed_when: "'ENABLED' in approle_enable.stdout"
+
+    - name: Ensure PKI role exists for PBS API certs
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ pbs_vault_addr }}"
+        export VAULT_SKIP_VERIFY={{ pbs_vault_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ pbs_vault_root_token_file }})"
+        vault write {{ pbs_pki_mount }}/roles/{{ pbs_pki_role_name }} \
+          {% if pbs_pki_issuer_id | length > 0 %}issuer_ref={{ pbs_pki_issuer_id }} \
+          {% endif %}allowed_domains={{ pbs_pki_allowed_domain }} \
+          allow_bare_domains=false \
+          allow_subdomains=true \
+          allow_glob_domains=false \
+          allow_any_name=false \
+          allow_ip_sans=true \
+          enforce_hostnames=true \
+          server_flag=true \
+          client_flag=false \
+          key_type=rsa \
+          key_bits=2048 \
+          max_ttl={{ pbs_cert_ttl }}
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Ensure Vault policy can issue PBS certs
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ pbs_vault_addr }}"
+        export VAULT_SKIP_VERIFY={{ pbs_vault_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ pbs_vault_root_token_file }})"
+        vault policy write {{ pbs_pki_policy_name }} - <<'POLICY'
+        path "{{ pbs_pki_mount }}/issue/{{ pbs_pki_role_name }}" {
+          capabilities = ["update"]
+        }
+        path "{{ pbs_pki_mount }}/cert/ca" {
+          capabilities = ["read"]
+        }
+        POLICY
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Ensure AppRole exists for PBS cert agent
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ pbs_vault_addr }}"
+        export VAULT_SKIP_VERIFY={{ pbs_vault_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ pbs_vault_root_token_file }})"
+        vault write auth/approle/role/{{ pbs_pki_approle_name }} \
+          token_policies={{ pbs_pki_policy_name }} \
+          token_ttl=1h \
+          token_max_ttl=24h \
+          token_num_uses=0
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Get AppRole RoleID for PBS cert agent
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ pbs_vault_addr }}"
+        export VAULT_SKIP_VERIFY={{ pbs_vault_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ pbs_vault_root_token_file }})"
+        vault read -field=role_id auth/approle/role/{{ pbs_pki_approle_name }}/role-id
+      args:
+        executable: /bin/bash
+      register: pbs_approle_role_id
+      changed_when: false
+
+    - name: Get AppRole SecretID for PBS cert agent
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export VAULT_ADDR="{{ pbs_vault_addr }}"
+        export VAULT_SKIP_VERIFY={{ pbs_vault_skip_verify | string | lower }}
+        export VAULT_TOKEN="$(cat {{ pbs_vault_root_token_file }})"
+        vault write -field=secret_id -f auth/approle/role/{{ pbs_pki_approle_name }}/secret-id
+      args:
+        executable: /bin/bash
+      register: pbs_approle_secret_id
+      changed_when: false
+      no_log: true
+
+    - name: Save AppRole credentials for PBS agent deployment
+      ansible.builtin.copy:
+        dest: "/tmp/pbs-approle-creds.env"
+        content: |
+          PBS_VAULT_ROLE_ID="{{ pbs_approle_role_id.stdout | trim }}"
+          PBS_VAULT_SECRET_ID="{{ pbs_approle_secret_id.stdout | trim }}"
+          PBS_VAULT_ADDR="{{ pbs_vault_addr }}"
+          PBS_VAULT_SKIP_VERIFY="{{ pbs_vault_skip_verify }}"
+          PBS_PKI_MOUNT="{{ pbs_pki_mount }}"
+          PBS_PKI_ROLE="{{ pbs_pki_role_name }}"
+          PBS_HOST="pbs.myrobertson.net"
+        mode: "0600"
+      changed_when: false
+      no_log: true
+
+    - name: Display AppRole credentials location
+      ansible.builtin.debug:
+        msg: |
+          PBS AppRole credentials saved to: /tmp/pbs-approle-creds.env
+          Transfer these to the PBS host to enable automatic certificate renewal.
+          Command:
+            scp root@vault:/tmp/pbs-approle-creds.env root@pbs.myrobertson.net:/etc/proxmox-backup/vault-approle.env
+
+- name: Proxmox Backup Server (PBS) Maintenance
+  hosts: localhost
+  gather_facts: no
+  vars:
+    pbs_host: pbs.myrobertson.net
+    pbs_port: 8007
+    pbs_url: "https://{{ pbs_host }}:{{ pbs_port }}"
+    # These should be loaded from vault or environment
+    pbs_user: "{{ pbs_user | default('maintenance@pam') }}"
+    pbs_password: "{{ pbs_password | default(lookup('env', 'PBS_PASSWORD', default='')) }}"
+    pbs_verify_ssl: "{{ pbs_verify_ssl | default(false) }}"
+    
+  tasks:
+    - name: PBS Maintenance Playbook
+      block:
+        - name: Verify PBS API connectivity
+          uri:
+            url: "{{ pbs_url }}/api2/json/status"
+            method: GET
+            validate_certs: "{{ pbs_verify_ssl }}"
+            timeout: 10
+          register: pbs_status
+          changed_when: false
+          failed_when:
+            - pbs_status.status != 200
+          ignore_errors: yes
+        
+        - name: Display PBS status
+          debug:
+            msg: |
+              PBS Status: {{ pbs_status.status | default('UNREACHABLE') }}
+              Response: {{ pbs_status.json | default({}) }}
+          when: pbs_status is succeeded
+        
+        - name: PBS Authentication
+          block:
+            - name: Authenticate with PBS API
+              uri:
+                url: "{{ pbs_url }}/api2/json/access/ticket"
+                method: POST
+                body_format: form-urlencoded
+                validate_certs: "{{ pbs_verify_ssl }}"
+                body:
+                  username: "{{ pbs_user }}"
+                  password: "{{ pbs_password }}"
+                timeout: 10
+              register: pbs_auth
+              changed_when: false
+              no_log: true
+            
+            - name: Set authentication facts
+              set_fact:
+                pbs_ticket: "{{ pbs_auth.json.data.ticket }}"
+                pbs_csrf_token: "{{ pbs_auth.json.data.csrf_token }}"
+              changed_when: false
+              no_log: true
+          when:
+            - pbs_password | length > 0
+            - pbs_status is succeeded
+        
+        - name: Get PBS Datastore Status
+          block:
+            - name: Query datastore status
+              uri:
+                url: "{{ pbs_url }}/api2/json/admin/datastore"
+                method: GET
+                headers:
+                  Authorization: "PBSAPIToken={{ pbs_ticket | default(omit) }}"
+                  Cookie: "PBSAuthCookie={{ pbs_ticket | default(omit) }}"
+                validate_certs: "{{ pbs_verify_ssl }}"
+                timeout: 10
+              register: pbs_datastores
+              changed_when: false
+            
+            - name: Display datastore information
+              debug:
+                msg: |
+                  Datastore: {{ ds.name }}
+                  Location: {{ ds.path }}
+                  Content: {{ ds.content | default('mixed') }}
+                  Enabled: {{ ds.enabled | default(true) }}
+                  Type: {{ ds.type }}
+              loop: "{{ pbs_datastores.json.data | default([]) }}"
+              loop_control:
+                loop_var: ds
+                label: "{{ ds.name }}"
+            
+            - name: Calculate datastore usage
+              set_fact:
+                datastore_stats: "{{ pbs_datastores.json.data | default([]) }}"
+              changed_when: false
+          when: pbs_status is succeeded
+        
+        - name: Monitor Backup Jobs
+          block:
+            - name: Get recent backup jobs
+              uri:
+                url: "{{ pbs_url }}/api2/json/admin/prune"
+                method: GET
+                headers:
+                  Authorization: "PBSAPIToken={{ pbs_ticket | default(omit) }}"
+                  Cookie: "PBSAuthCookie={{ pbs_ticket | default(omit) }}"
+                validate_certs: "{{ pbs_verify_ssl }}"
+                timeout: 10
+              register: pbs_prune_info
+              changed_when: false
+              ignore_errors: yes
+            
+            - name: Check backup statistics
+              uri:
+                url: "{{ pbs_url }}/api2/json/status/datastore-metrics"
+                method: GET
+                headers:
+                  Authorization: "PBSAPIToken={{ pbs_ticket | default(omit) }}"
+                  Cookie: "PBSAuthCookie={{ pbs_ticket | default(omit) }}"
+                validate_certs: "{{ pbs_verify_ssl }}"
+                timeout: 10
+              register: pbs_metrics
+              changed_when: false
+              ignore_errors: yes
+            
+            - name: Display backup metrics
+              debug:
+                msg: |
+                  Backup Metrics:
+                  {{ pbs_metrics.json.data | default('No metrics available') }}
+              when: pbs_metrics is succeeded
+          when: pbs_status is succeeded and pbs_ticket is defined
+        
+        - name: System Health Monitoring
+          block:
+            - name: Get system status
+              uri:
+                url: "{{ pbs_url }}/api2/json/version"
+                method: GET
+                validate_certs: "{{ pbs_verify_ssl }}"
+                timeout: 10
+              register: pbs_version
+              changed_when: false
+            
+            - name: Display PBS version
+              debug:
+                msg: |
+                  PBS Version: {{ pbs_version.json.data.version | default('Unknown') }}
+                  Release: {{ pbs_version.json.data.release | default('Unknown') }}
+                  Repoid: {{ pbs_version.json.data.repoid | default('Unknown') }}
+              when: pbs_version is succeeded
+          when: pbs_status is succeeded
+        
+        - name: Certificate Management from Vault
+          block:
+            - name: Check if AppRole credentials exist
+              stat:
+                path: "/etc/proxmox-backup/vault-approle.env"
+              register: pbs_approle_file
+              delegate_to: "{{ pbs_host }}"
+            
+            - name: Display certificate renewal instructions
+              debug:
+                msg: |
+                  ====== PBS Certificate Management via Vault ======
+                  
+                  To enable automatic certificate renewal from Vault:
+                  
+                  1. Run the Vault bootstrap play on the vault host:
+                     ansible-playbook playbooks/proxmox-backup/maintenance.yml \
+                       --tags=pbs_certs \
+                       -l vault
+                  
+                  2. Transfer AppRole credentials from vault host:
+                     scp root@vault:/tmp/pbs-approle-creds.env \
+                         root@{{ pbs_host }}:/etc/proxmox-backup/vault-approle.env
+                  
+                  3. Set up cron job on PBS host to renew certificates:
+                     # /etc/cron.d/pbs-vault-cert-renewal
+                     # Renew PBS certificate daily at 02:00
+                     0 2 * * * root /usr/local/sbin/pbs-cert-renewal.sh
+                  
+                  4. Create renewal script on PBS host:
+                     See: /usr/local/sbin/pbs-cert-renewal.sh template in this playbook
+                  
+                  Status: {{ 'CONFIGURED' if pbs_approle_file.stat.exists else 'NOT CONFIGURED' }}
+              when: not check_mode
+        
+        - name: Verify Key Backup Datastores
+          block:
+            - name: Check critical datastores
+              assert:
+                that:
+                  - datastore_stats | length > 0
+                fail_msg: "No datastores found - PBS may be misconfigured"
+                success_msg: "{{ datastore_stats | length }} datastore(s) configured"
+              when: datastore_stats is defined
+            
+            - name: Warn on low disk space (>80% usage)
+              debug:
+                msg: "WARNING: Datastore {{ ds.name }} usage is high (check capacity)"
+              loop: "{{ datastore_stats }}"
+              loop_control:
+                loop_var: ds
+                label: "{{ ds.name }}"
+              when:
+                - ds.usage is defined
+                - ds.avail is defined
+                - (ds.usage / (ds.usage + ds.avail) * 100) | int > 80
+          when: datastore_stats is defined
+        
+        - name: Display Summary
+          debug:
+            msg: |
+              ========== PBS MAINTENANCE REPORT ==========
+              PBS Host: {{ pbs_host }}
+              API Status: {{ 'HEALTHY' if pbs_status is succeeded else 'UNREACHABLE' }}
+              Authenticated: {{ 'Yes' if pbs_ticket is defined else 'No' }}
+              Datastores: {{ datastore_stats | length | default(0) }}
+              ==========================================
+          always: true
+      
+      rescue:
+        - name: Handle errors
+          debug:
+            msg: |
+              Error during PBS maintenance check:
+              {{ ansible_failed_result.msg | default(ansible_failed_result) }}
+
+- name: Optional - Cleanup Old Backups (Prune)
+  hosts: localhost
+  gather_facts: no
+  vars:
+    pbs_host: pbs.myrobertson.net
+    pbs_port: 8007
+    pbs_url: "https://{{ pbs_host }}:{{ pbs_port }}"
+    prune_retention: "keep-last=10,keep-daily=7,keep-weekly=4,keep-monthly=12"
+  tasks:
+    - name: Prune old backups
+      block:
+        - name: Information
+          debug:
+            msg: |
+              To prune old backups with retention policy:
+              {{ prune_retention }}
+              
+              Run the following command on PBS host:
+              proxmox-backup-server prune <datastore> --prune-options '{{ prune_retention }}'
+              
+              Or use the web UI: https://{{ pbs_host }}:{{ pbs_port }}
+              Navigate to: Admin -> Datastore -> Prune
+      
+      when: prune_backups | default(false) | bool
+
+- name: Deploy PBS Certificate Renewal Script
+  hosts: localhost
+  gather_facts: no
+  vars:
+    pbs_host: pbs.myrobertson.net
+    cert_script_path: /usr/local/sbin/pbs-cert-renewal.sh
+    vault_approle_env: /etc/proxmox-backup/vault-approle.env
+    pbs_cert_dir: /etc/proxmox-backup/default
+    pbs_api_port: 8007
+  tasks:
+    - name: Generate PBS certificate renewal script template
+      block:
+        - name: Display script template for manual deployment
+          debug:
+            msg: |
+              ========== PBS Certificate Renewal Script ==========
+              
+              Create file: {{ cert_script_path }}
+              on host: {{ pbs_host }}
+              
+              #!/bin/bash
+              # PBS Vault Certificate Renewal Script
+              # Automatically renews PBS API certificates from Vault PKI
+              
+              set -uo pipefail
+              
+              # Load Vault AppRole credentials
+              if [[ ! -f {{ vault_approle_env }} ]]; then
+                echo "ERROR: {{ vault_approle_env }} not found"
+                exit 1
+              fi
+              source {{ vault_approle_env }}
+              
+              # Function to authenticate with Vault using AppRole
+              vault_auth() {
+                local secret=$(curl -s -X POST \
+                  -d "role_id=${PBS_VAULT_ROLE_ID}" \
+                  -d "secret_id=${PBS_VAULT_SECRET_ID}" \
+                  "${PBS_VAULT_ADDR}/v1/auth/approle/login" | jq -r '.auth.client_token')
+                echo "$secret"
+              }
+              
+              # Get Vault token
+              VAULT_TOKEN=$(vault_auth)
+              
+              if [[ -z "$VAULT_TOKEN" ]]; then
+                echo "ERROR: Failed to authenticate with Vault"
+                exit 1
+              fi
+              
+              # Request new certificate from Vault PKI
+              CERT_RESPONSE=$(curl -s -X POST \
+                -H "X-Vault-Token: $VAULT_TOKEN" \
+                -d "common_name=pbs.myrobertson.net" \
+                -d "alt_names=pbs,pbs.myrobertson.net" \
+                -d "ip_sans=127.0.0.1" \
+                "${PBS_VAULT_ADDR}/v1/${PBS_PKI_MOUNT}/issue/${PBS_PKI_ROLE}")
+              
+              # Extract certificate and key
+              CERT=$(echo "$CERT_RESPONSE" | jq -r '.data.certificate')
+              KEY=$(echo "$CERT_RESPONSE" | jq -r '.data.private_key')
+              CA=$(echo "$CERT_RESPONSE" | jq -r '.data.ca_chain[0]')
+              
+              if [[ -z "$CERT" ]]; then
+                echo "ERROR: Failed to obtain certificate from Vault"
+                exit 1
+              fi
+              
+              # Backup current certificate
+              mkdir -p {{ pbs_cert_dir }}/backup
+              timestamp=$(date +%s)
+              
+              if [[ -f {{ pbs_cert_dir }}/pbs-api.pem ]]; then
+                cp {{ pbs_cert_dir }}/pbs-api.pem \
+                   {{ pbs_cert_dir }}/backup/pbs-api.pem.${timestamp}
+                cp {{ pbs_cert_dir }}/pbs-api-key.pem \
+                   {{ pbs_cert_dir }}/backup/pbs-api-key.pem.${timestamp}
+              fi
+              
+              # Write new certificate and key
+              echo "$CERT" > {{ pbs_cert_dir }}/pbs-api.pem
+              echo "$KEY" > {{ pbs_cert_dir }}/pbs-api-key.pem
+              echo "$CA" >> {{ pbs_cert_dir }}/pbs-api.pem
+              
+              # Set permissions
+              chmod 0600 {{ pbs_cert_dir }}/pbs-api.pem
+              chmod 0600 {{ pbs_cert_dir }}/pbs-api-key.pem
+              
+              # Restart PBS API service
+              systemctl restart proxmox-backup-proxy
+              
+              if systemctl is-active --quiet proxmox-backup-proxy; then
+                echo "SUCCESS: Certificate renewed and PBS API restarted successfully"
+                exit 0
+              else
+                echo "ERROR: PBS API failed to restart - manual intervention required"
+                exit 1
+              fi
+              
+              ==========================================
+              
+              To deploy this script:
+              1. Copy the script template above to {{ pbs_host }}:{{ cert_script_path }}
+              2. Make it executable: chmod 0755 {{ cert_script_path }}
+              3. Test manually: {{ cert_script_path }}
+              4. Set up cron job: 0 2 * * * root {{ cert_script_path }}
+              
+              The script will renew PBS certificates daily at 2:00 AM from Vault PKI.
+      when: deploy_cert_script | default(false) | bool
