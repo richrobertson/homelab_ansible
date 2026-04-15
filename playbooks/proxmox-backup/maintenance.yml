@@ -333,6 +333,16 @@
               register: pbs_approle_file
               delegate_to: "{{ pbs_host }}"
 
+            - name: Ensure PBS config directory permissions are correct
+              ansible.builtin.file:
+                path: /etc/proxmox-backup
+                owner: backup
+                group: backup
+                mode: '0700'
+                state: directory
+              delegate_to: "{{ pbs_host }}"
+              become: true
+
             - name: Check if generated Vault cert files exist
               stat:
                 path: "{{ item }}"
