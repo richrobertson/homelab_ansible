@@ -1,0 +1,577 @@
+---
+# configure_pve_backup.yml
+#
+# Configures Proxmox VE cl0 cluster to back up Vault VM (VMID 119) to the
+# PBS S3-backed datastore (pbs-s3) on pbs.myrobertson.net.
+#
+# What this playbook does:
+#   1. Creates PBS user  cl0-backup@pbs  with API token named "cl0"
+#   2. Grants DatastoreBackup ACL on /datastore/pbs-s3 for that token
+#   3. Adds PBS storage "pbs-s3" to the cl0 Proxmox cluster via pvesh
+#   4. Creates nightly backup job for VMID 119 (vault) targeting that storage
+#
+# Prerequisites:
+#   export PBS_SSH_USER=root
+#   export PBS_SSH_PASSWORD=<pbs-root-password>
+#   export CL0_SSH_USER=root
+#   export CL0_SSH_PASSWORD=<cl0-proxmox-root-password>
+#
+#   Optional – persist generated PBS token in Vault:
+#   export VAULT_ADDR=https://vault.myrobertson.net:8200
+#   export VAULT_TOKEN=<token-with-write-access>
+#
+# Run:
+#   ansible-playbook playbooks/proxmox-backup/configure_pve_backup.yml
+#
+# Idempotent: skips any step that is already configured.
+
+- name: Configure cl0 PBS backup for Vault VM (VMID 119)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: auto_silent
+
+    # ── PBS target ───────────────────────────────────────────────────────────
+    pbs_host: pbs.myrobertson.net
+    pbs_datastore: pbs-s3
+    pbs_backup_user: cl0-backup@pbs
+    pbs_backup_token_name: cl0
+
+    # ── cl0 Proxmox cluster ──────────────────────────────────────────────────
+    cl0_pve_node: "{{ lookup('env', 'CL0_PVE_NODE', default='192.168.1.241') }}"
+    cl0_pbs_storage_id: pbs-s3
+    cl0_legacy_pbs_storage_id: pbs.myrobertson.net
+    cl0_manage_legacy_pbs_storage: true
+    cl0_legacy_pbs_server: "{{ lookup('env', 'CL0_LEGACY_PBS_SERVER', default='192.168.1.217') }}"
+    cl0_legacy_pbs_datastore: "{{ lookup('env', 'CL0_LEGACY_PBS_DATASTORE', default='store1') }}"
+    cl0_legacy_pbs_username: "{{ lookup('env', 'CL0_LEGACY_PBS_USERNAME', default='root@pam') }}"
+    cl0_legacy_pbs_password: "{{ lookup('env', 'CL0_LEGACY_PBS_PASSWORD', default=pbs_ssh_pass) }}"
+
+    # ── Backup job ───────────────────────────────────────────────────────────
+    vault_vmid: "119"
+    backup_job_id: vault-vm-119-nightly
+    backup_schedule: "mon,tue,wed,thu,fri,sat,sun 02:00"
+    backup_mode: snapshot
+    backup_compress: zstd
+    prune_retention: "keep-last=7,keep-weekly=4,keep-monthly=12"
+
+    # ── SSH delegation credentials ───────────────────────────────────────────
+    pbs_ssh_user: "{{ lookup('env', 'PBS_SSH_USER', default='root') }}"
+    pbs_ssh_pass: "{{ lookup('env', 'PBS_SSH_PASSWORD', default='') }}"
+    pve_pbs_username: "{{ lookup('env', 'PVE_PBS_USERNAME', default='root@pam') }}"
+    pve_pbs_password: "{{ lookup('env', 'PVE_PBS_PASSWORD', default=pbs_ssh_pass) }}"
+    cl0_ssh_user: "{{ lookup('env', 'CL0_SSH_USER', default='root') }}"
+    cl0_ssh_pass: "{{ lookup('env', 'CL0_SSH_PASSWORD', default='') }}"
+
+    # ── Optional Vault persistence for generated token ───────────────────────
+    vault_addr: "{{ lookup('env', 'VAULT_ADDR', default='https://vault.myrobertson.net:8200') }}"
+    vault_token_env: "{{ lookup('env', 'VAULT_TOKEN', default='') }}"
+
+  tasks:
+
+    # ── PBS: Get TLS fingerprint ─────────────────────────────────────────────
+
+    - name: Get PBS proxy TLS certificate fingerprint
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -fingerprint
+          - -sha256
+          - -noout
+          - -in
+          - /etc/proxmox-backup/proxy.pem
+      delegate_to: "{{ pbs_host }}"
+      become: true
+      vars:
+        ansible_user: "{{ pbs_ssh_user }}"
+        ansible_password: "{{ pbs_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      register: pbs_fingerprint_raw
+      changed_when: false
+
+    - name: Parse PBS TLS fingerprint
+      ansible.builtin.set_fact:
+        pbs_tls_fingerprint: "{{ pbs_fingerprint_raw.stdout | regex_replace('^.*=', '') | trim }}"
+
+    # ── PBS: Ensure user exists ──────────────────────────────────────────────
+
+    - name: List existing PBS users
+      ansible.builtin.command:
+        argv:
+          - proxmox-backup-manager
+          - user
+          - list
+          - --output-format
+          - json
+      delegate_to: "{{ pbs_host }}"
+      become: true
+      vars:
+        ansible_user: "{{ pbs_ssh_user }}"
+        ansible_password: "{{ pbs_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      register: pbs_user_list_raw
+      changed_when: false
+
+    - name: Set PBS user existence fact
+      ansible.builtin.set_fact:
+        pbs_cl0_user_exists: >-
+          {{
+            (pbs_user_list_raw.stdout | from_json)
+            | selectattr('userid', 'equalto', pbs_backup_user)
+            | list
+            | length > 0
+          }}
+
+    - name: Create PBS backup user for cl0
+      ansible.builtin.command:
+        argv:
+          - proxmox-backup-manager
+          - user
+          - create
+          - "{{ pbs_backup_user }}"
+          - --comment
+          - "cl0 cluster backup agent (Vault VMID 119)"
+      delegate_to: "{{ pbs_host }}"
+      become: true
+      vars:
+        ansible_user: "{{ pbs_ssh_user }}"
+        ansible_password: "{{ pbs_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      when: not pbs_cl0_user_exists
+
+    # ── PBS: Ensure API token exists ─────────────────────────────────────────
+
+    - name: List existing PBS API tokens for cl0 user
+      ansible.builtin.command:
+        argv:
+          - proxmox-backup-manager
+          - user
+          - list-tokens
+          - "{{ pbs_backup_user }}"
+          - --output-format
+          - json
+      delegate_to: "{{ pbs_host }}"
+      become: true
+      vars:
+        ansible_user: "{{ pbs_ssh_user }}"
+        ansible_password: "{{ pbs_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      register: pbs_token_list_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Set PBS token existence fact
+      ansible.builtin.set_fact:
+        pbs_cl0_token_exists: >-
+          {{
+            (pbs_token_list_raw.stdout | default('[]') | from_json)
+            | selectattr('token-name', 'equalto', pbs_backup_token_name)
+            | list
+            | length > 0
+          }}
+
+    - name: Generate PBS API token for cl0
+      ansible.builtin.command:
+        argv:
+          - proxmox-backup-manager
+          - user
+          - generate-token
+          - "{{ pbs_backup_user }}"
+          - "{{ pbs_backup_token_name }}"
+      delegate_to: "{{ pbs_host }}"
+      become: true
+      vars:
+        ansible_user: "{{ pbs_ssh_user }}"
+        ansible_password: "{{ pbs_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      register: pbs_token_gen_raw
+      when: not pbs_cl0_token_exists
+
+    - name: Parse generated PBS token value
+      ansible.builtin.set_fact:
+        pbs_cl0_token_value: >-
+          {{
+            pbs_token_gen_raw.stdout
+            | regex_search('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+          }}
+      when: pbs_token_gen_raw is changed
+
+    - name: Store generated PBS token in Vault via API
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/secret/data/pbs/cl0-backup-token"
+        method: PUT
+        headers:
+          X-Vault-Token: "{{ vault_token_env }}"
+        body_format: json
+        body:
+          data:
+            token_value: "{{ pbs_cl0_token_value }}"
+            full_auth_id: "{{ pbs_backup_user }}!{{ pbs_backup_token_name }}"
+            datastore: "{{ pbs_datastore }}"
+        validate_certs: false
+        status_code: [200, 204]
+      when:
+        - pbs_token_gen_raw is changed
+        - vault_token_env | length > 0
+      failed_when: false
+      no_log: true
+
+    - name: Load PBS token from Vault when token was pre-existing
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/secret/data/pbs/cl0-backup-token"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ vault_token_env }}"
+        validate_certs: false
+        return_content: true
+        status_code: [200]
+      register: vault_token_read
+      when:
+        - pbs_cl0_token_exists
+        - pbs_cl0_token_value is not defined
+        - vault_token_env | length > 0
+      failed_when: false
+      no_log: true
+
+    - name: Set PBS token value from Vault response
+      ansible.builtin.set_fact:
+        pbs_cl0_token_value: "{{ vault_token_read.json.data.data.token_value }}"
+      when:
+        - vault_token_read is not skipped
+        - vault_token_read.status is defined
+        - vault_token_read.status == 200
+      no_log: true
+
+    - name: Regenerate PBS token if value cannot be recovered
+      when:
+        - pbs_cl0_token_exists
+        - pbs_cl0_token_value is not defined
+      block:
+        - name: Delete existing PBS token to regenerate secret value
+          ansible.builtin.command:
+            argv:
+              - proxmox-backup-manager
+              - user
+              - delete-token
+              - "{{ pbs_backup_user }}"
+              - "{{ pbs_backup_token_name }}"
+          delegate_to: "{{ pbs_host }}"
+          become: true
+          vars:
+            ansible_user: "{{ pbs_ssh_user }}"
+            ansible_password: "{{ pbs_ssh_pass }}"
+            ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+
+        - name: Generate replacement PBS API token for cl0
+          ansible.builtin.command:
+            argv:
+              - proxmox-backup-manager
+              - user
+              - generate-token
+              - "{{ pbs_backup_user }}"
+              - "{{ pbs_backup_token_name }}"
+          delegate_to: "{{ pbs_host }}"
+          become: true
+          vars:
+            ansible_user: "{{ pbs_ssh_user }}"
+            ansible_password: "{{ pbs_ssh_pass }}"
+            ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+          register: pbs_token_regen_raw
+
+        - name: Parse regenerated PBS token value
+          ansible.builtin.set_fact:
+            pbs_cl0_token_value: >-
+              {{
+                pbs_token_regen_raw.stdout
+                | regex_search('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+              }}
+
+        - name: Store regenerated PBS token in Vault via API
+          ansible.builtin.uri:
+            url: "{{ vault_addr }}/v1/secret/data/pbs/cl0-backup-token"
+            method: PUT
+            headers:
+              X-Vault-Token: "{{ vault_token_env }}"
+            body_format: json
+            body:
+              data:
+                token_value: "{{ pbs_cl0_token_value }}"
+                full_auth_id: "{{ pbs_backup_user }}!{{ pbs_backup_token_name }}"
+                datastore: "{{ pbs_datastore }}"
+            validate_certs: false
+            status_code: [200, 204]
+          when: vault_token_env | length > 0
+          failed_when: false
+          no_log: true
+
+    # ── PBS: Grant ACL ───────────────────────────────────────────────────────
+
+    - name: Grant cl0 token DatastoreAdmin ACL on pbs-s3
+      ansible.builtin.command:
+        argv:
+          - proxmox-backup-manager
+          - acl
+          - update
+          - "/datastore/{{ pbs_datastore }}"
+          - DatastoreAdmin
+          - --auth-id
+          - "{{ pbs_backup_user }}!{{ pbs_backup_token_name }}"
+      delegate_to: "{{ pbs_host }}"
+      become: true
+      vars:
+        ansible_user: "{{ pbs_ssh_user }}"
+        ansible_password: "{{ pbs_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+
+    - name: Grant cl0 token Audit ACL at root for datastore discovery
+      ansible.builtin.command:
+        argv:
+          - proxmox-backup-manager
+          - acl
+          - update
+          - "/"
+          - Audit
+          - --auth-id
+          - "{{ pbs_backup_user }}!{{ pbs_backup_token_name }}"
+      delegate_to: "{{ pbs_host }}"
+      become: true
+      vars:
+        ansible_user: "{{ pbs_ssh_user }}"
+        ansible_password: "{{ pbs_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+
+    # ── cl0 Proxmox: Add PBS storage ─────────────────────────────────────────
+
+    - name: Assert PBS token value is available
+      ansible.builtin.assert:
+        that:
+          - pbs_cl0_token_value is defined
+          - pbs_cl0_token_value | length > 0
+        fail_msg: >-
+          PBS API token value unavailable. The token '{{ pbs_backup_token_name }}'
+          for user '{{ pbs_backup_user }}' already exists in PBS but its value
+          cannot be retrieved (only shown at generation time). To recover:
+          1) Export VAULT_ADDR + VAULT_TOKEN and re-run (reads from secret/pbs/cl0-backup-token), or
+          2) Delete the token on PBS: proxmox-backup-manager user delete-token {{ pbs_backup_user }} {{ pbs_backup_token_name }}
+             then re-run this playbook to regenerate.
+      when: pbs_cl0_token_value is not defined
+
+    - name: List configured storage on cl0
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - get
+          - /storage
+          - --output-format
+          - json
+      delegate_to: "{{ cl0_pve_node }}"
+      become: true
+      vars:
+        ansible_user: "{{ cl0_ssh_user }}"
+        ansible_password: "{{ cl0_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      register: pve_storage_list_raw
+      changed_when: false
+
+    - name: Set PBS storage existence fact
+      ansible.builtin.set_fact:
+        pve_pbs_storage_exists: >-
+          {{
+            (pve_storage_list_raw.stdout | from_json)
+            | selectattr('storage', 'equalto', cl0_pbs_storage_id)
+            | list
+            | length > 0
+          }}
+
+    - name: Add PBS storage pbs-s3 to cl0 Proxmox cluster
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - create
+          - /storage
+          - --storage
+          - "{{ cl0_pbs_storage_id }}"
+          - --type
+          - pbs
+          - --server
+          - "{{ pbs_host }}"
+          - --datastore
+          - "{{ pbs_datastore }}"
+          - --username
+          - "{{ pve_pbs_username }}"
+          - --password
+          - "{{ pve_pbs_password }}"
+          - --fingerprint
+          - "{{ pbs_tls_fingerprint }}"
+          - --prune-backups
+          - "{{ prune_retention }}"
+      delegate_to: "{{ cl0_pve_node }}"
+      become: true
+      no_log: true
+      vars:
+        ansible_user: "{{ cl0_ssh_user }}"
+        ansible_password: "{{ cl0_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      when: not pve_pbs_storage_exists
+
+    - name: Read legacy PBS storage configuration on cl0
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - get
+          - "/storage/{{ cl0_legacy_pbs_storage_id }}"
+          - --output-format
+          - json
+      delegate_to: "{{ cl0_pve_node }}"
+      become: true
+      vars:
+        ansible_user: "{{ cl0_ssh_user }}"
+        ansible_password: "{{ cl0_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      register: legacy_pbs_storage_raw
+      changed_when: false
+      failed_when: false
+      when: cl0_manage_legacy_pbs_storage | bool
+
+    - name: Set legacy PBS storage reconciliation facts
+      ansible.builtin.set_fact:
+        legacy_pbs_storage_exists: "{{ legacy_pbs_storage_raw.rc == 0 }}"
+        legacy_pbs_storage_matches_target: >-
+          {{
+            legacy_pbs_storage_raw.rc == 0 and
+            (legacy_pbs_storage_raw.stdout | from_json).server == cl0_legacy_pbs_server and
+            (legacy_pbs_storage_raw.stdout | from_json).datastore == cl0_legacy_pbs_datastore and
+            (legacy_pbs_storage_raw.stdout | from_json).username == cl0_legacy_pbs_username
+          }}
+      when: cl0_manage_legacy_pbs_storage | bool
+
+    - name: Delete legacy PBS storage when configuration does not match target
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - delete
+          - "/storage/{{ cl0_legacy_pbs_storage_id }}"
+      delegate_to: "{{ cl0_pve_node }}"
+      become: true
+      vars:
+        ansible_user: "{{ cl0_ssh_user }}"
+        ansible_password: "{{ cl0_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      when:
+        - cl0_manage_legacy_pbs_storage | bool
+        - legacy_pbs_storage_exists | bool
+        - not legacy_pbs_storage_matches_target | bool
+
+    - name: Create or recreate legacy PBS storage with target settings
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - create
+          - /storage
+          - --storage
+          - "{{ cl0_legacy_pbs_storage_id }}"
+          - --type
+          - pbs
+          - --server
+          - "{{ cl0_legacy_pbs_server }}"
+          - --datastore
+          - "{{ cl0_legacy_pbs_datastore }}"
+          - --username
+          - "{{ cl0_legacy_pbs_username }}"
+          - --password
+          - "{{ cl0_legacy_pbs_password }}"
+          - --fingerprint
+          - "{{ pbs_tls_fingerprint }}"
+          - --prune-backups
+          - "{{ prune_retention }}"
+      delegate_to: "{{ cl0_pve_node }}"
+      become: true
+      no_log: true
+      vars:
+        ansible_user: "{{ cl0_ssh_user }}"
+        ansible_password: "{{ cl0_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      when:
+        - cl0_manage_legacy_pbs_storage | bool
+        - (not legacy_pbs_storage_exists | bool) or (not legacy_pbs_storage_matches_target | bool)
+
+    # ── cl0 Proxmox: Create backup job ───────────────────────────────────────
+
+    - name: List configured backup jobs on cl0
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - get
+          - /cluster/backup
+          - --output-format
+          - json
+      delegate_to: "{{ cl0_pve_node }}"
+      become: true
+      vars:
+        ansible_user: "{{ cl0_ssh_user }}"
+        ansible_password: "{{ cl0_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      register: pve_backup_jobs_raw
+      changed_when: false
+
+    - name: Set backup job existence fact
+      ansible.builtin.set_fact:
+        pve_vault_backup_exists: >-
+          {{
+            (pve_backup_jobs_raw.stdout | from_json)
+            | selectattr('id', 'equalto', backup_job_id)
+            | list
+            | length > 0
+          }}
+
+    - name: Create nightly backup job for Vault VM (VMID 119)
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - create
+          - /cluster/backup
+          - --id
+          - "{{ backup_job_id }}"
+          - --storage
+          - "{{ cl0_pbs_storage_id }}"
+          - --vmid
+          - "{{ vault_vmid }}"
+          - --schedule
+          - "{{ backup_schedule }}"
+          - --mode
+          - "{{ backup_mode }}"
+          - --compress
+          - "{{ backup_compress }}"
+          - --enabled
+          - "1"
+          - --comment
+          - "Nightly backup of Vault VM to PBS S3"
+      delegate_to: "{{ cl0_pve_node }}"
+      become: true
+      vars:
+        ansible_user: "{{ cl0_ssh_user }}"
+        ansible_password: "{{ cl0_ssh_pass }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      when: not pve_vault_backup_exists
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+
+    - name: Display configuration summary
+      ansible.builtin.debug:
+        msg: |
+          ===== cl0 PBS Backup Configuration =====
+          PBS user:        {{ pbs_backup_user }}!{{ pbs_backup_token_name }}
+          PBS datastore:   {{ pbs_datastore }} on {{ pbs_host }}
+          PBS ACL:         DatastoreBackup on /datastore/{{ pbs_datastore }}
+          PBS fingerprint: {{ pbs_tls_fingerprint }}
+          cl0 storage:     {{ cl0_pbs_storage_id }} ({{ 'already existed' if pve_pbs_storage_exists else 'created' }})
+          legacy storage:  {{ cl0_legacy_pbs_storage_id }} -> {{ cl0_legacy_pbs_server }}/{{ cl0_legacy_pbs_datastore }} (managed={{ cl0_manage_legacy_pbs_storage | bool }})
+          Backup job:      {{ backup_job_id }} ({{ 'already existed' if pve_vault_backup_exists else 'created' }})
+          VM:              VMID {{ vault_vmid }} (vault)
+          Schedule:        {{ backup_schedule }}
+          Mode:            {{ backup_mode }}
+          Compression:     {{ backup_compress }}
+          Retention:       {{ prune_retention }}
+          =========================================

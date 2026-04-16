@@ -170,6 +170,31 @@
     pbs_url: "https://{{ pbs_host }}:{{ pbs_port }}"
     pbs_apply_system_updates: true
     pbs_apply_cert_to_proxy: true
+    pbs_manage_s3_datastore: true
+    pbs_s3_endpoint_id: aws-homelab-pbs
+    pbs_s3_endpoint: myrobertson-homelab-pbs.s3.us-west-2.amazonaws.com
+    pbs_s3_region: us-west-2
+    pbs_s3_bucket: myrobertson-homelab-pbs
+    pbs_s3_datastore_name: pbs-s3
+    pbs_s3_cache_path: /mnt/datastore/pbs-s3-cache
+    pbs_s3_vault_secret_path: secret/data/cnpg/prod/backup-s3
+    pbs_s3_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID', default='') }}"
+    pbs_s3_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY', default='') }}"
+    pbs_s3_backend: "type=s3,client={{ pbs_s3_endpoint_id }},bucket={{ pbs_s3_bucket }}"
+    pbs_manage_s3_jobs: true
+    pbs_s3_gc_schedule: daily
+    pbs_s3_verify_job_id: v-pbs-s3
+    pbs_s3_verify_schedule: daily
+    pbs_s3_verify_outdated_after: 30
+    pbs_s3_verify_ignore_verified: true
+    pbs_s3_prune_job_id: s-pbs-s3
+    pbs_s3_prune_schedule: "21:00"
+    pbs_s3_prune_keep_last: 7
+    pbs_s3_prune_keep_daily: 7
+    pbs_s3_prune_keep_weekly: 4
+    pbs_s3_prune_keep_monthly: 12
+    pbs_ssh_user: "{{ lookup('env', 'PBS_SSH_USER', default='root') }}"
+    pbs_ssh_password: "{{ lookup('env', 'PBS_SSH_PASSWORD', default='') }}"
     # These should be loaded from vault or environment
     pbs_user: "{{ lookup('env', 'PBS_USER', default='maintenance@pam') }}"
     pbs_password: "{{ lookup('env', 'PBS_PASSWORD', default='') }}"
@@ -177,6 +202,11 @@
     
   tasks:
     - name: PBS Maintenance Playbook
+      vars:
+        ansible_user: "{{ pbs_ssh_user }}"
+        ansible_password: "{{ pbs_ssh_password }}"
+        ansible_become_password: "{{ pbs_ssh_password }}"
+        ansible_ssh_common_args: -o StrictHostKeyChecking=no
       block:
         - name: Verify PBS API connectivity
           uri:
@@ -195,6 +225,381 @@
               PBS Status: {{ pbs_status.status | default('UNREACHABLE') }}
               Response: {{ pbs_status.json | default({}) }}
           when: pbs_status is defined
+
+        - name: Configure PBS S3 endpoint and datastore
+          block:
+            - name: Load S3 credentials from Vault when environment credentials are absent
+              ansible.builtin.set_fact:
+                _pbs_s3_secret_data: "{{ lookup('community.hashi_vault.hashi_vault', pbs_s3_vault_secret_path, token=lookup('env', 'VAULT_TOKEN'), url=lookup('env', 'VAULT_ADDR')) }}"
+                pbs_s3_access_key: "{{ _pbs_s3_secret_data.get('AWS_ACCESS_KEY_ID', (_pbs_s3_secret_data.get('data', {})).get('AWS_ACCESS_KEY_ID', '')) }}"
+                pbs_s3_secret_key: "{{ _pbs_s3_secret_data.get('AWS_SECRET_ACCESS_KEY', (_pbs_s3_secret_data.get('data', {})).get('AWS_SECRET_ACCESS_KEY', '')) }}"
+              no_log: true
+              when:
+                - (pbs_s3_access_key | length == 0) or (pbs_s3_secret_key | length == 0)
+                - lookup('env', 'VAULT_TOKEN', default='') | length > 0
+                - lookup('env', 'VAULT_ADDR', default='') | length > 0
+
+            - name: Ensure S3 credentials are available
+              ansible.builtin.assert:
+                that:
+                  - pbs_s3_access_key | length > 0
+                  - pbs_s3_secret_key | length > 0
+                fail_msg: >-
+                  PBS S3 configuration is enabled, but no AWS credentials were found.
+                  Export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or provide
+                  VAULT_ADDR and VAULT_TOKEN so the playbook can read {{ pbs_s3_vault_secret_path }}.
+
+            - name: Ensure local cache path exists for S3 datastore
+              ansible.builtin.file:
+                path: "{{ pbs_s3_cache_path }}"
+                state: directory
+                owner: backup
+                group: backup
+                mode: '0750'
+              delegate_to: "{{ pbs_host }}"
+              become: true
+
+            - name: List configured PBS S3 endpoints
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - s3
+                  - endpoint
+                  - list
+                  - --output-format
+                  - json
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_s3_endpoint_list
+              changed_when: false
+
+            - name: Set PBS S3 endpoint facts
+              ansible.builtin.set_fact:
+                pbs_s3_endpoints: "{{ pbs_s3_endpoint_list.stdout | default('[]') | from_json }}"
+                pbs_s3_endpoint_exists: >-
+                  {{
+                    (pbs_s3_endpoint_list.stdout | default('[]') | from_json)
+                    | selectattr('id', 'equalto', pbs_s3_endpoint_id)
+                    | list
+                    | length > 0
+                  }}
+              changed_when: false
+
+            - name: Create PBS S3 endpoint
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - s3
+                  - endpoint
+                  - create
+                  - "{{ pbs_s3_endpoint_id }}"
+                  - --access-key
+                  - "{{ pbs_s3_access_key }}"
+                  - --secret-key
+                  - "{{ pbs_s3_secret_key }}"
+                  - --endpoint
+                  - "{{ pbs_s3_endpoint }}"
+                  - --region
+                  - "{{ pbs_s3_region }}"
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_s3_endpoint_create
+              no_log: true
+              when: not pbs_s3_endpoint_exists
+
+            - name: Update PBS S3 endpoint
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - s3
+                  - endpoint
+                  - update
+                  - "{{ pbs_s3_endpoint_id }}"
+                  - --access-key
+                  - "{{ pbs_s3_access_key }}"
+                  - --secret-key
+                  - "{{ pbs_s3_secret_key }}"
+                  - --endpoint
+                  - "{{ pbs_s3_endpoint }}"
+                  - --region
+                  - "{{ pbs_s3_region }}"
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_s3_endpoint_update
+              changed_when: false
+              no_log: true
+              when: pbs_s3_endpoint_exists
+
+            - name: Validate PBS access to the S3 bucket
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - s3
+                  - check
+                  - "{{ pbs_s3_endpoint_id }}"
+                  - "{{ pbs_s3_bucket }}"
+                  - --store-prefix
+                  - "{{ pbs_s3_datastore_name }}"
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_s3_bucket_check
+              changed_when: false
+
+            - name: List configured PBS datastores
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - datastore
+                  - list
+                  - --output-format
+                  - json
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_datastore_list
+              changed_when: false
+
+            - name: Set PBS datastore facts
+              ansible.builtin.set_fact:
+                pbs_existing_datastores: "{{ pbs_datastore_list.stdout | default('[]') | from_json }}"
+                pbs_s3_datastore_exists: >-
+                  {{
+                    (pbs_datastore_list.stdout | default('[]') | from_json)
+                    | selectattr('name', 'equalto', pbs_s3_datastore_name)
+                    | list
+                    | length > 0
+                  }}
+              changed_when: false
+
+            - name: Show existing PBS datastore configuration
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - datastore
+                  - show
+                  - "{{ pbs_s3_datastore_name }}"
+                  - --output-format
+                  - json
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_existing_s3_datastore
+              changed_when: false
+              when: pbs_s3_datastore_exists
+
+            - name: Ensure existing datastore matches desired S3 configuration
+              ansible.builtin.assert:
+                that:
+                  - (pbs_existing_s3_datastore.stdout | from_json).path == pbs_s3_cache_path
+                  - ((pbs_existing_s3_datastore.stdout | from_json).backend | default('')) == pbs_s3_backend
+                fail_msg: >-
+                  Existing datastore {{ pbs_s3_datastore_name }} does not match the desired
+                  S3 backend or cache path. Adjust the playbook vars or reconcile the existing
+                  datastore before re-running this playbook.
+              when: pbs_s3_datastore_exists
+
+            - name: Create PBS S3-backed datastore
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - datastore
+                  - create
+                  - "{{ pbs_s3_datastore_name }}"
+                  - "{{ pbs_s3_cache_path }}"
+                  - --backend
+                  - "{{ pbs_s3_backend }}"
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_s3_datastore_create
+              when: not pbs_s3_datastore_exists
+
+            - name: Display PBS S3 datastore status
+              ansible.builtin.debug:
+                msg: >-
+                  PBS S3 datastore {{ pbs_s3_datastore_name }} is configured against bucket
+                  {{ pbs_s3_bucket }} in {{ pbs_s3_region }} using endpoint {{ pbs_s3_endpoint_id }}.
+
+            - name: Read current PBS S3 datastore config
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - datastore
+                  - show
+                  - "{{ pbs_s3_datastore_name }}"
+                  - --output-format
+                  - json
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_s3_datastore_config
+              changed_when: false
+
+            - name: Set PBS S3 datastore tuning facts
+              ansible.builtin.set_fact:
+                pbs_s3_current_gc_schedule: "{{ (pbs_s3_datastore_config.stdout | from_json).get('gc-schedule', '') }}"
+              changed_when: false
+
+            - name: Ensure PBS S3 datastore GC schedule
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - datastore
+                  - update
+                  - "{{ pbs_s3_datastore_name }}"
+                  - --gc-schedule
+                  - "{{ pbs_s3_gc_schedule }}"
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_s3_gc_schedule_update
+              when: pbs_s3_current_gc_schedule != pbs_s3_gc_schedule
+
+            - name: List existing PBS verify jobs
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - verify-job
+                  - list
+                  - --output-format
+                  - json
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_verify_jobs_raw
+              changed_when: false
+              when: pbs_manage_s3_jobs | bool
+
+            - name: Set PBS verify job facts
+              ansible.builtin.set_fact:
+                pbs_verify_jobs: "{{ pbs_verify_jobs_raw.stdout | default('[]') | from_json }}"
+                pbs_s3_verify_job_exists: >-
+                  {{
+                    (pbs_verify_jobs_raw.stdout | default('[]') | from_json)
+                    | selectattr('id', 'equalto', pbs_s3_verify_job_id)
+                    | list
+                    | length > 0
+                  }}
+              changed_when: false
+              when: pbs_manage_s3_jobs | bool
+
+            - name: Create PBS S3 verify job
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - verify-job
+                  - create
+                  - "{{ pbs_s3_verify_job_id }}"
+                  - --store
+                  - "{{ pbs_s3_datastore_name }}"
+                  - --schedule
+                  - "{{ pbs_s3_verify_schedule }}"
+                  - --outdated-after
+                  - "{{ pbs_s3_verify_outdated_after | string }}"
+                  - --ignore-verified
+                  - "{{ pbs_s3_verify_ignore_verified | string | lower }}"
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_s3_verify_job_create
+              when:
+                - pbs_manage_s3_jobs | bool
+                - not pbs_s3_verify_job_exists
+
+            - name: Update PBS S3 verify job
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - verify-job
+                  - update
+                  - "{{ pbs_s3_verify_job_id }}"
+                  - --store
+                  - "{{ pbs_s3_datastore_name }}"
+                  - --schedule
+                  - "{{ pbs_s3_verify_schedule }}"
+                  - --outdated-after
+                  - "{{ pbs_s3_verify_outdated_after | string }}"
+                  - --ignore-verified
+                  - "{{ pbs_s3_verify_ignore_verified | string | lower }}"
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              changed_when: false
+              when:
+                - pbs_manage_s3_jobs | bool
+                - pbs_s3_verify_job_exists
+
+            - name: List existing PBS prune jobs
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - prune-job
+                  - list
+                  - --output-format
+                  - json
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_prune_jobs_raw
+              changed_when: false
+              when: pbs_manage_s3_jobs | bool
+
+            - name: Set PBS prune job facts
+              ansible.builtin.set_fact:
+                pbs_prune_jobs: "{{ pbs_prune_jobs_raw.stdout | default('[]') | from_json }}"
+                pbs_s3_prune_job_exists: >-
+                  {{
+                    (pbs_prune_jobs_raw.stdout | default('[]') | from_json)
+                    | selectattr('id', 'equalto', pbs_s3_prune_job_id)
+                    | list
+                    | length > 0
+                  }}
+              changed_when: false
+              when: pbs_manage_s3_jobs | bool
+
+            - name: Create PBS S3 prune job
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - prune-job
+                  - create
+                  - "{{ pbs_s3_prune_job_id }}"
+                  - --store
+                  - "{{ pbs_s3_datastore_name }}"
+                  - --schedule
+                  - "{{ pbs_s3_prune_schedule }}"
+                  - --keep-last
+                  - "{{ pbs_s3_prune_keep_last | string }}"
+                  - --keep-daily
+                  - "{{ pbs_s3_prune_keep_daily | string }}"
+                  - --keep-weekly
+                  - "{{ pbs_s3_prune_keep_weekly | string }}"
+                  - --keep-monthly
+                  - "{{ pbs_s3_prune_keep_monthly | string }}"
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              register: pbs_s3_prune_job_create
+              when:
+                - pbs_manage_s3_jobs | bool
+                - not pbs_s3_prune_job_exists
+
+            - name: Update PBS S3 prune job
+              ansible.builtin.command:
+                argv:
+                  - proxmox-backup-manager
+                  - prune-job
+                  - update
+                  - "{{ pbs_s3_prune_job_id }}"
+                  - --store
+                  - "{{ pbs_s3_datastore_name }}"
+                  - --schedule
+                  - "{{ pbs_s3_prune_schedule }}"
+                  - --keep-last
+                  - "{{ pbs_s3_prune_keep_last | string }}"
+                  - --keep-daily
+                  - "{{ pbs_s3_prune_keep_daily | string }}"
+                  - --keep-weekly
+                  - "{{ pbs_s3_prune_keep_weekly | string }}"
+                  - --keep-monthly
+                  - "{{ pbs_s3_prune_keep_monthly | string }}"
+              delegate_to: "{{ pbs_host }}"
+              become: true
+              changed_when: false
+              when:
+                - pbs_manage_s3_jobs | bool
+                - pbs_s3_prune_job_exists
+          when: pbs_manage_s3_datastore | bool
         
         - name: PBS Authentication
           block:
@@ -404,6 +809,7 @@
                      See: /usr/local/sbin/pbs-cert-renewal.sh template in this playbook
                   
                   Status: {{ 'CONFIGURED' if pbs_approle_file.stat.exists else 'NOT CONFIGURED' }}
+          when: pbs_apply_cert_to_proxy | bool
         
         - name: Verify Key Backup Datastores
           block:

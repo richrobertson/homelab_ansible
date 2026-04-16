@@ -8,8 +8,9 @@ The playbook includes:
 
 1. **Vault PKI Bootstrap** - Sets up certificate generation for PBS via Vault (matching Proxmox cl0 pattern)
 2. **PBS Maintenance Checks** - Monitors API health, datastores, and backup status
-3. **Certificate Renewal** - Automated certificate renewal via Vault AppRole
-4. **Backup Pruning** - Optional cleanup of old backups with retention policies
+3. **S3 Datastore Configuration** - Creates or validates a native PBS S3 endpoint and S3-backed datastore
+4. **Certificate Renewal** - Automated certificate renewal via Vault AppRole
+5. **Backup Pruning** - Optional cleanup of old backups with retention policies
 
 ## Usage
 
@@ -19,6 +20,28 @@ The playbook includes:
 cd /Users/rich/Documents/GitHub/homelab_ansible
 ansible-playbook playbooks/proxmox-backup/maintenance.yml
 ```
+
+### Configure the PBS S3 Datastore
+
+The maintenance play now manages the PBS native S3 endpoint and datastore for:
+
+- Endpoint ID: `aws-homelab-pbs`
+- Endpoint: `myrobertson-homelab-pbs.s3.us-west-2.amazonaws.com`
+- Bucket: `myrobertson-homelab-pbs`
+- Region: `us-west-2`
+- Datastore name: `pbs-s3`
+- Local cache path: `/mnt/datastore/pbs-s3-cache`
+- Vault secret path: `secret/data/cnpg/prod/backup-s3`
+
+Before running the playbook, export Vault access for the `community.hashi_vault` lookup:
+
+```bash
+export VAULT_ADDR=https://vault.myrobertson.net:8200
+export VAULT_TOKEN=<token-with-read-access>
+ansible-playbook playbooks/proxmox-backup/maintenance.yml
+```
+
+The playbook expects the Vault secret to expose `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
 
 ### Bootstrap Vault PKI for PBS Certificates
 
@@ -80,6 +103,7 @@ ansible-playbook playbooks/proxmox-backup/maintenance.yml \
 
 ### Play 2: Maintenance Checks (localhost)
 - Verifies PBS API connectivity
+- Creates or validates the native PBS S3 endpoint and datastore
 - Authenticates with PBS
 - Lists datastores and usage
 - Checks system version and health
@@ -90,6 +114,15 @@ ansible-playbook playbooks/proxmox-backup/maintenance.yml \
 - `pbs_user`: PBS API user (default: `maintenance@pam`)
 - `pbs_password`: PBS API password (from environment)
 - `pbs_verify_ssl`: SSL verification (default: `false`)
+- `pbs_manage_s3_datastore`: Enable PBS S3 endpoint/datastore management (default: `true`)
+- `pbs_s3_endpoint_id`: PBS S3 endpoint ID (default: `aws-homelab-pbs`)
+- `pbs_s3_bucket`: S3 bucket name (default: `myrobertson-homelab-pbs`)
+- `pbs_s3_region`: AWS region (default: `us-west-2`)
+- `pbs_s3_datastore_name`: PBS datastore name (default: `pbs-s3`)
+- `pbs_s3_cache_path`: Local persistent cache path on PBS (default: `/mnt/datastore/pbs-s3-cache`)
+- `pbs_s3_vault_secret_path`: Vault KV v2 path used to fetch AWS credentials (default: `secret/data/cnpg/prod/backup-s3`)
+- `pbs_ssh_user`: SSH user for delegated PBS host actions (default: `root`)
+- `pbs_ssh_password`: SSH password for delegated PBS host actions (default: from `PBS_SSH_PASSWORD`)
 
 ### Play 3: Backup Pruning (localhost)
 - Displays pruning instructions
