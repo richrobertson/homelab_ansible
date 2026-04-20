@@ -1,4 +1,44 @@
 ---
+- name: Prepare local Ansible controller for PowerDNS roles
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    pdns_rec_role_main_task_file: "{{ lookup('env', 'HOME') }}/.ansible/roles/powerdns.pdns_recursor/tasks/main.yml"
+  tasks:
+    - name: Ensure hvac is installed for Vault lookups
+      ansible.builtin.pip:
+        name: hvac
+        state: present
+        extra_args: --user
+        executable: pip3
+
+    - name: Check whether the installed recursor role exists on the controller
+      ansible.builtin.stat:
+        path: "{{ pdns_rec_role_main_task_file }}"
+      register: pdns_rec_role_main_task_file_stat
+
+    - name: Patch deprecated recursor role include for repo tasks
+      ansible.builtin.replace:
+        path: "{{ pdns_rec_role_main_task_file }}"
+        regexp: '^- include: "repo-\{\{ ansible_os_family \}\}\.yml"$'
+        replace: '- ansible.builtin.include_tasks: "repo-{{ ansible_os_family }}.yml"'
+      when: pdns_rec_role_main_task_file_stat.stat.exists
+
+    - name: Patch deprecated recursor role include for install tasks
+      ansible.builtin.replace:
+        path: "{{ pdns_rec_role_main_task_file }}"
+        regexp: '^- include: "install-\{\{ansible_system\}\}\.yml"$'
+        replace: '- ansible.builtin.include_tasks: "install-{{ansible_system}}.yml"'
+      when: pdns_rec_role_main_task_file_stat.stat.exists
+
+    - name: Patch deprecated recursor role include for configure tasks
+      ansible.builtin.replace:
+        path: "{{ pdns_rec_role_main_task_file }}"
+        regexp: '^- include: configure\.yml$'
+        replace: '- ansible.builtin.include_tasks: configure.yml'
+      when: pdns_rec_role_main_task_file_stat.stat.exists
+
 - name: Configure authoritative PowerDNS server
   hosts: powerdns
   become: true
@@ -46,6 +86,10 @@
     _pdns_secrets: "{{ lookup('community.hashi_vault.hashi_vault', 'secret/data/powerdns', token=lookup('env', 'VAULT_TOKEN'), url=lookup('env', 'VAULT_ADDR')) }}"
     pdns_api_key: "{{ _pdns_secrets.get('api_key', (_pdns_secrets.get('data', {})).get('api_key')) }}"
     pdns_recursor_webserver_allow_from: "0.0.0.0/0"
+    # Must match the LAN-facing LoadBalancer IP used by the shared myrobertson-com gateway.
+    pdns_rec_split_dns_gateway_ip: "192.168.7.151"
+    pdns_rec_split_dns_zone_dir: "/etc/powerdns/recursor/zones"
+    pdns_rec_split_dns_zone_file: "{{ pdns_rec_split_dns_zone_dir }}/plex.myrobertson.com.zone"
     pdns_rec_config:
 
       # Listen Address
@@ -76,11 +120,43 @@
         - "prod.myrobertson.net.=192.168.7.201:53;"
         - "dev.myrobertson.net.=192.168.7.201:53;"
         - "myrobertson.net.=192.168.1.244;192.168.1.245;192.168.1.2;"
+      auth-zones:
+        - "plex.myrobertson.com={{ pdns_rec_split_dns_zone_file }}"
 
       forward-zones-recurse:
         - ".=1.1.1.1;8.8.8.8;"
 
       max-negative-ttl: 15
 
+  pre_tasks:
+    - name: Create recursor split-DNS zone directory
+      ansible.builtin.file:
+        path: "{{ pdns_rec_split_dns_zone_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install plex.myrobertson.com split-DNS auth zone
+      ansible.builtin.copy:
+        dest: "{{ pdns_rec_split_dns_zone_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          $ORIGIN plex.myrobertson.com.
+          $TTL 60
+          @ IN SOA localhost. hostmaster.plex.myrobertson.com. 2026042001 300 300 300 60
+          @ IN NS localhost.
+          @ IN A {{ pdns_rec_split_dns_gateway_ip }}
+      register: pdns_rec_split_dns_zone
+
   roles:
     - { role: powerdns.pdns_recursor }
+
+  post_tasks:
+    - name: Restart PDNS recursor after split-DNS zone updates
+      ansible.builtin.service:
+        name: pdns-recursor
+        state: restarted
+      when: pdns_rec_split_dns_zone is changed
