@@ -2,7 +2,7 @@
 - name: Prepare local Ansible controller for PowerDNS roles
   hosts: localhost
   connection: local
-  gather_facts: false
+  gather_facts: true
   vars:
     pdns_rec_role_main_task_file: "{{ lookup('env', 'HOME') }}/.ansible/roles/powerdns.pdns_recursor/tasks/main.yml"
   tasks:
@@ -86,8 +86,8 @@
     _pdns_secrets: "{{ lookup('community.hashi_vault.hashi_vault', 'secret/data/powerdns', token=lookup('env', 'VAULT_TOKEN'), url=lookup('env', 'VAULT_ADDR')) }}"
     pdns_api_key: "{{ _pdns_secrets.get('api_key', (_pdns_secrets.get('data', {})).get('api_key')) }}"
     pdns_recursor_webserver_allow_from: "0.0.0.0/0"
-    # Must match the LAN-facing LoadBalancer IP used by the shared myrobertson-com gateway.
-    pdns_rec_split_dns_gateway_ip: "192.168.7.151"
+    # Must match the LAN-reachable LoadBalancer IP used by the shared myrobertson-com gateway.
+    pdns_rec_split_dns_gateway_ip: "10.31.0.75"
     pdns_rec_split_dns_zone_dir: "/etc/powerdns/recursor/zones"
     pdns_rec_split_dns_zone_file: "{{ pdns_rec_split_dns_zone_dir }}/plex.myrobertson.com.zone"
     pdns_rec_config:
