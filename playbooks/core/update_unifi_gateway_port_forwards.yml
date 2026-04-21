@@ -1,0 +1,12 @@
+---
+- import_playbook: update_unifi_port_forward.yml
+  vars:
+    unifi_port_forward_updates:
+      - rule_name: https
+        external_port: 443
+        forward_ip: 10.31.0.66
+        forward_port: 443
+      - rule_name: http
+        external_port: 80
+        forward_ip: 10.31.0.66
+        forward_port: 80

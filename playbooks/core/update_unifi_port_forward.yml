@@ -1,0 +1,263 @@
+---
+- name: Update UniFi port-forward target IP
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    unifi_vault_secret_path: secret/data/unifi
+    _unifi_secrets: >-
+      {{
+        lookup(
+          'community.hashi_vault.hashi_vault',
+          unifi_vault_secret_path,
+          token=lookup('env', 'VAULT_TOKEN'),
+          url=lookup('env', 'VAULT_ADDR')
+        )
+      }}
+    unifi_console_url: >-
+      {{
+        lookup('env', 'UNIFI_CONSOLE_URL')
+        | default(_unifi_secrets.get('console_url', (_unifi_secrets.get('data', {})).get('console_url')), true)
+      }}
+    unifi_username: >-
+      {{
+        lookup('env', 'UNIFI_USERNAME')
+        | default(_unifi_secrets.get('username', (_unifi_secrets.get('data', {})).get('username')), true)
+      }}
+    unifi_password: >-
+      {{
+        lookup('env', 'UNIFI_PASSWORD')
+        | default(_unifi_secrets.get('password', (_unifi_secrets.get('data', {})).get('password')), true)
+      }}
+    unifi_site: "{{ lookup('env', 'UNIFI_SITE') | default('default', true) }}"
+    unifi_rule_name: "{{ lookup('env', 'UNIFI_PORT_FORWARD_RULE_NAME') | default('plex', true) }}"
+    unifi_external_port: "{{ lookup('env', 'UNIFI_PORT_FORWARD_EXTERNAL_PORT') | default('32400', true) | int }}"
+    unifi_forward_ip: "{{ lookup('env', 'UNIFI_PORT_FORWARD_TARGET_IP') | default('10.31.0.66', true) }}"
+    unifi_forward_port: "{{ lookup('env', 'UNIFI_PORT_FORWARD_TARGET_PORT') | default(unifi_external_port, true) | int }}"
+    unifi_port_forward_updates: "{{ [] }}"
+    unifi_validate_certs: "{{ lookup('env', 'UNIFI_VALIDATE_CERTS') | default('true', true) | bool }}"
+    unifi_network_api_path: "{{ lookup('env', 'UNIFI_NETWORK_API_PATH') | default('/proxy/network/api/s', true) }}"
+  tasks:
+    - name: Normalize requested UniFi port-forward updates
+      ansible.builtin.set_fact:
+        unifi_port_forward_update_list: >-
+          {{
+            (
+              unifi_port_forward_updates
+              if (unifi_port_forward_updates | length > 0)
+              else [
+                {
+                  'rule_name': unifi_rule_name,
+                  'external_port': unifi_external_port,
+                  'forward_ip': unifi_forward_ip,
+                  'forward_port': unifi_forward_port
+                }
+              ]
+            )
+            | map('combine', {'forward_ip': unifi_forward_ip}, recursive=True)
+            | list
+          }}
+
+    - name: Assert required UniFi inputs are present
+      ansible.builtin.assert:
+        that:
+          - unifi_console_url | length > 0
+          - unifi_username | length > 0
+          - unifi_password | length > 0
+          - unifi_port_forward_update_list | length > 0
+          - >-
+            unifi_port_forward_update_list
+            | map(attribute='forward_ip')
+            | select('string')
+            | map('length')
+            | min > 0
+        fail_msg: >-
+          Missing UniFi connection details. Set Vault values in {{ unifi_vault_secret_path }}
+          or provide UNIFI_CONSOLE_URL, UNIFI_USERNAME, and UNIFI_PASSWORD in the environment.
+
+    - name: Log in to the UniFi console
+      ansible.builtin.uri:
+        url: "{{ unifi_console_url }}/api/auth/login"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ unifi_username }}"
+          password: "{{ unifi_password }}"
+        validate_certs: "{{ unifi_validate_certs }}"
+        return_content: true
+        status_code: 200
+      register: unifi_login
+      no_log: true
+
+    - name: Build authenticated UniFi request headers
+      ansible.builtin.set_fact:
+        unifi_request_headers: >-
+          {{
+            {'Content-Type': 'application/json'}
+            | combine(
+                ({'X-CSRF-Token': unifi_login.x_csrf_token}
+                 if (unifi_login.x_csrf_token is defined and (unifi_login.x_csrf_token | length > 0))
+                 else {}),
+                recursive=True
+              )
+          }}
+      no_log: true
+
+    - name: Fetch current port-forward rules
+      ansible.builtin.uri:
+        url: "{{ unifi_console_url }}{{ unifi_network_api_path }}/{{ unifi_site }}/rest/portforward"
+        method: GET
+        headers: "{{ unifi_request_headers }}"
+        validate_certs: "{{ unifi_validate_certs }}"
+        return_content: true
+        status_code: 200
+        cookies_string: "{{ unifi_login.cookies_string }}"
+      register: unifi_port_forward_rules
+      no_log: true
+
+    - name: Normalize returned port-forward rule list
+      ansible.builtin.set_fact:
+        unifi_port_forward_rule_list: >-
+          {{
+            unifi_port_forward_rules.json.data
+            if (unifi_port_forward_rules.json is mapping and 'data' in unifi_port_forward_rules.json)
+            else unifi_port_forward_rules.json
+          }}
+
+    - name: Update UniFi port-forward rules
+      ansible.builtin.uri:
+        url: >-
+          {{
+            unifi_console_url
+          }}{{ unifi_network_api_path }}/{{ unifi_site }}/rest/portforward/{{ unifi_rule_current._id }}
+        method: PUT
+        headers: "{{ unifi_request_headers }}"
+        validate_certs: "{{ unifi_validate_certs }}"
+        body_format: json
+        body: "{{ unifi_rule_updated }}"
+        status_code: 200
+        return_content: true
+        cookies_string: "{{ unifi_login.cookies_string }}"
+      vars:
+        unifi_rule_matches: >-
+          {{
+            (
+              unifi_port_forward_rule_list
+              | selectattr('name', 'defined')
+              | selectattr('name', 'equalto', item.rule_name | default(''))
+              | list
+            )
+            +
+            (
+              unifi_port_forward_rule_list
+              | selectattr('dst_port', 'defined')
+              | selectattr('dst_port', 'equalto', item.external_port | int)
+              | list
+            )
+            | unique(attribute='_id')
+          }}
+        unifi_rule_current: "{{ unifi_rule_matches[0] }}"
+        unifi_rule_updated: >-
+          {{
+            unifi_rule_current
+            | combine(
+                {
+                  'fwd': item.forward_ip,
+                  'fwd_port': (item.forward_port | default(item.external_port) | int)
+                },
+                recursive=True
+              )
+          }}
+      when:
+        - unifi_rule_matches | length == 1
+        - unifi_rule_current.fwd != item.forward_ip
+          or (unifi_rule_current.fwd_port | int) != (item.forward_port | default(item.external_port) | int)
+      loop: "{{ unifi_port_forward_update_list }}"
+      loop_control:
+        label: >-
+          {{
+            (item.rule_name | default('port-forward'))
+          }}:{{ item.external_port | int }} -> {{
+            item.forward_ip
+          }}:{{ item.forward_port | default(item.external_port) | int }}
+      register: unifi_rule_update_results
+      no_log: true
+
+    - name: Assert each UniFi port-forward rule resolved to exactly one match
+      ansible.builtin.assert:
+        that:
+          - unifi_rule_matches | length == 1
+        fail_msg: >-
+          Expected exactly one UniFi port-forward rule matching
+          name={{ item.rule_name | default('') }} or dst_port={{ item.external_port | int }},
+          but found {{ unifi_rule_matches | length }}.
+      vars:
+        unifi_rule_matches: >-
+          {{
+            (
+              unifi_port_forward_rule_list
+              | selectattr('name', 'defined')
+              | selectattr('name', 'equalto', item.rule_name | default(''))
+              | list
+            )
+            +
+            (
+              unifi_port_forward_rule_list
+              | selectattr('dst_port', 'defined')
+              | selectattr('dst_port', 'equalto', item.external_port | int)
+              | list
+            )
+            | unique(attribute='_id')
+          }}
+      loop: "{{ unifi_port_forward_update_list }}"
+      loop_control:
+        label: >-
+          {{
+            (item.rule_name | default('port-forward'))
+          }}:{{ item.external_port | int }}
+
+    - name: Report final UniFi port-forward targets
+      ansible.builtin.debug:
+        msg:
+          - "Rule: {{ unifi_rule_current.name | default(item.rule_name | default('port-forward')) }}"
+          - "External port: {{ unifi_rule_current.dst_port | default(item.external_port) }}"
+          - "Before: {{ unifi_rule_current.fwd }}:{{ unifi_rule_current.fwd_port | default(unifi_rule_current.dst_port) }}"
+          - "After: {{ item.forward_ip }}:{{ item.forward_port | default(item.external_port) | int }}"
+      vars:
+        unifi_rule_matches: >-
+          {{
+            (
+              unifi_port_forward_rule_list
+              | selectattr('name', 'defined')
+              | selectattr('name', 'equalto', item.rule_name | default(''))
+              | list
+            )
+            +
+            (
+              unifi_port_forward_rule_list
+              | selectattr('dst_port', 'defined')
+              | selectattr('dst_port', 'equalto', item.external_port | int)
+              | list
+            )
+            | unique(attribute='_id')
+          }}
+        unifi_rule_current: "{{ unifi_rule_matches[0] }}"
+      loop: "{{ unifi_port_forward_update_list }}"
+      loop_control:
+        label: >-
+          {{
+            (item.rule_name | default('port-forward'))
+          }}:{{ item.external_port | int }}
+
+    - name: Log out of the UniFi console
+      ansible.builtin.uri:
+        url: "{{ unifi_console_url }}/api/auth/logout"
+        method: POST
+        headers: "{{ unifi_request_headers }}"
+        validate_certs: "{{ unifi_validate_certs }}"
+        status_code:
+          - 200
+          - 204
+        cookies_string: "{{ unifi_login.cookies_string }}"
+      failed_when: false
+      no_log: true
