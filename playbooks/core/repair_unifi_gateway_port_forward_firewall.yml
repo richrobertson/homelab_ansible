@@ -1,0 +1,106 @@
+---
+- name: Repair UniFi WAN return rules for the public gateway
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    unifi_ssh_vault_secret_path: >-
+      {{
+        lookup('env', 'UNIFI_SSH_VAULT_SECRET_PATH')
+        | default('secret/unifi/ssh', true)
+      }}
+    _unifi_ssh_secrets: >-
+      {{
+        lookup(
+          'community.hashi_vault.hashi_vault',
+          unifi_ssh_vault_secret_path,
+          token=lookup('env', 'VAULT_TOKEN'),
+          url=lookup('env', 'VAULT_ADDR')
+        )
+      }}
+    unifi_ssh_host: "{{ lookup('env', 'UNIFI_SSH_HOST') | default('192.168.1.1', true) }}"
+    unifi_ssh_username: >-
+      {{
+        lookup('env', 'UNIFI_SSH_USERNAME')
+        | default(_unifi_ssh_secrets.get('username', (_unifi_ssh_secrets.get('data', {})).get('username')), true)
+      }}
+    unifi_ssh_password: >-
+      {{
+        lookup('env', 'UNIFI_SSH_PASSWORD')
+        | default(_unifi_ssh_secrets.get('password', (_unifi_ssh_secrets.get('data', {})).get('password')), true)
+      }}
+    unifi_gateway_kube_context: "{{ lookup('env', 'UNIFI_GATEWAY_KUBE_CONTEXT') | default('admin@prod', true) }}"
+    unifi_gateway_service_namespace: "{{ lookup('env', 'UNIFI_GATEWAY_SERVICE_NAMESPACE') | default('default', true) }}"
+    unifi_gateway_service_name: "{{ lookup('env', 'UNIFI_GATEWAY_SERVICE_NAME') | default('myrobertson-com-gateway-istio', true) }}"
+    unifi_gateway_ports:
+      - 80
+      - 443
+  tasks:
+    - name: Discover current gateway LoadBalancer IP from Kubernetes
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - "--context={{ unifi_gateway_kube_context }}"
+          - get
+          - svc
+          - "{{ unifi_gateway_service_name }}"
+          - -n
+          - "{{ unifi_gateway_service_namespace }}"
+          - -o
+          - jsonpath={.status.loadBalancer.ingress[0].ip}
+      register: unifi_gateway_service_ip_lookup
+      changed_when: false
+
+    - name: Assert required gateway firewall repair inputs are present
+      ansible.builtin.assert:
+        that:
+          - unifi_gateway_service_ip_lookup.stdout | length > 0
+          - unifi_ssh_host | length > 0
+          - unifi_ssh_username | length > 0
+          - unifi_ssh_password | length > 0
+        fail_msg: >-
+          Missing inputs required to repair the UniFi WAN return rules.
+          Set {{ unifi_ssh_vault_secret_path }} or provide UNIFI_SSH_HOST,
+          UNIFI_SSH_USERNAME, and UNIFI_SSH_PASSWORD in the environment.
+
+    - name: Reconcile live UniFi WAN return rules to the current gateway IP
+      ansible.builtin.shell: |
+        set -euo pipefail
+        sshpass -e ssh -o StrictHostKeyChecking=no {{ unifi_ssh_username }}@{{ unifi_ssh_host }} <<'EOF'
+        set -euo pipefail
+        gateway_ip="{{ unifi_gateway_service_ip_lookup.stdout }}"
+        for port in {{ unifi_gateway_ports | join(' ') }}; do
+          for proto in tcp udp; do
+            if iptables -C UBIOS_WAN_IN_USER -d "${gateway_ip}/32" -p "${proto}" --dport "${port}" -j RETURN 2>/dev/null; then
+              echo "keep UBIOS_WAN_IN_USER ${proto}/${port} ${gateway_ip}"
+            else
+              insert_at="$(iptables -L UBIOS_WAN_IN_USER --line-numbers -n | tail -n 1 | awk '{print $1}')"
+              iptables -I UBIOS_WAN_IN_USER "${insert_at}" -d "${gateway_ip}/32" -p "${proto}" --dport "${port}" -j RETURN
+              echo "insert UBIOS_WAN_IN_USER ${proto}/${port} ${gateway_ip}"
+            fi
+
+            if iptables -C UBIOS_WAN_PF_IN_USER -d "${gateway_ip}/32" -p "${proto}" --dport "${port}" -j RETURN 2>/dev/null; then
+              echo "keep UBIOS_WAN_PF_IN_USER ${proto}/${port} ${gateway_ip}"
+            else
+              iptables -A UBIOS_WAN_PF_IN_USER -d "${gateway_ip}/32" -p "${proto}" --dport "${port}" -j RETURN
+              echo "insert UBIOS_WAN_PF_IN_USER ${proto}/${port} ${gateway_ip}"
+            fi
+          done
+        done
+        iptables -S UBIOS_WAN_IN_USER | grep "${gateway_ip}" || true
+        echo ---
+        iptables -S UBIOS_WAN_PF_IN_USER | grep "${gateway_ip}" || true
+        EOF
+      args:
+        executable: /bin/bash
+      environment:
+        SSHPASS: "{{ unifi_ssh_password }}"
+      register: unifi_gateway_firewall_repair
+      changed_when: >-
+        'insert ' in unifi_gateway_firewall_repair.stdout
+        or 'insert ' in unifi_gateway_firewall_repair.stderr
+      no_log: true
+
+    - name: Report live UniFi WAN return-rule reconciliation
+      ansible.builtin.debug:
+        msg: "{{ unifi_gateway_firewall_repair.stdout_lines }}"
