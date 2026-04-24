@@ -1,154 +1,191 @@
 # Inventory Setup Guide
 
-This directory contains Ansible inventory configurations for different environments.
+This directory contains tracked inventory templates plus the local inventory paths used for real environments.
 
-## Quick Start
+## Tracked vs local files
 
-1. **Copy the example files** for your environment:
-   ```bash
-   mkdir -p inventory/environments
+Tracked templates:
 
-   # For production
-   cp inventory/production.ini.example inventory/environments/production.ini
-   
-   # For staging
-   cp inventory/staging.ini.example inventory/environments/staging.ini
-   
-   # For Proxmox dynamic inventory
-   cp inventory/proxmox.yml.example inventory/proxmox.yml
+- `inventory/production.ini.example`
+- `inventory/staging.ini.example`
+- `inventory/proxmox.yml.example`
+- `inventory/synology.ini.example`
 
-   # For Synology NAS inventory
-   cp inventory/synology.ini.example inventory/environments/synology.ini
-   ```
+Local concrete inventories and overrides (gitignored):
 
-2. **Update with your infrastructure details**:
-   - Replace `example.com` hostnames with your actual FQDNs or IPs
-   - Update vault_addr with your Vault server location
-   - Adjust ansible_user and other connection parameters
+- `inventory/environments/production.ini`
+- `inventory/environments/staging.ini`
+- `inventory/environments/synology.ini`
+- `inventory/proxmox.yml`
 
-3. **Never commit sensitive files**:
-   - Treat concrete environment inventory data as sensitive
-   - Keep hostnames/IPs/credentials for real infrastructure out of version control
-   - Only commit `*.example` inventory templates
-   - Keep `environments/*.ini` and `proxmox.yml` local and ignored by git
-   - Use `*.example` files as templates only
+Treat local inventories as sensitive. Even when they only contain hostnames and IPs, they often grow to include Vault endpoints, AppRole IDs, and cluster-specific topology.
 
-## Environment Structure
+## Quick start
 
-### Production
-- **File**: `environments/production.ini`
-- **Purpose**: Production infrastructure
-- **Note**: Keep this file local and never commit (ignored by `.gitignore`)
+1. Create the local inventory directory.
 
-### Staging  
-- **File**: `environments/staging.ini`
-- **Purpose**: Testing and non-production deployments
-- **Note**: Keep this file local and never commit (ignored by `.gitignore`)
-
-### Dynamic Inventory (Proxmox)
-- **File**: `proxmox.yml`
-- **Purpose**: Dynamically discover VMs/LXC containers from Proxmox
-- **Note**: Keep this file local and never commit (ignored by `.gitignore`)
-- **Docs**: https://docs.ansible.com/ansible/latest/collections/community/proxmox/proxmox_inventory.html
-
-## Credentials Management
-
-### Option 1: Environment Variables (Simple)
 ```bash
-export PROXMOX_HOST=your-proxmox-host
-export PROXMOX_USER=your-user@pam
-export PROXMOX_TOKEN_ID=your-token-id
-export PROXMOX_TOKEN_SECRET=$(vault read -field=token secret/proxmox_token)
+mkdir -p inventory/environments
 ```
 
-### Option 2: Vault Integration (Recommended)
-Use Vault to store and retrieve credentials dynamically:
+2. Copy the tracked templates you need.
 
-```yaml
-# In your playbook
-vars:
-  proxmox_credentials: "{{ lookup('community.hashi_vault.hashi_vault', 'secret=secret/data/proxmox') }}"
+```bash
+cp inventory/production.ini.example inventory/environments/production.ini
+cp inventory/staging.ini.example inventory/environments/staging.ini
+cp inventory/proxmox.yml.example inventory/proxmox.yml
+cp inventory/synology.ini.example inventory/environments/synology.ini
 ```
 
-### Option 3: Vault Agent (Advanced)
-For long-running processes, use Vault Agent to transparently inject credentials.
+3. Update the local copies with your real hosts, users, and endpoints.
 
-## Group Structure
+4. Validate the inventory before a rollout.
+
+```bash
+ansible-inventory -i inventory/environments/staging.ini --graph
+```
+
+## Environment structure
+
+- `environments/production.ini`: production infrastructure, kept local
+- `environments/staging.ini`: staging or pre-production infrastructure, kept local
+- `proxmox.yml`: dynamic inventory plugin configuration, kept local
+
+Dynamic Proxmox inventory documentation:
+https://docs.ansible.com/ansible/latest/collections/community/proxmox/proxmox_inventory.html
+
+## Proxmox certificate bootstrap inventory
+
+`ansible/proxmox/provision_certificates.yml` supports two operating modes:
+
+- Delegated Vault bootstrap: define a `[vault]` host group and keep `/root/.vault-token` on that host so the playbook can mint or refresh AppRole material and fetch the Vault CA.
+- Inventory-preseeded mode: provide `proxmox_vault_addr`, `proxmox_cert_vault_role_id`, and `proxmox_cert_vault_secret_id` directly in inventory when there is no dedicated `[vault]` host in the run.
+
+If `proxmox_vault_skip_verify=false` and no delegated Vault host is present, the playbook can reuse an existing Vault CA file from the first targeted Proxmox node. That makes follow-up renewals possible even from a very small static inventory.
+
+Minimal static inventory example for a cluster certificate rollout:
+
+```ini
+[proxmox_cert_nodes]
+pve3.example.net ansible_host=192.168.1.241 ansible_user=root
+pve4.example.net ansible_host=192.168.1.242 ansible_user=root
+pve5.example.net ansible_host=192.168.1.243 ansible_user=root
+
+[proxmox_nodes:children]
+proxmox_cert_nodes
+
+[proxmox_cert_nodes:vars]
+ansible_python_interpreter=/usr/bin/python3
+proxmox_cert_cluster_san=cl0.example.net
+proxmox_vault_addr=https://vault.example.net:8200
+proxmox_vault_skip_verify=false
+proxmox_cert_vault_role_id=<approle-role-id>
+proxmox_cert_vault_secret_id=<approle-secret-id>
+```
+
+Canary and full-rollout examples:
+
+```bash
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/provision_certificates.yml --limit pve4.example.net
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/provision_certificates.yml --limit proxmox_cert_nodes
+```
+
+Keep `proxmox_cert_vault_secret_id` local and rotate it if it is ever copied into logs, terminals, or scratch files.
+
+## Group structure
 
 Common groups used in this repository:
 
 | Group | Purpose |
 |-------|---------|
 | `dbservers` | Database servers (PostgreSQL, etc.) |
-| `vault` | Vault server cluster |
+| `vault` | Vault server cluster used for delegated bootstrap tasks |
 | `powerdns` | PowerDNS authoritative servers |
 | `powerdns-recurse` | PowerDNS recursive resolvers |
 | `proxmox_nodes` | Proxmox hypervisor nodes |
+| `proxmox_cert_nodes` | Static cert rollout targets for Proxmox API certificates |
+| `proxmox_cert_nodes_cl0` | Cluster-specific Proxmox cert targets with a `cl0` SAN |
+| `proxmox_cert_nodes_cl1` | Cluster-specific Proxmox cert targets with a `cl1` SAN |
 | `synology_nas` | Synology NAS hosts |
 
-## Host Variables
+## Host and group variables
 
-Place host-specific variables in `host_vars/`:
-```
+Place host-specific and group-specific variables under `host_vars/` and `group_vars/` when inventory files become noisy:
+
+```text
 inventory/
-  ├── host_vars/
-  │   ├── vault01.example.com.yml
-  │   ├── pve01.example.com.yml
-  │   └── ...
-  └── group_vars/
-      ├── vault.yml
-      ├── proxmox_nodes.yml
-      └── ...
+├── host_vars/
+│   ├── vault01.example.com.yml
+│   ├── pve01.example.com.yml
+│   └── ...
+└── group_vars/
+    ├── vault.yml
+    ├── proxmox_nodes.yml
+    └── ...
 ```
 
-### Example host_vars (vault01.example.com.yml):
+Example `host_vars/vault01.example.com.yml`:
+
 ```yaml
-# Vault-specific configuration
 vault_ui_cert_agent_token_file: /var/lib/vault-agent/token
 vault_ui_cert_agent_secret_id_file: /etc/vault.d/agent.d/secret_id
 vault_root_token_file: /root/.vault-token
-
-# TLS settings
 vault_skip_verify: false
 vault_addr: "https://{{ inventory_hostname }}:8200"
 ```
 
-## Best Practices
+## Credentials management
 
-1. **Use FQDNs** for hostnames when possible (easier for certificate validation)
-2. **Organize by environment** (production, staging, testing)
-3. **Use Vault** for all secrets (passwords, tokens, keys)
-4. **Document group membership** in comments
-5. **Test inventory** with `ansible-inventory --graph`:
-   ```bash
-   ansible-inventory -i environments/staging.ini --graph
-   ```
+Simple dynamic-inventory environment variables:
+
+```bash
+export PROXMOX_HOST=your-proxmox-host
+export PROXMOX_USER=your-user@pam
+export PROXMOX_TOKEN_ID=your-token-id
+export PROXMOX_TOKEN_SECRET="$(vault read -field=token secret/proxmox_token)"
+```
+
+Example Vault lookup inside playbooks:
+
+```yaml
+vars:
+  proxmox_credentials: "{{ lookup('community.hashi_vault.hashi_vault', 'secret=secret/data/proxmox') }}"
+```
 
 ## Troubleshooting
 
 ### "No hosts matched"
-- Check hostname/IP is correct
-- Verify host is reachable: `ping hostname` or `ssh hostname`
-- Check `ansible_host` override if using complex networking
 
-### Dynamic inventory not working
-- Verify Proxmox credentials in environment variables
-- Check PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_ID/SECRET are set
-- Test Proxmox API with a simple proxmoxer one-liner:
-   ```bash
-   python -c "from proxmoxer import ProxmoxAPI; prox = ProxmoxAPI('your-proxmox-host', user='your-user@pam', token_name='token-id', token_value='token-secret', verify_ssl=True); print(prox.version.get())"
-   ```
-   See: https://github.com/proxmoxer/proxmoxer#usage
+- Check the inventory path you passed to `-i`
+- Verify the host or group name exists with `ansible-inventory --graph`
+- Confirm `ansible_host` is set when the inventory hostname is not directly reachable
+
+### Proxmox dynamic inventory is not working
+
+- Verify `PROXMOX_HOST`, `PROXMOX_USER`, `PROXMOX_TOKEN_ID`, and `PROXMOX_TOKEN_SECRET`
+- Confirm the target Proxmox API certificate is trusted when `validate_certs: true`
+- Test the API directly with proxmoxer:
+
+```bash
+python -c "from proxmoxer import ProxmoxAPI; prox = ProxmoxAPI('your-proxmox-host', user='your-user@pam', token_name='token-id', token_value='token-secret', verify_ssl=True); print(prox.version.get())"
+```
+
+### Proxmox certificate playbook without a `[vault]` host
+
+- Set `proxmox_vault_addr`, `proxmox_cert_vault_role_id`, and `proxmox_cert_vault_secret_id` in inventory
+- Leave `proxmox_vault_skip_verify=false` unless you are deliberately testing an insecure path
+- Bootstrap one node first if the cluster does not yet have a reusable `vault-ca.pem`
 
 ### SSH connection issues
+
 - Verify `ansible_user` matches your SSH user
 - Check SSH keys are installed: `ssh-copy-id -i ~/.ssh/id_ed25519.pub user@host`
-- Enable verbose output: `ansible all -i inventory -vvv -m ping`
+- Increase verbosity when needed: `ansible all -i inventory -vvv -m ping`
 
-## Security Reminders
+## Security reminders
 
-- **Never hardcode passwords** in inventory files
-- **Don't commit actual credentials** - use examples and environment vars instead
-- **Use SSH keys** for authentication (disable password auth)
-- **Rotate credentials regularly**, especially Vault tokens
-- **Review inventory changes** in git diffs - ensure no secrets leak
+- Never hardcode passwords in tracked inventory templates
+- Never commit real credentials, AppRole secret IDs, or private endpoints you do not intend to publish
+- Use SSH keys for authentication and disable password auth where possible
+- Rotate credentials regularly, especially Vault tokens and AppRole secret IDs
+- Review inventory changes in `git diff` before every commit

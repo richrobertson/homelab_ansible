@@ -23,12 +23,13 @@ Canonical paths are organized by function:
 │   ├── netbox/
 │   └── proxmox/
 ├── inventory/
-│   ├── environments/                # canonical static inventories
+│   ├── environments/                # local concrete inventories (gitignored)
 │   │   ├── production.ini
 │   │   └── staging.ini
-│   ├── production.ini               # minimal stub for backward compatibility (see environments/production.ini)
-│   ├── staging.ini                  # minimal stub for backward compatibility (see environments/staging.ini)
-│   └── proxmox.yml                  # dynamic proxmox inventory plugin config
+│   ├── production.ini.example       # tracked template for production inventory
+│   ├── staging.ini.example          # tracked template for staging inventory
+│   ├── proxmox.yml.example          # tracked template for dynamic Proxmox inventory
+│   └── README.md
 ├── playbooks/
 │   └── core/                        # canonical root playbooks
 │       ├── site.yml
@@ -101,10 +102,18 @@ For detailed security practices, threat models, and incident response, see [SECU
 
 ## Getting started
 
-### 1) Activate the local virtual environment
+### 1) Activate your local Ansible environment
 
 ```bash
-source bin/activate
+source .venv/bin/activate
+```
+
+If you do not already have a local environment, create one first:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install ansible-core
 ```
 
 ### 2) Verify Ansible defaults
@@ -158,7 +167,9 @@ Common playbooks:
 - `ceph_object_gw.yml` (Ceph object gateway role application)
 - `rolling_restart.yml` (serial reboot workflow)
 - `provision_certificates.yml` (Vault Agent-managed Proxmox API certificate provisioning and rotation)
-	- set `proxmox_cert_cluster_san` per cluster group (for example `cl0.myrobertson.net` or `cl1.myrobertson.net`)
+  - set `proxmox_cert_cluster_san` per cluster group (for example `cl0.myrobertson.net` or `cl1.myrobertson.net`)
+  - supports either a delegated `[vault]` host bootstrap or inventory-preseeded `proxmox_vault_addr`, `proxmox_cert_vault_role_id`, and `proxmox_cert_vault_secret_id`
+  - can reuse an existing Vault CA from the first targeted Proxmox node when `proxmox_vault_skip_verify=false` and no delegated Vault host is present
 
 ### NetBox bundle
 
@@ -179,12 +190,18 @@ Currently includes domain documentation and a placeholder playbook (`domain.yml`
 
 ## Inventory model
 
-- Static inventories:
-	- `inventory/environments/staging.ini`
-	- `inventory/environments/production.ini`
-- Dynamic Proxmox plugin inventory:
-	- `inventory/proxmox.yml`
-	- `ansible/proxmox/proxmox.yml`
+- Tracked templates:
+  - `inventory/production.ini.example`
+  - `inventory/staging.ini.example`
+  - `inventory/proxmox.yml.example`
+- Local concrete inventories (gitignored):
+  - `inventory/environments/staging.ini`
+  - `inventory/environments/production.ini`
+  - `inventory/proxmox.yml`
+- Dynamic Proxmox plugin configuration shipped with the bundle:
+  - `ansible/proxmox/proxmox.yml`
+
+For inventory details and bootstrap examples, see [inventory/README.md](inventory/README.md).
 
 ## Helper scripts
 

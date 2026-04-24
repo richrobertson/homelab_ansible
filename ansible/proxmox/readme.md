@@ -2,100 +2,113 @@
 
 This directory contains playbooks, roles, and templates for managing Proxmox clusters and related Ceph infrastructure.
 
-- **proxmox.yml**: Inventory configuration for Proxmox nodes, uses the `community.proxmox.proxmox` dynamic inventory plugin (see `inventory/proxmox.yml`)
-- **ceph_admin_portal.yml**: Configure Ceph Dashboard (admin portal) bind settings and admin login credentials
-- **ceph_object_gw.yml**: Deploy Ceph Object Gateway on Proxmox nodes
-- **rolling_restart.yml**: Safely reboot Proxmox nodes one at a time
-- **regular_maintenance.yml**: Apply rolling package updates, cleanup, and reboot only when required (targets `proxmox_nodes` by default; override with `-e proxmox_maintenance_hosts=<group_or_hosts>`)
-- **intel_vpro.yml**: Configure Intel vPro interfaces on Proxmox nodes
-- **provision_certificates.yml**: Configure Vault PKI + Vault Agent automation for Proxmox API certificates
-- **disable_vlan_hw_filtering.yml**: Disable VLAN hardware filtering on Proxmox interfaces and keep it persistent across reboots
+## Main playbooks
 
+- `proxmox.yml`: inventory configuration for Proxmox nodes, using the `community.proxmox.proxmox` dynamic inventory plugin
+- `ceph_admin_portal.yml`: configure Ceph Dashboard bind settings and admin login credentials
+- `ceph_object_gw.yml`: deploy Ceph Object Gateway on Proxmox nodes
+- `rolling_restart.yml`: safely reboot Proxmox nodes one at a time
+- `regular_maintenance.yml`: apply rolling package updates, cleanup, and reboot only when required
+- `intel_vpro.yml`: configure Intel vPro interfaces on Proxmox nodes
+- `provision_certificates.yml`: configure Vault PKI and Vault Agent automation for Proxmox API certificates
+- `disable_vlan_hw_filtering.yml`: disable VLAN hardware filtering on Proxmox interfaces and keep it persistent across reboots
 
-## Roles and Templates
-- **roles/**: Contains only Ansible roles—reusable logic for tasks like Ceph dashboard, object gateway, Intel vPro, SFP28 fabric, and Thunderbolt networking. Each role encapsulates tasks, handlers, and variables for a specific function.
-  - ceph_dashboard
-  - ceph_object_gateway
-  - intel_vpro
-  - sfp28_fabric
-  - thunderbolt_fabric
-  - thunderbolt_network_interfaces
-- **templates/**: Contains only Jinja2 templates for generating network and udev configuration files dynamically during playbook runs. No roles or playbooks should be placed here.
+## Roles and templates
 
-## Handlers
-The `handlers/` directory is for custom handlers (e.g., service restarts or notifications). See the sample handler in `handlers/restart_service.yml` for a template you can copy and adapt.
-
-## Requirements
-- `requirements.yml` lists required Ansible collections (e.g., ceph.automation)
+- `roles/`: reusable automation for Ceph dashboard, object gateway, Intel vPro, SFP28 fabric, and Thunderbolt networking
+- `templates/`: Jinja2 templates used by the playbooks and roles in this bundle
+- `handlers/`: custom handlers for service restarts and similar notifications
 
 ## Usage
-1. Activate your Python/Ansible environment
-2. Run playbooks with:
-   ```sh
-  # Recommended: store dashboard credentials in an Ansible Vault vars file.
-  ansible-playbook -i ../../inventory/proxmox.yml ceph_admin_portal.yml --extra-vars @../../inventory/ceph_dashboard_credentials.vault.yml --ask-vault-pass
-   ansible-playbook -i ../../inventory/proxmox.yml ceph_object_gw.yml
-   ansible-playbook -i ../../inventory/proxmox.yml rolling_restart.yml
-   ansible-playbook -i ../../inventory/proxmox.yml regular_maintenance.yml
-   ansible-playbook -i ../../inventory/proxmox.yml intel_vpro.yml
-   ansible-playbook -i ../../inventory/proxmox.yml provision_certificates.yml
-   ansible-playbook -i ../../inventory/proxmox.yml disable_vlan_hw_filtering.yml
-   ```
-   (Adjust the path to `inventory/proxmox.yml` as needed for your working directory.)
-3. Adjust inventory and variables as needed
+
+Run from the repository root unless noted otherwise:
+
+```sh
+ansible-playbook -i inventory/proxmox.yml ansible/proxmox/ceph_admin_portal.yml --extra-vars @inventory/ceph_dashboard_credentials.vault.yml --ask-vault-pass
+ansible-playbook -i inventory/proxmox.yml ansible/proxmox/ceph_object_gw.yml
+ansible-playbook -i inventory/proxmox.yml ansible/proxmox/rolling_restart.yml
+ansible-playbook -i inventory/proxmox.yml ansible/proxmox/regular_maintenance.yml
+ansible-playbook -i inventory/proxmox.yml ansible/proxmox/intel_vpro.yml
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/provision_certificates.yml --limit proxmox_cert_nodes
+ansible-playbook -i inventory/proxmox.yml ansible/proxmox/disable_vlan_hw_filtering.yml
+```
+
+Adjust the inventory path to match the environment you are targeting.
 
 ### Core site tag usage
+
 When running the core orchestration playbook, certificate automation can be targeted or skipped with tags:
 
 - Run only certificate automation:
-  ```sh
-  ansible-playbook playbooks/core/site.yml --tags certs
-  ```
+
+```sh
+ansible-playbook playbooks/core/site.yml --tags certs
+```
+
 - Skip certificate automation:
-  ```sh
-  ansible-playbook playbooks/core/site.yml --skip-tags certs
-  ```
+
+```sh
+ansible-playbook playbooks/core/site.yml --skip-tags certs
+```
+
+## Proxmox certificate automation
+
+`provision_certificates.yml` manages Proxmox API certificates with Vault Agent and applies nodes one at a time with `serial: 1`.
+
+Required node-side prerequisites:
+
+- `vault` CLI installed on each Proxmox node
+- permission to restart `pveproxy` after certificate updates
+- `proxmox_cert_cluster_san` set per cluster group so each node receives only the correct VIP SAN
+
+Supported bootstrap modes:
+
+- Delegated Vault bootstrap: define a `[vault]` group, keep `/root/.vault-token` on that Vault host, and let the playbook fetch or mint the AppRole inputs it needs.
+- Inventory-preseeded bootstrap: provide `proxmox_vault_addr`, `proxmox_cert_vault_role_id`, and `proxmox_cert_vault_secret_id` directly in inventory when no delegated Vault host is part of the run.
+
+TLS trust behavior:
+
+- When `proxmox_vault_skip_verify=false`, the playbook installs `vault-ca.pem` for Vault Agent trust.
+- If no delegated Vault host is present, the playbook can reuse an existing `vault-ca.pem` from the first targeted Proxmox node.
+- If the cluster has never been bootstrapped before, do a single-node canary first so later runs have CA material to reuse.
+
+The certificate apply helper writes into `/etc/pve/local` with `cp` instead of `install`. That is intentional: `/etc/pve` is backed by `pmxcfs`, and metadata-setting `install(1)` writes can fail there with `Operation not permitted`.
+
+### Suggested rollout
+
+1. Add or verify a target group such as `[proxmox_cert_nodes_cl0]` in `inventory/environments/production.ini`, and set `proxmox_cert_cluster_san` for that group.
+2. Run a canary node:
+
+```sh
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/provision_certificates.yml --limit pve4.example.net
+```
+
+3. Verify the served certificate:
+
+```sh
+openssl s_client -connect pve4.example.net:8006 -servername pve4.example.net </dev/null 2>/dev/null | openssl x509 -noout -subject -issuer -dates
+```
+
+4. Roll out to the rest of the cluster:
+
+```sh
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/provision_certificates.yml --limit proxmox_cert_nodes_cl0
+```
+
+5. Validate the dynamic inventory with the trusted CA bundle if needed:
+
+```sh
+REQUESTS_CA_BUNDLE=inventory/certs/proxmox-vault-ca.pem ansible-inventory -i inventory/proxmox.yml --graph
+```
 
 ## Notes
-- `inventory/proxmox.yml` is a dynamic inventory file using the `community.proxmox.proxmox` plugin. It is not a static inventory or a custom plugin script.
-- `inventory/proxmox.yml` and `ansible/proxmox/proxmox.yml` now use `validate_certs: true` and expect trusted Proxmox API certificates.
-- `ansible.cfg` in this directory sets inventory and SSH options for Proxmox
-- `handlers/restart_service.yml` is an example handler you can copy and adapt
-- See top-level README for environment setup and global usage
+
+- `inventory/proxmox.yml` is a dynamic inventory file using the `community.proxmox.proxmox` plugin, not a custom script.
+- `inventory/proxmox.yml` and `ansible/proxmox/proxmox.yml` use `validate_certs: true` and expect trusted Proxmox API certificates.
+- `ansible.cfg` in this directory sets inventory and SSH options specific to Proxmox automation.
+- See the top-level [README](../../README.md) for repository-wide setup and [inventory/README.md](../../inventory/README.md) for static inventory examples.
 
 ## Runbooks
-- Operational Proxmox runbooks are in `runbooks/proxmox/` at the repository root.
-- Start with: `runbooks/proxmox/README.md`
-- Includes procedures for:
-  - SFP28 interface cutover workflow
-  - Ceph dashboard bind recovery after network changes
-  - HA rule recovery and `ha-manager` stabilization
-  - CephFS storage activation/mountpoint recovery
 
-## Proxmox certificate automation prerequisites
-- Vault must expose a reachable API endpoint for Proxmox nodes (default: `https://vault.myrobertson.net:8200`).
-- Set `proxmox_cert_cluster_san` per cluster group so each node gets only its cluster VIP SAN (for example `cl0.myrobertson.net` for cl0 nodes and `cl1.myrobertson.net` for cl1 nodes).
-- A `vault` host group must exist and include the Vault server used to manage PKI/AppRole.
-- `/root/.vault-token` must exist on the Vault host for role/policy/bootstrap tasks.
-- `vault` CLI must be installed on both the Vault host and each Proxmox node.
-- Proxmox nodes must be able to restart `pveproxy` after certificate updates.
-- Control-node trust for Proxmox API validation uses a Vault CA bundle exported by `provision_certificates.yml` to `inventory/certs/proxmox-vault-ca.pem`.
-
-## Rolling out certificate automation
-Suggested phased rollout:
-
-1. Add/verify at least one host in `[vault]` inside `inventory/environments/production.ini`.
-2. Add nodes to `[proxmox_cert_nodes_cl0]` and `[proxmox_cert_nodes_cl1]` as needed; each child group sets its own `proxmox_cert_cluster_san`.
-3. Run a canary bootstrap rollout (static inventory only):
-   ```sh
-   ansible-playbook -i ../../inventory/environments/production.ini provision_certificates.yml --limit <canary-node-host-or-ip>
-   ```
-  (`--limit` can be an inventory hostname, group, or host IP present in `production.ini`.)
-4. Verify dynamic Proxmox inventory can be queried with TLS validation:
-   ```sh
-  REQUESTS_CA_BUNDLE=../../inventory/certs/proxmox-vault-ca.pem ansible-inventory -i ../../inventory/proxmox.yml --graph
-   ```
-5. Roll out to all Proxmox nodes using dynamic inventory (the playbook applies nodes one at a time via `serial: 1`):
-   ```sh
-  REQUESTS_CA_BUNDLE=../../inventory/certs/proxmox-vault-ca.pem ansible-playbook -i ../../inventory/environments/production.ini -i ../../inventory/proxmox.yml provision_certificates.yml
-   ```
+- Operational Proxmox runbooks live under `runbooks/proxmox/` at the repository root.
+- Start with [runbooks/proxmox/README.md](../../runbooks/proxmox/README.md).
