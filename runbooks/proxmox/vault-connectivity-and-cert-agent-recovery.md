@@ -6,6 +6,8 @@
   - `error authenticating ... dial tcp <vault_ip>:8200: connect: no route to host`
 - Proxmox nodes cannot reach Vault API endpoint (`https://vault.myrobertson.net:8200`).
 - Certificate renewals stop progressing.
+- Vault Agent exits before auth because the trust bundle is malformed:
+  - `Error loading CA File: Couldn't parse PEM in: /etc/vault-agent.d/vault-ca.pem`
 
 ## Typical root cause in this environment
 - Vault runs as VM `119` (`vault`) on `pve3`.
@@ -42,6 +44,12 @@ ssh root@192.168.1.241 'qm guest cmd 119 network-get-interfaces'
 ```
 If guest only shows `lo` with IP and no IPv4 on `ens18`, Vault VM networking is not up.
 
+### 5) Check the Vault CA PEM on a failing Proxmox node
+```bash
+ssh root@192.168.1.241 'openssl x509 -in /etc/vault-agent.d/vault-ca.pem -noout -subject -issuer -dates'
+```
+If this fails with `Could not read certificate`, the agent cannot parse its CA trust file.
+
 ## Recovery procedure
 ### A) Restore vmbr1 VLAN trunk allowance where missing
 On each affected node (`pve3`, `pve4`):
@@ -72,6 +80,10 @@ ping -c 2 -W 1 192.168.7.128 >/dev/null && echo vault-ping-ok || echo vault-ping
 ```
 
 ### C) Re-establish cert-agent authentication
+If the CA PEM is malformed, rerun the certificate playbook after confirming the `[vault]`
+inventory group can reach a Vault host with `/root/.vault-token`. The playbook validates
+the cached PEM and replaces it from Vault when it is not parseable.
+
 ```bash
 for n in 192.168.1.241 192.168.1.242 192.168.1.243; do
   ssh root@$n 'systemctl restart vault-agent-proxmox-pveproxy; sleep 2; systemctl is-active vault-agent-proxmox-pveproxy; journalctl -u vault-agent-proxmox-pveproxy -n 20 --no-pager | grep -E "authentication successful|error authenticating" || true'

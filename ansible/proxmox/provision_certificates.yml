@@ -356,6 +356,29 @@
         - not (proxmox_vault_skip_verify_resolved | bool)
       run_once: true
 
+    - name: Validate existing Vault CA certificate on first Proxmox node
+      ansible.builtin.shell: |
+        set -euo pipefail
+        openssl x509 -in "{{ proxmox_cert_vault_ca_file }}" -noout
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ ansible_play_hosts_all[0] }}"
+      become: true
+      register: proxmox_existing_vault_ca_validation
+      changed_when: false
+      failed_when: false
+      when:
+        - not (proxmox_vault_skip_verify_resolved | bool)
+        - proxmox_existing_vault_ca_file_stat.stat.exists | default(false)
+      run_once: true
+
+    - name: Resolve whether existing Vault CA certificate can be reused
+      ansible.builtin.set_fact:
+        proxmox_reuse_existing_vault_ca: "{{ (proxmox_existing_vault_ca_validation.rc | default(1)) == 0 }}"
+      when:
+        - not (proxmox_vault_skip_verify_resolved | bool)
+      run_once: true
+
     - name: Read existing Vault CA certificate from first Proxmox node
       ansible.builtin.slurp:
         path: "{{ proxmox_cert_vault_ca_file }}"
@@ -364,7 +387,21 @@
       register: proxmox_existing_vault_ca_cert_for_nodes
       when:
         - not (proxmox_vault_skip_verify_resolved | bool)
-        - proxmox_existing_vault_ca_file_stat.stat.exists | default(false)
+        - proxmox_reuse_existing_vault_ca | default(false)
+      run_once: true
+
+    - name: Read Vault CA certificate from public PKI endpoint for Proxmox nodes
+      ansible.builtin.shell: |
+        set -euo pipefail
+        curl -k -fsS "{{ proxmox_vault_addr_resolved | regex_replace('/+$', '') }}/v1/{{ proxmox_pki_mount }}/ca/pem"
+      args:
+        executable: /bin/bash
+      register: proxmox_public_vault_ca_cert_for_nodes
+      changed_when: false
+      when:
+        - not (proxmox_vault_skip_verify_resolved | bool)
+        - not (hostvars[ansible_play_hosts_all[0]].proxmox_reuse_existing_vault_ca | default(false))
+        - groups.get(proxmox_vault_group, []) | length == 0
       run_once: true
 
     - name: Validate vault group exists for delegated CA fetch
@@ -377,7 +414,10 @@
           but proxmox_vault_skip_verify=false requires delegated Vault CA fetch.
       when:
         - not (proxmox_vault_skip_verify_resolved | bool)
-        - hostvars[ansible_play_hosts_all[0]].proxmox_existing_vault_ca_cert_for_nodes is not defined
+        - not (hostvars[ansible_play_hosts_all[0]].proxmox_reuse_existing_vault_ca | default(false))
+        - >-
+          proxmox_public_vault_ca_cert_for_nodes is not defined
+          or proxmox_public_vault_ca_cert_for_nodes.skipped | default(false)
 
     - name: Check delegated Vault root token file exists for delegated CA fetch
       ansible.builtin.stat:
@@ -387,7 +427,10 @@
       register: proxmox_vault_delegate_token_stat_for_ca_fetch
       when:
         - not (proxmox_vault_skip_verify_resolved | bool)
-        - hostvars[ansible_play_hosts_all[0]].proxmox_existing_vault_ca_cert_for_nodes is not defined
+        - not (hostvars[ansible_play_hosts_all[0]].proxmox_reuse_existing_vault_ca | default(false))
+        - >-
+          proxmox_public_vault_ca_cert_for_nodes is not defined
+          or proxmox_public_vault_ca_cert_for_nodes.skipped | default(false)
       run_once: true
 
     - name: Fail when delegated Vault root token file is missing for delegated CA fetch
@@ -398,7 +441,10 @@
       when:
         - not (proxmox_vault_skip_verify_resolved | bool)
         - not (proxmox_vault_delegate_token_stat_for_ca_fetch.stat.exists | default(false))
-        - hostvars[ansible_play_hosts_all[0]].proxmox_existing_vault_ca_cert_for_nodes is not defined
+        - not (hostvars[ansible_play_hosts_all[0]].proxmox_reuse_existing_vault_ca | default(false))
+        - >-
+          proxmox_public_vault_ca_cert_for_nodes is not defined
+          or proxmox_public_vault_ca_cert_for_nodes.skipped | default(false)
       run_once: true
 
     - name: Read Vault CA certificate for Proxmox nodes
@@ -416,7 +462,75 @@
       changed_when: false
       when:
         - not (proxmox_vault_skip_verify_resolved | bool)
-        - hostvars[ansible_play_hosts_all[0]].proxmox_existing_vault_ca_cert_for_nodes is not defined
+        - not (hostvars[ansible_play_hosts_all[0]].proxmox_reuse_existing_vault_ca | default(false))
+        - >-
+          proxmox_public_vault_ca_cert_for_nodes is not defined
+          or proxmox_public_vault_ca_cert_for_nodes.skipped | default(false)
+      run_once: true
+
+    - name: Validate fetched Vault CA certificate for Proxmox nodes
+      ansible.builtin.shell: |
+        set -euo pipefail
+        openssl x509 -noout
+      args:
+        executable: /bin/bash
+        stdin: >-
+          {{
+            proxmox_public_vault_ca_cert_for_nodes.stdout
+            if (
+              proxmox_public_vault_ca_cert_for_nodes is defined
+              and not (proxmox_public_vault_ca_cert_for_nodes.skipped | default(false))
+            )
+            else proxmox_vault_ca_cert_for_nodes.stdout
+          }}
+      register: proxmox_fetched_vault_ca_validation
+      changed_when: false
+      when:
+        - not (proxmox_vault_skip_verify_resolved | bool)
+        - >-
+          (
+            proxmox_public_vault_ca_cert_for_nodes is defined
+            and not (proxmox_public_vault_ca_cert_for_nodes.skipped | default(false))
+          )
+          or (
+            proxmox_vault_ca_cert_for_nodes is defined
+            and not (proxmox_vault_ca_cert_for_nodes.skipped | default(false))
+          )
+      run_once: true
+
+    - name: Resolve Vault CA certificate content for Proxmox nodes
+      ansible.builtin.set_fact:
+        proxmox_cert_vault_ca_content: >-
+          {{
+            (
+              proxmox_public_vault_ca_cert_for_nodes.stdout
+              if (
+                proxmox_public_vault_ca_cert_for_nodes is defined
+                and not (proxmox_public_vault_ca_cert_for_nodes.skipped | default(false))
+              )
+              else (
+                proxmox_vault_ca_cert_for_nodes.stdout
+                if (
+                  proxmox_vault_ca_cert_for_nodes is defined
+                  and not (proxmox_vault_ca_cert_for_nodes.skipped | default(false))
+                )
+                else (proxmox_existing_vault_ca_cert_for_nodes.content | b64decode)
+              )
+            )
+            | trim
+          }}
+      when:
+        - not (proxmox_vault_skip_verify_resolved | bool)
+        - >-
+          (
+            proxmox_public_vault_ca_cert_for_nodes is defined
+            and not (proxmox_public_vault_ca_cert_for_nodes.skipped | default(false))
+          )
+          or (
+            proxmox_vault_ca_cert_for_nodes is defined
+            and not (proxmox_vault_ca_cert_for_nodes.skipped | default(false))
+          )
+          or proxmox_existing_vault_ca_cert_for_nodes is defined
       run_once: true
 
   tasks:
@@ -546,26 +660,13 @@
     - name: Install Vault CA certificate for vault-agent trust
       ansible.builtin.copy:
         dest: "{{ proxmox_cert_vault_ca_file }}"
-        content: >-
-          {{
-            (
-              (
-                hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes.stdout
-                if hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes.stdout is defined
-                else (hostvars[ansible_play_hosts_all[0]].proxmox_existing_vault_ca_cert_for_nodes.content | b64decode)
-              )
-              | regex_replace('\\\\n\\s*$', '')
-              | trim
-            ) ~ '\n'
-          }}
+        content: "{{ hostvars[ansible_play_hosts_all[0]].proxmox_cert_vault_ca_content | trim }}\n"
         owner: root
         group: root
         mode: "0644"
       when:
         - not (proxmox_vault_skip_verify_resolved | bool)
-        - >-
-          hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes is defined
-          or hostvars[ansible_play_hosts_all[0]].proxmox_existing_vault_ca_cert_for_nodes is defined
+        - hostvars[ansible_play_hosts_all[0]].proxmox_cert_vault_ca_content is defined
 
     - name: Fail if Vault CA is required but unavailable
       ansible.builtin.fail:
@@ -576,8 +677,7 @@
           only for test scenarios.
       when:
         - not (proxmox_vault_skip_verify_resolved | bool)
-        - hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes is not defined
-        - hostvars[ansible_play_hosts_all[0]].proxmox_existing_vault_ca_cert_for_nodes is not defined
+        - hostvars[ansible_play_hosts_all[0]].proxmox_cert_vault_ca_content is not defined
 
     - name: Write Proxmox certificate apply script
       ansible.builtin.copy:
