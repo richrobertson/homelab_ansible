@@ -9,6 +9,7 @@ This directory contains playbooks, roles, and templates for managing Proxmox clu
 - `ceph_object_gw.yml`: deploy Ceph Object Gateway on Proxmox nodes
 - `rolling_restart.yml`: safely reboot Proxmox nodes one at a time
 - `regular_maintenance.yml`: apply rolling package updates, cleanup, and reboot only when required
+- `cpu_thermal_policy.yml`: persist the Proxmox CPU thermal policy across reboots
 - `intel_vpro.yml`: configure Intel vPro interfaces on Proxmox nodes
 - `provision_certificates.yml`: configure Vault PKI and Vault Agent automation for Proxmox API certificates
 - `disable_vlan_hw_filtering.yml`: disable VLAN hardware filtering on Proxmox interfaces and keep it persistent across reboots
@@ -28,6 +29,7 @@ ansible-playbook -i inventory/proxmox.yml ansible/proxmox/ceph_admin_portal.yml 
 ansible-playbook -i inventory/proxmox.yml ansible/proxmox/ceph_object_gw.yml
 ansible-playbook -i inventory/proxmox.yml ansible/proxmox/rolling_restart.yml
 ansible-playbook -i inventory/proxmox.yml ansible/proxmox/regular_maintenance.yml
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/cpu_thermal_policy.yml --limit proxmox_nodes
 ansible-playbook -i inventory/proxmox.yml ansible/proxmox/intel_vpro.yml
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/provision_certificates.yml --limit proxmox_cert_nodes
 ansible-playbook -i inventory/proxmox.yml ansible/proxmox/disable_vlan_hw_filtering.yml
@@ -73,6 +75,16 @@ TLS trust behavior:
 - If the cluster has never been bootstrapped before, do a single-node canary first so later runs have CA material to reuse.
 
 The certificate apply helper writes into `/etc/pve/local` with `cp` instead of `install`. That is intentional: `/etc/pve` is backed by `pmxcfs`, and metadata-setting `install(1)` writes can fail there with `Operation not permitted`.
+
+## Proxmox CPU thermal policy
+
+`cpu_thermal_policy.yml` installs and enables `proxmox-cpu-thermal-policy.service` on each targeted Proxmox node. The service applies `intel_pstate/no_turbo=1` at boot so identical hosts use the same thermal policy and avoid sustained package temperatures above the warning threshold.
+
+Run it against all identical Proxmox nodes together:
+
+```sh
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/cpu_thermal_policy.yml --limit proxmox_nodes
+```
 
 ### Suggested rollout
 

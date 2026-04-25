@@ -1,0 +1,62 @@
+---
+- name: Configure Proxmox CPU thermal policy
+  hosts: "{{ proxmox_thermal_policy_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+
+  vars:
+    proxmox_disable_cpu_turbo: true
+    proxmox_cpu_thermal_policy_service: proxmox-cpu-thermal-policy.service
+    proxmox_intel_pstate_no_turbo_path: /sys/devices/system/cpu/intel_pstate/no_turbo
+
+  tasks:
+    - name: Check whether intel_pstate no_turbo control exists
+      ansible.builtin.stat:
+        path: "{{ proxmox_intel_pstate_no_turbo_path }}"
+      register: proxmox_intel_pstate_no_turbo
+
+    - name: Write Proxmox CPU thermal policy systemd unit
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ proxmox_cpu_thermal_policy_service }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Proxmox CPU thermal policy
+          Documentation=man:systemd.service(5)
+          After=multi-user.target
+          ConditionPathExists={{ proxmox_intel_pstate_no_turbo_path }}
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/sh -c 'echo {{ proxmox_disable_cpu_turbo | ternary("1", "0") }} > {{ proxmox_intel_pstate_no_turbo_path }}'
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+      when: proxmox_intel_pstate_no_turbo.stat.exists | default(false)
+
+    - name: Enable and apply Proxmox CPU thermal policy
+      ansible.builtin.systemd:
+        name: "{{ proxmox_cpu_thermal_policy_service }}"
+        enabled: true
+        state: restarted
+        daemon_reload: true
+      when: proxmox_intel_pstate_no_turbo.stat.exists | default(false)
+
+    - name: Read active intel_pstate no_turbo value
+      ansible.builtin.command:
+        cmd: "cat {{ proxmox_intel_pstate_no_turbo_path }}"
+      register: proxmox_intel_pstate_no_turbo_value
+      changed_when: false
+      when: proxmox_intel_pstate_no_turbo.stat.exists | default(false)
+
+    - name: Report Proxmox CPU thermal policy
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} intel_pstate no_turbo={{
+            proxmox_intel_pstate_no_turbo_value.stdout | default('unavailable')
+          }}
