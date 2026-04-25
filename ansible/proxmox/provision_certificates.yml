@@ -549,11 +549,15 @@
         content: >-
           {{
             (
-              hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes.stdout
-              if hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes.stdout is defined
-              else (hostvars[ansible_play_hosts_all[0]].proxmox_existing_vault_ca_cert_for_nodes.content | b64decode)
-            ) | trim
-          }}\n
+              (
+                hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes.stdout
+                if hostvars[ansible_play_hosts_all[0]].proxmox_vault_ca_cert_for_nodes.stdout is defined
+                else (hostvars[ansible_play_hosts_all[0]].proxmox_existing_vault_ca_cert_for_nodes.content | b64decode)
+              )
+              | regex_replace('\\\\n\\s*$', '')
+              | trim
+            ) ~ '\n'
+          }}
         owner: root
         group: root
         mode: "0644"
