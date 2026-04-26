@@ -174,14 +174,14 @@
   ansible.builtin.shell: |
     ip -o addr show dev lo |
       awk '$4 ~ /^10\.0\.0\.8[0-9]+\/32$/ && $4 != "{{ thunderbolt_loopback_ipv4 }}/32" {print $4}' |
-      xargs -r -n1 ip addr del dev lo
+      xargs -r -I{} ip addr del {} dev lo
   changed_when: false
 
 - name: Remove stale Thunderbolt IPv6 loopbacks
   ansible.builtin.shell: |
     ip -o -6 addr show dev lo |
       awk '$4 ~ /^fc00::8[0-9]+\/128$/ && $4 != "{{ thunderbolt_loopback_ipv6 }}/128" {print $4}' |
-      xargs -r -n1 ip -6 addr del dev lo
+      xargs -r -I{} ip -6 addr del {} dev lo
   changed_when: false
 
 - name: Verify Thunderbolt interfaces are up with expected MTU
