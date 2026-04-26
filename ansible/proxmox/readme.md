@@ -19,6 +19,7 @@ This directory contains playbooks, roles, and templates for managing Proxmox clu
 - `pbs_config_export_to_vault.yml`: archive PBS configuration into Vault for disaster recovery
 - `pbs_config_restore_from_vault.yml`: stage or apply a PBS configuration archive from Vault onto a replacement PBS VM
 - `proxmox_transport_metrics.yml`: export Proxmox migration, replication, backup storage route, and Ceph transport metrics through node-exporter textfile collection
+- `pbs_guest_agent_freeze_audit.yml`: audit PBS-backed QEMU VMs for Proxmox guest-agent enablement, guest-agent responsiveness, and filesystem freeze/thaw readiness
 
 ## Roles and templates
 
@@ -44,6 +45,7 @@ ansible-playbook -i inventory/environments/production.ini ansible/proxmox/ceph_t
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_thunderbolt_proxy.yml
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_config_export_to_vault.yml -e pbs_config_source_hosts=pbs.myrobertson.net
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_config_restore_from_vault.yml -e pbs_config_restore_hosts=pbs-restore.myrobertson.net
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_guest_agent_freeze_audit.yml
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/proxmox_transport_metrics.yml
 ```
 

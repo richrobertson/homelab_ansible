@@ -218,6 +218,56 @@ jq -r '
   write_metric "proxmox_backup_restore_last_task_timestamp_seconds{node=\"$(escape_label "$NODE")\",operation=\"$(escape_label "$operation")\",status=\"$(escape_label "$status")\"} $ts"
 done
 
+write_metric '# HELP proxmox_backup_guest_agent_freeze_tasks_24h Proxmox QEMU VM backup tasks over the last 24 hours by guest-agent filesystem freeze status.'
+write_metric '# TYPE proxmox_backup_guest_agent_freeze_tasks_24h gauge'
+declare -A backup_freeze_counts=(
+  ["used"]=0
+  ["missing"]=0
+  ["failed"]=0
+  ["skipped_non_qemu"]=0
+)
+
+while IFS= read -r task_row; do
+  [ -n "$task_row" ] || continue
+  task_upid="$(jq -r '.upid // ""' <<<"$task_row")"
+  guest_id="$(jq -r '.id // ""' <<<"$task_row")"
+  task_status="$(jq -r '.status // ""' <<<"$task_row")"
+  task_starttime="$(jq -r '.starttime // 0' <<<"$task_row")"
+  [ -n "$task_upid" ] || continue
+  [[ "$guest_id" =~ ^[0-9]+$ ]] || continue
+
+  guest_type="unknown"
+  if qm config "$guest_id" >/dev/null 2>&1; then
+    guest_type="qemu"
+  elif pct config "$guest_id" >/dev/null 2>&1; then
+    guest_type="lxc"
+  fi
+
+  freeze_status="skipped_non_qemu"
+  if [ "$guest_type" = "qemu" ]; then
+    task_log="$(pvesh get "/nodes/${NODE}/tasks/${task_upid}/log" --output-format json 2>/dev/null | jq -r '.[].t' || true)"
+    if grep -q "issuing guest-agent 'fs-freeze' command" <<<"$task_log"; then
+      freeze_status="used"
+    elif [ "$task_status" = "OK" ]; then
+      freeze_status="missing"
+    else
+      freeze_status="failed"
+    fi
+  fi
+
+  backup_freeze_counts["$freeze_status"]="$((backup_freeze_counts["$freeze_status"] + 1))"
+  write_metric "proxmox_backup_guest_agent_freeze_last_task_info{node=\"$(escape_label "$NODE")\",vmid=\"$(escape_label "$guest_id")\",guest_type=\"$(escape_label "$guest_type")\",freeze_status=\"$(escape_label "$freeze_status")\",task_status=\"$(escape_label "$task_status")\",upid=\"$(escape_label "$task_upid")\"} $task_starttime"
+done < <(jq -r --argjson window_start "$window_start" '
+  .[]
+  | select(.type == "vzdump" and (.starttime // 0) >= $window_start)
+  | {upid, id, status, starttime}
+  | @json
+' <<<"$TASKS_JSON")
+
+for freeze_status in used missing failed skipped_non_qemu; do
+  write_metric "proxmox_backup_guest_agent_freeze_tasks_24h{node=\"$(escape_label "$NODE")\",freeze_status=\"$freeze_status\"} ${backup_freeze_counts["$freeze_status"]}"
+done
+
 write_metric '# HELP proxmox_migration_last_task_timestamp_seconds Last Proxmox migration task start timestamp by status.'
 write_metric '# TYPE proxmox_migration_last_task_timestamp_seconds gauge'
 jq -r '

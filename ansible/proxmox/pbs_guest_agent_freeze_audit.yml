@@ -1,0 +1,116 @@
+---
+- name: Audit and remediate Proxmox guest-agent filesystem freeze readiness
+  hosts: "{{ proxmox_guest_agent_audit_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    proxmox_guest_agent_backup_job_id: non-k8s-r2-encrypted-nightly
+    proxmox_guest_agent_expected_vmids:
+      - 1001 # dns-01
+      - 1002 # bdc
+      - 101  # Rhonda
+      - 112  # janice
+      - 129  # datacenter-mgr
+      - 137  # netbox LXC, qemu guest-agent exempt
+      - 200  # subdb1
+      - 202  # subns
+      - 208  # ns1
+    proxmox_guest_agent_remediate: true
+    proxmox_guest_agent_test_freeze: true
+    proxmox_guest_agent_fail_on_error: true
+
+  tasks:
+    - name: Audit local PBS backup guests for guest-agent freeze readiness
+      ansible.builtin.shell: |
+        set -euo pipefail
+        changed=0
+        failures=0
+        expected_vmids="{{ proxmox_guest_agent_expected_vmids | join(' ') }}"
+
+        printf 'vmid,type,node,status,agent_config,agent_ping,fsfreeze,remediation\n'
+        for vmid in $expected_vmids; do
+          if qm config "$vmid" >/dev/null 2>&1; then
+            guest_type=qemu
+          elif pct config "$vmid" >/dev/null 2>&1; then
+            guest_type=lxc
+          else
+            continue
+          fi
+
+          guest_status=unknown
+          agent_config=not_applicable
+          agent_ping=not_applicable
+          fsfreeze=not_applicable
+          remediation=none
+
+          if [ "$guest_type" = "lxc" ]; then
+            guest_status="$(pct status "$vmid" 2>/dev/null | awk '{print $2}')"
+            printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$vmid" "$guest_type" "$(hostname -s)" "$guest_status" "$agent_config" "$agent_ping" "$fsfreeze" "$remediation"
+            continue
+          fi
+
+          guest_status="$(qm status "$vmid" 2>/dev/null | awk '{print $2}')"
+          if qm config "$vmid" | awk -F: '$1 == "agent" && $2 ~ /enabled=1|^ *1/ { found=1 } END { exit found ? 0 : 1 }'; then
+            agent_config=enabled
+          else
+            agent_config=disabled
+            if [ "{{ proxmox_guest_agent_remediate | bool | lower }}" = "true" ]; then
+              qm set "$vmid" --agent enabled=1,fstrim_cloned_disks=1 >/dev/null
+              changed=1
+              remediation=enabled_proxmox_agent
+              agent_config=enabled
+            fi
+          fi
+
+          if [ "$guest_status" != "running" ]; then
+            agent_ping=skipped_not_running
+            fsfreeze=skipped_not_running
+            printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$vmid" "$guest_type" "$(hostname -s)" "$guest_status" "$agent_config" "$agent_ping" "$fsfreeze" "$remediation"
+            continue
+          fi
+
+          if qm agent "$vmid" ping >/dev/null 2>&1; then
+            agent_ping=ok
+          else
+            agent_ping=failed
+            fsfreeze=skipped_agent_unavailable
+            failures=$((failures + 1))
+            printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$vmid" "$guest_type" "$(hostname -s)" "$guest_status" "$agent_config" "$agent_ping" "$fsfreeze" "$remediation"
+            continue
+          fi
+
+          if [ "{{ proxmox_guest_agent_test_freeze | bool | lower }}" = "true" ]; then
+            if qm guest cmd "$vmid" fsfreeze-freeze >/dev/null 2>&1; then
+              if qm guest cmd "$vmid" fsfreeze-thaw >/dev/null 2>&1; then
+                fsfreeze=ok
+              else
+                fsfreeze=thaw_failed
+                failures=$((failures + 1))
+              fi
+            else
+              fsfreeze=freeze_failed
+              qm guest cmd "$vmid" fsfreeze-thaw >/dev/null 2>&1 || true
+              failures=$((failures + 1))
+            fi
+          else
+            fsfreeze=not_tested
+          fi
+
+          printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$vmid" "$guest_type" "$(hostname -s)" "$guest_status" "$agent_config" "$agent_ping" "$fsfreeze" "$remediation"
+        done
+
+        echo "changed=$changed"
+        echo "failures=$failures"
+        if [ "$failures" -gt 0 ] && [ "{{ proxmox_guest_agent_fail_on_error | bool | lower }}" = "true" ]; then
+          exit 2
+        fi
+      args:
+        executable: /bin/bash
+      register: proxmox_guest_agent_audit
+      changed_when: "'changed=1' in proxmox_guest_agent_audit.stdout"
+      failed_when: proxmox_guest_agent_audit.rc != 0
+
+    - name: Report local PBS guest-agent freeze readiness
+      ansible.builtin.debug:
+        var: proxmox_guest_agent_audit.stdout_lines
