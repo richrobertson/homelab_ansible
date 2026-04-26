@@ -30,7 +30,7 @@ PBS S3 datastore support is currently a technology preview. Keep the Scooter dat
 - Current datastore status:
   - `store1` is restored in PBS config but unavailable until the Scooter-backed datastore disk/path is attached.
   - `pbs-s3` is restored in PBS config and should continue to use the existing AWS S3 endpoint `aws-homelab-pbs` with bucket `myrobertson-homelab-pbs`.
-  - `pbs-s3` is currently blocked by an empty replacement cache path at `/mnt/datastore/pbs-s3-cache`; restore or refresh the S3 cache metadata before expecting Proxmox storage health to turn active.
+  - `pbs-s3` is active after rebuilding the replacement cache path's `.chunks` shard tree under `/mnt/datastore/pbs-s3-cache`.
   - The Backblaze B2 bucket `myrobertson-pbs` is for a new additional datastore, not a replacement for `pbs-s3`.
 - Thunderbolt host loopbacks:
   - pve3: `10.0.0.83/32`
@@ -141,6 +141,37 @@ proxmox-backup-manager datastore list
 ```
 
 The local cache path is not the full datastore. It is a required persistent cache used by PBS to reduce backend API calls and improve performance.
+
+## Rebuild An Existing S3 Datastore Cache
+
+When restoring an S3-backed PBS datastore onto a fresh VM, the datastore configuration and S3 credentials can be correct while the local cache path is empty. PBS expects the local cache to contain the `.chunks` directory and all 65,536 shard directories. If those are missing, Proxmox reports errors like:
+
+```text
+unable to open chunk store at "/mnt/datastore/pbs-s3-cache/.chunks" - No such file or directory
+```
+
+Rebuild the cache skeleton, then let PBS use the S3 backend:
+
+```sh
+CACHE=/mnt/datastore/pbs-s3-cache
+install -d -o backup -g backup -m 0755 "$CACHE"
+install -d -o backup -g backup -m 0750 "$CACHE/.chunks"
+for a in $(seq 0 255); do
+  aa=$(printf "%02x" "$a")
+  for b in $(seq 0 255); do
+    bb=$(printf "%02x" "$b")
+    install -d -o backup -g backup -m 0750 "$CACHE/.chunks/$aa$bb"
+  done
+done
+proxmox-backup-manager datastore update pbs-s3 --delete maintenance-mode || true
+proxmox-backup-manager datastore s3-refresh pbs-s3
+```
+
+Validate from Proxmox:
+
+```sh
+pvesm status --storage pbs-s3
+```
 
 ## Preflight
 
