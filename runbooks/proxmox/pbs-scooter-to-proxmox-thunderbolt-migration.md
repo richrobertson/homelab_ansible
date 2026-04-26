@@ -31,7 +31,8 @@ PBS S3 datastore support is currently a technology preview. Keep the Scooter dat
   - `store1` is restored in PBS config but unavailable until the Scooter-backed datastore disk/path is attached.
   - `pbs-s3` is restored in PBS config and should continue to use the existing AWS S3 endpoint `aws-homelab-pbs` with bucket `myrobertson-homelab-pbs`.
   - `pbs-s3` is active after rebuilding the replacement cache path's `.chunks` shard tree under `/mnt/datastore/pbs-s3-cache`.
-  - The Backblaze B2 bucket `myrobertson-pbs` is for a new additional datastore, not a replacement for `pbs-s3`.
+  - `pbs-b2` is a new additional datastore using Backblaze B2 endpoint `backblaze-b2-pbs`, bucket `myrobertson-pbs`, and cache path `/mnt/datastore/pbs-b2-cache`.
+  - `pbs-b2` is also configured as Proxmox storage through the Thunderbolt service IP `10.0.0.87`.
 - Thunderbolt host loopbacks:
   - pve3: `10.0.0.83/32`
   - pve4: `10.0.0.84/32`
@@ -87,6 +88,10 @@ Use the matching endpoint profile:
 - Bucket type: private
 - File lifecycle: keep all versions
 - Object Lock: default 3 days
+- Vault secret path: `secret/proxmox/pbs/prod/backblaze-b2`
+- PBS S3 endpoint: `backblaze-b2-pbs`
+- PBS datastore: `pbs-b2`
+- PBS cache path: `/mnt/datastore/pbs-b2-cache`
 - Recommended key scope: bucket-specific key with list, read, write, and delete permissions only for this bucket
 
 Example PBS endpoint:
@@ -97,7 +102,9 @@ proxmox-backup-manager s3 endpoint create backblaze-b2-pbs \
   --secret-key "$B2_APPLICATION_KEY" \
   --endpoint s3.us-west-002.backblazeb2.com \
   --region us-west-002 \
-  --path-style true
+  --path-style true \
+  --provider-quirks skip-if-none-match-header \
+  --provider-quirks delete-objects-via-delete-object
 ```
 
 ### Cloudflare R2
@@ -138,6 +145,15 @@ proxmox-backup-manager datastore create pbs-object /mnt/datastore/pbs-object-cac
   --backend type=s3,client=backblaze-b2-pbs,bucket=myrobertson-pbs
 proxmox-backup-manager datastore update pbs-object --gc-schedule 'daily 04:15'
 proxmox-backup-manager datastore list
+```
+
+The production Backblaze datastore was created as:
+
+```sh
+proxmox-backup-manager datastore create pbs-b2 /mnt/datastore/pbs-b2-cache \
+  --backend type=s3,client=backblaze-b2-pbs,bucket=myrobertson-pbs \
+  --gc-schedule daily \
+  --notification-mode notification-system
 ```
 
 The local cache path is not the full datastore. It is a required persistent cache used by PBS to reduce backend API calls and improve performance.
