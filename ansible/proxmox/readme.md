@@ -15,6 +15,7 @@ This directory contains playbooks, roles, and templates for managing Proxmox clu
 - `disable_vlan_hw_filtering.yml`: disable VLAN hardware filtering on Proxmox interfaces and keep it persistent across reboots
 - `configure_thunderbolt_transport.yml`: point Proxmox live migration and scheduled replication at the Thunderbolt ring
 - `ceph_thunderbolt_cluster_network.yml`: move Ceph OSD backend replication/recovery traffic onto the Thunderbolt ring
+- `pbs_thunderbolt_proxy.yml`: publish the Scooter-hosted PBS API through a Proxmox Thunderbolt service IP
 - `proxmox_transport_metrics.yml`: export Proxmox migration, replication, backup storage route, and Ceph transport metrics through node-exporter textfile collection
 
 ## Roles and templates
@@ -38,6 +39,7 @@ ansible-playbook -i inventory/environments/production.ini ansible/proxmox/provis
 ansible-playbook -i inventory/proxmox.yml ansible/proxmox/disable_vlan_hw_filtering.yml
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/configure_thunderbolt_transport.yml
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/ceph_thunderbolt_cluster_network.yml
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_thunderbolt_proxy.yml
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/proxmox_transport_metrics.yml
 ```
 

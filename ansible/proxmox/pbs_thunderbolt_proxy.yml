@@ -1,0 +1,137 @@
+---
+- name: Publish PBS through the Thunderbolt ring
+  hosts: "{{ pbs_thunderbolt_proxy_target_hosts | default('pve5.myrobertson.net') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    pbs_thunderbolt_proxy_ip: 10.0.0.87
+    pbs_thunderbolt_proxy_prefix: 32
+    pbs_thunderbolt_proxy_port: 8007
+    pbs_thunderbolt_backend_ip: 192.168.1.217
+    pbs_thunderbolt_backend_port: 8007
+    pbs_thunderbolt_storage_ids:
+      - pbs-s3
+      - pbs.myrobertson.net
+
+  tasks:
+    - name: Verify socat is installed for the PBS TCP proxy
+      ansible.builtin.command: /usr/bin/socat -V
+      changed_when: false
+
+    - name: Install PBS Thunderbolt service IP unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pbs-thunderbolt-ip.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Advertise PBS service IP on the Thunderbolt ring
+          Wants=network-online.target frr.service
+          After=network-online.target frr.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/sbin/ip addr replace {{ pbs_thunderbolt_proxy_ip }}/{{ pbs_thunderbolt_proxy_prefix }} dev lo
+          ExecStop=/usr/sbin/ip addr del {{ pbs_thunderbolt_proxy_ip }}/{{ pbs_thunderbolt_proxy_prefix }} dev lo
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Install PBS Thunderbolt proxy unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pbs-thunderbolt-proxy.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Proxy PBS API from Thunderbolt ring to Scooter-hosted PBS
+          Wants=network-online.target pbs-thunderbolt-ip.service
+          After=network-online.target pbs-thunderbolt-ip.service
+
+          [Service]
+          Type=simple
+          Restart=always
+          RestartSec=2s
+          ExecStart=/usr/bin/socat TCP-LISTEN:{{ pbs_thunderbolt_proxy_port }},bind={{ pbs_thunderbolt_proxy_ip }},reuseaddr,fork TCP:{{ pbs_thunderbolt_backend_ip }}:{{ pbs_thunderbolt_backend_port }}
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable and start PBS Thunderbolt service IP
+      ansible.builtin.systemd:
+        name: pbs-thunderbolt-ip.service
+        enabled: true
+        state: started
+
+    - name: Enable and start PBS Thunderbolt proxy
+      ansible.builtin.systemd:
+        name: pbs-thunderbolt-proxy.service
+        enabled: true
+        state: started
+
+    - name: Verify PBS service IP is present
+      ansible.builtin.command: "ip -o -4 addr show dev lo to {{ pbs_thunderbolt_proxy_ip }}/{{ pbs_thunderbolt_proxy_prefix }}"
+      changed_when: false
+
+    - name: Verify PBS proxy is listening
+      ansible.builtin.command: "ss -ltn sport = :{{ pbs_thunderbolt_proxy_port }}"
+      register: pbs_proxy_listen
+      changed_when: false
+      failed_when: pbs_proxy_listen.stdout is not search(pbs_thunderbolt_proxy_ip)
+
+    - name: Verify backend PBS API is reachable from proxy host
+      ansible.builtin.command: "nc -vz -w 3 {{ pbs_thunderbolt_backend_ip }} {{ pbs_thunderbolt_backend_port }}"
+      changed_when: false
+
+    - name: Point Proxmox PBS storages at Thunderbolt service IP
+      ansible.builtin.shell: |
+        set -euo pipefail
+        storage_cfg=/etc/pve/storage.cfg
+        storage_id="{{ item }}"
+        proxy_ip="{{ pbs_thunderbolt_proxy_ip }}"
+
+        if ! grep -Eq "^pbs: ${storage_id//./\\.}$" "$storage_cfg"; then
+          echo "missing storage ${storage_id}"
+          exit 1
+        fi
+
+        current_server="$(awk -v id="$storage_id" '
+          /^pbs: / { in_block = ($2 == id) }
+          in_block && $1 == "server" { print $2; exit }
+        ' "$storage_cfg")"
+
+        if [ "$current_server" = "$proxy_ip" ]; then
+          echo "unchanged ${storage_id}"
+          exit 0
+        fi
+
+        backup="${storage_cfg}.pre-pbs-thunderbolt-proxy.$(date +%Y%m%d%H%M%S)"
+        cp -a "$storage_cfg" "$backup"
+        tmp="${storage_cfg}.tmp.$$"
+        awk -v id="$storage_id" -v ip="$proxy_ip" '
+          /^pbs: / { in_block = ($2 == id) }
+          in_block && $1 == "server" { sub($2, ip); changed = 1 }
+          { print }
+          END { if (!changed) exit 2 }
+        ' "$storage_cfg" > "$tmp"
+        install -o root -g www-data -m 0640 "$tmp" "$storage_cfg"
+        rm -f "$tmp"
+        echo "changed ${storage_id} from ${current_server} to ${proxy_ip}; backup ${backup}"
+      args:
+        executable: /bin/bash
+      loop: "{{ pbs_thunderbolt_storage_ids }}"
+      register: pbs_storage_server_update
+      changed_when: "pbs_storage_server_update.stdout is regex('(^|\\n)changed ')"
+
+    - name: Verify PBS storages remain active
+      ansible.builtin.command: "pvesm status --storage {{ item }}"
+      loop: "{{ pbs_thunderbolt_storage_ids }}"
+      changed_when: false

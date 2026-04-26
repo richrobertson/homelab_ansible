@@ -97,6 +97,8 @@ awk '
     route_dev="$(awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}' <<<"$route_line")"
     if grep -Eq "$THUNDERBOLT_ROUTE_REGEX" <<<"$route_line"; then
       route_up=1
+    elif grep -Eq '^local ' <<<"$route_line" && ip -o addr show to "$resolved_ip" 2>/dev/null | grep -q "$resolved_ip"; then
+      route_up=1
     fi
   fi
   write_metric "proxmox_backup_storage_info{node=\"$(escape_label "$NODE")\",storage=\"$(escape_label "$storage")\",server=\"$(escape_label "$server")\",datastore=\"$(escape_label "$datastore")\",expected_network=\"thunderbolt\"} 1"
