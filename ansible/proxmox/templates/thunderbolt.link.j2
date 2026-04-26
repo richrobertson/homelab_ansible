@@ -1,6 +1,8 @@
 [Match]
 Path={{ link.path }}
 Driver=thunderbolt-net
+
 [Link]
 MACAddressPolicy=none
 Name={{ link.link_name }}
+MTUBytes={{ thunderbolt_mtu }}

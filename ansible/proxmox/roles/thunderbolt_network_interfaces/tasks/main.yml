@@ -1,88 +1,116 @@
 ---
+- name: Validate Thunderbolt link configuration
+  ansible.builtin.assert:
+    that:
+      - thunderbolt_links | length >= 2
+      - thunderbolt_links | map(attribute='path') | list | length == thunderbolt_links | length
+      - thunderbolt_links | map(attribute='link_name') | list | length == thunderbolt_links | length
+      - thunderbolt_node_id | string | length > 0
+      - thunderbolt_loopback_ipv4 is match('^([0-9]{1,3}\\.){3}[0-9]{1,3}$')
+      - thunderbolt_loopback_ipv6 is match('^[0-9A-Fa-f:]+$')
+    fail_msg: >-
+      Define thunderbolt_links with path and link_name entries, plus valid
+      thunderbolt_loopback_ipv4/thunderbolt_loopback_ipv6 values.
+
 - name: Ensure thunderbolt module is loaded at boot
   ansible.builtin.lineinfile:
-    dest: /etc/modules
-    line: "{{ module['name'] }}"
-  loop: "{{ ect_modules }}"
-  loop_control: 
-    loop_var: module
-    label: "{{ module['name']}}"
+    path: /etc/modules
+    line: "{{ item }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ thunderbolt_modules }}"
 
-- name: Add thunderbolt interfaces
+- name: Load Thunderbolt modules now
+  ansible.builtin.command: "modprobe {{ item }}"
+  register: thunderbolt_modprobe
+  changed_when: false
+  loop: "{{ thunderbolt_modules }}"
+
+- name: Ensure interfaces.d source is enabled
+  ansible.builtin.lineinfile:
+    path: "{{ thunderbolt_interfaces_file }}"
+    regexp: '^source /etc/network/interfaces\.d/\*$'
+    line: source /etc/network/interfaces.d/*
+    insertafter: EOF
+    backup: true
+
+- name: Remove legacy inline Thunderbolt interface block
   ansible.builtin.blockinfile:
-    path: /etc/network/interfaces
-    block: |
-      iface en05 inet manual
-      #do not edit it GUI
-
-      iface en06 inet manual
-      #do not edit in GUI
-    insertbefore: "^source /etc/network/interfaces.d" # This regex matches the line you want to insert before
+    path: "{{ thunderbolt_interfaces_file }}"
+    state: absent
     marker: "# {mark} ANSIBLE MANAGED BLOCK"
 
 - name: Enable ipv4 forwarding
   ansible.posix.sysctl:
     name: net.ipv4.ip_forward
-    value: 1
+    value: "1"
     state: present
-    sysctl_set: yes
-    reload: yes
+    sysctl_set: true
+    reload: true
     sysctl_file: /etc/sysctl.d/20-network.conf
 
 - name: Enable ipv6 forwarding
   ansible.posix.sysctl:
     name: net.ipv6.conf.all.forwarding
-    value: 1
+    value: "1"
     state: present
-    sysctl_set: yes
-    reload: yes
+    sysctl_set: true
+    reload: true
     sysctl_file: /etc/sysctl.d/20-network.conf
-    
-- name: Define thunderbolt interfaces in network.d file
+
+- name: Define Thunderbolt interfaces and loopback routes
   ansible.builtin.template:
     src: interfaces.d_thunderbolt.j2
-    dest: /etc/network/interfaces.d/thunderbolt
+    dest: "{{ thunderbolt_interfaces_include }}"
     owner: root
     group: root
-    mode: '0644'
+    mode: "0644"
+    backup: true
+  notify: reload networking
 
-- name: Create thunderbolt1 link file from template
+- name: Create stable Thunderbolt systemd link files
   ansible.builtin.template:
     src: thunderbolt.link.j2
-    dest: /etc/systemd/network/00-thunderbolt{{ link_index }}.link
+    dest: "{{ thunderbolt_link_file_prefix }}{{ link_index }}.link"
     owner: root
     group: root
-    mode: '0644'
-  loop: "{{ links }}"
-  loop_control: 
+    mode: "0644"
+    backup: true
+  loop: "{{ thunderbolt_links }}"
+  loop_control:
     index_var: link_index
     loop_var: link
-    label: "{{ link['link_name']}}"
+    label: "{{ link.link_name }}"
+  register: thunderbolt_link_files
+  notify: reload udev
 
-- name: Create 10-tb-en.rules file from template
+- name: Create Thunderbolt udev rules
   ansible.builtin.template:
     src: 10-tb-en.rules.j2
-    dest: /etc/udev/rules.d/10-tb-en.rules
+    dest: "{{ thunderbolt_udev_rules_file }}"
     owner: root
     group: root
-    mode: '0644'
+    mode: "0644"
+    backup: true
+  notify: reload udev
 
-- name: Create en06 thunderbolt cable insertion script from template
+- name: Create Thunderbolt cable insertion scripts
   ansible.builtin.template:
     src: udev-script.sh.j2
-    dest: /usr/local/bin/pve-{{ link['link_name'] }}.sh
+    dest: "{{ thunderbolt_udev_script_dir }}/pve-{{ link.link_name }}.sh"
     owner: root
     group: root
-    mode: '0755'
-  loop: "{{ links }}"
-  loop_control: 
+    mode: "0755"
+  loop: "{{ thunderbolt_links }}"
+  loop_control:
     loop_var: link
-    label: "{{ link['link_name']}}"
-  register: insertion
+    label: "{{ link.link_name }}"
 
 - name: Propagate the new link files into initramfs
   ansible.builtin.command: update-initramfs -u -k all
-  when: insertion.changed
+  when: thunderbolt_link_files.changed
 
 - name: Enable intel_iommu
   ansible.builtin.lineinfile:
@@ -92,6 +120,7 @@
     backup: true
     backrefs: true
   notify: update-grub
+  when: thunderbolt_enable_iommu | bool
 
 - name: Enable iommu
   ansible.builtin.lineinfile:
@@ -101,3 +130,47 @@
     backup: true
     backrefs: true
   notify: update-grub
+  when: thunderbolt_enable_iommu | bool
+
+- name: Flush network and udev changes before validation
+  ansible.builtin.meta: flush_handlers
+
+- name: Bring Thunderbolt interfaces up
+  ansible.builtin.command: "ifup --allow=auto {{ link.link_name }}"
+  register: thunderbolt_ifup
+  changed_when: "'already configured' not in (thunderbolt_ifup.stderr | default(''))"
+  failed_when:
+    - thunderbolt_ifup.rc != 0
+    - "'already configured' not in (thunderbolt_ifup.stderr | default(''))"
+  loop: "{{ thunderbolt_links }}"
+  loop_control:
+    loop_var: link
+    label: "{{ link.link_name }}"
+  when: thunderbolt_reload_networking | bool
+
+- name: Remove stale Thunderbolt IPv4 loopbacks
+  ansible.builtin.shell: |
+    ip -o addr show dev lo |
+      awk '$4 ~ /^10\.0\.0\.8[0-9]+\/32$/ && $4 != "{{ thunderbolt_loopback_ipv4 }}/32" {print $4}' |
+      xargs -r -n1 ip addr del dev lo
+  changed_when: false
+
+- name: Remove stale Thunderbolt IPv6 loopbacks
+  ansible.builtin.shell: |
+    ip -o -6 addr show dev lo |
+      awk '$4 ~ /^fc00::8[0-9]+\/128$/ && $4 != "{{ thunderbolt_loopback_ipv6 }}/128" {print $4}' |
+      xargs -r -n1 ip -6 addr del dev lo
+  changed_when: false
+
+- name: Verify Thunderbolt interfaces are up with expected MTU
+  ansible.builtin.command: "ip -o link show dev {{ link.link_name }}"
+  register: thunderbolt_link_status
+  changed_when: false
+  failed_when:
+    - thunderbolt_link_status.rc != 0
+      or thunderbolt_link_status.stdout is not search('UP')
+      or thunderbolt_link_status.stdout is not search('mtu ' ~ (thunderbolt_mtu | string))
+  loop: "{{ thunderbolt_links }}"
+  loop_control:
+    loop_var: link
+    label: "{{ link.link_name }}"

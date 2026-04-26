@@ -1,37 +1,29 @@
 ip forwarding
 ipv6 forwarding
 
-interface en05
- ip router openfabric 1
- ipv6 router openfabric 1
- openfabric hello-interval 1
- openfabric hello-multiplier 3
- openfabric csnp-interval 5
- openfabric psnp-interval 2
+{% for interface in thunderbolt_fabric_interfaces %}
+interface {{ interface }}
+ ip router openfabric {{ thunderbolt_fabric_id }}
+ ipv6 router openfabric {{ thunderbolt_fabric_id }}
+ openfabric hello-interval {{ thunderbolt_fabric_hello_interval }}
+ openfabric hello-multiplier {{ thunderbolt_fabric_hello_multiplier }}
+ openfabric csnp-interval {{ thunderbolt_fabric_csnp_interval }}
+ openfabric psnp-interval {{ thunderbolt_fabric_psnp_interval }}
 exit
 
-interface en06
- ip router openfabric 1
- ipv6 router openfabric 1
- openfabric hello-interval 1
- openfabric hello-multiplier 3
- openfabric csnp-interval 5
- openfabric psnp-interval 2
-exit
-
+{% endfor %}
 interface lo
- ip router openfabric 1
- ipv6 router openfabric 1
- openfabric hello-interval 1
- openfabric hello-multiplier 3
- openfabric csnp-interval 5
- openfabric psnp-interval 2
+ ip router openfabric {{ thunderbolt_fabric_id }}
+ ipv6 router openfabric {{ thunderbolt_fabric_id }}
+ openfabric hello-interval {{ thunderbolt_fabric_hello_interval }}
+ openfabric hello-multiplier {{ thunderbolt_fabric_hello_multiplier }}
+ openfabric csnp-interval {{ thunderbolt_fabric_csnp_interval }}
+ openfabric psnp-interval {{ thunderbolt_fabric_psnp_interval }}
  openfabric passive
 exit
 
-router openfabric 1
-net 49.0000.0000.000{{ (inventory_hostname | regex_search('([0-9]+)$')) | default('1', true) }}.00
-lsp-gen-interval 5
+router openfabric {{ thunderbolt_fabric_id }}
+ net {{ thunderbolt_fabric_net }}
+ lsp-gen-interval {{ thunderbolt_fabric_lsp_gen_interval }}
 exit
 !
-exit

@@ -1,48 +1,95 @@
 ---
-- name: Install Free Range Routing (FRR) 
+- name: Validate Thunderbolt fabric configuration
+  ansible.builtin.assert:
+    that:
+      - thunderbolt_fabric_interfaces | length >= 2
+      - thunderbolt_fabric_net is match('^49\\.[0-9]{4}\\.[0-9]{4}\\.[0-9]{4}\\.00$')
+    fail_msg: >-
+      Define at least two thunderbolt_fabric_interfaces and a valid OpenFabric
+      NET address, for example 49.0000.0000.0004.00.
+
+- name: Install Free Range Routing (FRR)
   ansible.builtin.apt:
     name: frr
     state: present
-    update_cache: yes
+    update_cache: true
+  retries: 10
+  delay: 5
+  register: thunderbolt_frr_apt
+  until: thunderbolt_frr_apt is succeeded
 
-- name: Enable Free Range Routing (FRR) 
+- name: Enable Free Range Routing (FRR)
   ansible.builtin.systemd_service:
     state: started
+    enabled: true
     name: frr
 
-- name: Enable fabricd in fabric daemon file
+- name: Enable fabricd in FRR daemon file
   ansible.builtin.lineinfile:
     path: /etc/frr/daemons
-    search_string: '^fabricd='
+    regexp: '^fabricd='
     line: fabricd=yes
   notify: restart frr service
 
-- name: Script to restart frr when interfaces are brought up
-  ansible.builtin.template:
-    src: if-up.d_en0x.j2
-    dest: /etc/network/if-up.d/en0x
-    owner: root
-    group: root
-    mode: '0755' 
-  tags: never
+- name: Remove duplicate disabled fabricd daemon lines
+  ansible.builtin.lineinfile:
+    path: /etc/frr/daemons
+    regexp: '^fabricd=no$'
+    state: absent
+  notify: restart frr service
 
-- name: Script to restart frr when loopback resets
-  ansible.builtin.template:
-    src: if-up.d_lo.j2
-    dest: /etc/network/if-up.d/lo
+- name: Ensure FRR main config includes local Thunderbolt fabric config
+  ansible.builtin.lineinfile:
+    path: "{{ thunderbolt_fabric_main_config_file }}"
+    regexp: "^include {{ thunderbolt_fabric_config_file | regex_escape }}$"
+    line: "{{ thunderbolt_fabric_main_include_line }}"
     owner: root
     group: root
-    mode: '0755' 
-  tags: never
+    mode: "0640"
+    create: true
+    backup: true
+  notify: restart frr service
 
 - name: Configure OpenFabric
   ansible.builtin.template:
     src: frr.conf.local.j2
-    dest: /etc/frr/frr.conf.local
+    dest: "{{ thunderbolt_fabric_config_file }}"
     owner: root
-    group: root
-    mode: '0644'
-  notify: apply sdn config
+    group: frr
+    mode: "0640"
+    backup: true
+    validate: "vtysh -C -f %s"
+  notify: restart frr service
 
-  
+- name: Flush FRR changes before validation
+  ansible.builtin.meta: flush_handlers
 
+- name: Load OpenFabric config into integrated FRR
+  ansible.builtin.command: "vtysh -f {{ thunderbolt_fabric_config_file }}"
+  changed_when: false
+
+- name: Persist integrated FRR config
+  ansible.builtin.command: vtysh -c "write memory"
+  changed_when: false
+
+- name: Gather OpenFabric neighbor status
+  ansible.builtin.command: vtysh -c "show openfabric neighbor"
+  register: thunderbolt_openfabric_neighbors
+  changed_when: false
+  failed_when: false
+
+- name: Report OpenFabric neighbor status
+  ansible.builtin.debug:
+    var: thunderbolt_openfabric_neighbors.stdout_lines
+
+- name: Validate Thunderbolt loopback routes from fabric
+  ansible.builtin.command: "ip route get {{ hostvars[item].thunderbolt_loopback_ipv4 }}"
+  register: thunderbolt_fabric_route_checks
+  changed_when: false
+  when:
+    - thunderbolt_fabric_validate_routes | bool
+    - item != inventory_hostname
+    - hostvars[item].thunderbolt_loopback_ipv4 is defined
+  loop: "{{ ansible_play_hosts_all }}"
+  loop_control:
+    label: "{{ item }}"

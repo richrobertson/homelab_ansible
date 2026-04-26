@@ -1,17 +1,14 @@
 # Thunderbolt interfaces
+{% for link in thunderbolt_links %}
+auto {{ link.link_name }}
+iface {{ link.link_name }} inet manual
+    pre-up ip link set dev $IFACE mtu {{ thunderbolt_mtu }} up
+    post-up ip link set dev $IFACE mtu {{ thunderbolt_mtu }} up
+    post-down ip link set dev $IFACE down
 
-auto en05
-iface en05 inet6 static
-    pre-up ip link set $IFACE up
-    mtu 65520
+{% endfor %}
 
-auto en06
-iface en06 inet6 static
-    pre-up ip link set $IFACE up
-    mtu 65520
-
-# Loopback for Ceph MON
 auto lo
 iface lo inet loopback
-    up ip -6 addr add fc00::8{{ inventory_hostname[-1] }}/128 dev lo
-    up ip addr add 10.0.0.8{{ inventory_hostname[-1] }}/32 dev lo
+    up ip addr replace {{ thunderbolt_loopback_ipv4 }}/32 dev lo
+    up ip -6 addr replace {{ thunderbolt_loopback_ipv6 }}/128 dev lo

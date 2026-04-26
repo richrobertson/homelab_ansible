@@ -1,20 +1,24 @@
 #!/bin/bash
+set -u
 
 LOGFILE="/tmp/udev-debug.log"
 VERBOSE="" # Set this to "-v" for verbose logging
-IF="{{ link['link_name'] }}"
+IF="{{ link.link_name }}"
 
 echo "$(date): pve-$IF.sh triggered by udev" >> "$LOGFILE"
 
-# If multiple interfaces go up at the same time, 
+# If multiple interfaces go up at the same time,
 # retry 10 times and break the retry when successful
 for i in {1..10}; do
     echo "$(date): Attempt $i to bring up $IF" >> "$LOGFILE"
-    /usr/sbin/ifup $VERBOSE $IF >> "$LOGFILE" 2>&1 && {
+    /usr/sbin/ip link set dev "$IF" mtu "{{ thunderbolt_mtu }}" up >> "$LOGFILE" 2>&1 || true
+    /usr/sbin/ifup --allow=auto $VERBOSE "$IF" >> "$LOGFILE" 2>&1 && {
         echo "$(date): Successfully brought up $IF on attempt $i" >> "$LOGFILE"
-        break
+        exit 0
     }
-  
+
     echo "$(date): Attempt $i failed, retrying in 3 seconds..." >> "$LOGFILE"
     sleep 3
 done
+
+exit 1

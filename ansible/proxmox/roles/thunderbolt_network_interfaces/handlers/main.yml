@@ -5,6 +5,23 @@
     name: networking
     state: restarted
 
+- name: reload networking
+  throttle: 1
+  ansible.builtin.shell: |
+    if command -v ifreload >/dev/null 2>&1; then
+      ifreload -a
+    else
+      systemctl restart networking
+    fi
+  changed_when: true
+  when: thunderbolt_reload_networking | bool
+
+- name: reload udev
+  ansible.builtin.shell: |
+    udevadm control --reload-rules
+    udevadm trigger --subsystem-match=net || true
+  changed_when: true
+
 - name: restart frr service
   throttle: 1
   ansible.builtin.service:

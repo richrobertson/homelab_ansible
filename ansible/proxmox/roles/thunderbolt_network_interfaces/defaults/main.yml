@@ -1,0 +1,23 @@
+---
+thunderbolt_modules:
+  - thunderbolt
+  - thunderbolt-net
+
+thunderbolt_links:
+  - path: pci-0000:00:0d.2
+    link_name: en05
+  - path: pci-0000:00:0d.3
+    link_name: en06
+
+thunderbolt_mtu: 65520
+thunderbolt_interfaces_file: /etc/network/interfaces
+thunderbolt_interfaces_include: /etc/network/interfaces.d/thunderbolt
+thunderbolt_link_file_prefix: /etc/systemd/network/00-thunderbolt
+thunderbolt_udev_rules_file: /etc/udev/rules.d/10-tb-en.rules
+thunderbolt_udev_script_dir: /usr/local/bin
+thunderbolt_enable_iommu: true
+thunderbolt_reload_networking: true
+
+thunderbolt_node_id: "{{ inventory_hostname | regex_search('[0-9]+') | default('1', true) }}"
+thunderbolt_loopback_ipv4: "10.0.0.8{{ thunderbolt_node_id }}"
+thunderbolt_loopback_ipv6: "fc00::8{{ thunderbolt_node_id }}"

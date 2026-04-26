@@ -1,20 +1,155 @@
 ---
-- name:  PLAY 1 - Configure Thunderbolt Network Interfaces
-  #connection: local
-  user: root
-  hosts: proxmox_nodes
-  #become: yes
+- name: Configure Thunderbolt ring interfaces
+  hosts: "{{ thunderbolt_target_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: true
+  serial: "{{ thunderbolt_rollout_serial | default(1) }}"
 
   roles:
-    - role: thunderbolt_network_interfaces 
+    - role: thunderbolt_network_interfaces
       tags: thunderbolt_network_interfaces
 
-- name: PLAY 2 - FRR Setup
-  user: root
-  hosts: proxmox_nodes
+- name: Configure Thunderbolt OpenFabric routing
+  hosts: "{{ thunderbolt_target_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: true
+  serial: "{{ thunderbolt_rollout_serial | default(1) }}"
 
   roles:
     - role: thunderbolt_fabric
       tags: thunderbolt_fabric
-  
 
+- name: Validate and soak-test Thunderbolt ring
+  hosts: "{{ thunderbolt_target_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    thunderbolt_node_id: "{{ inventory_hostname | regex_search('[0-9]+') | default('1', true) }}"
+    thunderbolt_loopback_ipv4: "10.0.0.8{{ thunderbolt_node_id }}"
+    thunderbolt_loopback_ipv6: "fc00::8{{ thunderbolt_node_id }}"
+    thunderbolt_peer_loopback_ipv4: "10.0.0.8{{ item | regex_search('[0-9]+') | default('1', true) }}"
+    thunderbolt_io_test_enabled: false
+    thunderbolt_io_test_duration: 30
+    thunderbolt_io_test_parallel_streams: 1
+    thunderbolt_io_test_ping_count: 20
+    thunderbolt_io_test_port: 5201
+    thunderbolt_io_test_log_dir: /var/log/thunderbolt-ring
+
+  tasks:
+    - name: Install iperf3 for Thunderbolt IO soak
+      ansible.builtin.apt:
+        name: iperf3
+        state: present
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when: thunderbolt_io_test_enabled | bool
+
+    - name: Ensure Thunderbolt IO test log directory exists
+      ansible.builtin.file:
+        path: "{{ thunderbolt_io_test_log_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: thunderbolt_io_test_enabled | bool
+
+    - name: Validate routes to peer Thunderbolt loopbacks
+      ansible.builtin.shell: >-
+        ip route get {{ thunderbolt_peer_loopback_ipv4 }} |
+        grep -E 'dev ({{ thunderbolt_fabric_interfaces | default(["en05", "en06"]) | join("|") }})'
+      register: thunderbolt_ring_routes
+      changed_when: false
+      when: item != inventory_hostname
+      loop: "{{ ansible_play_hosts_all }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Measure Thunderbolt ring latency to peers
+      ansible.builtin.command: "ping -c {{ thunderbolt_io_test_ping_count }} -i 0.2 -W 1 {{ thunderbolt_peer_loopback_ipv4 }}"
+      register: thunderbolt_ring_ping
+      changed_when: false
+      when:
+        - thunderbolt_io_test_enabled | bool
+        - item != inventory_hostname
+      loop: "{{ ansible_play_hosts_all }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Stop stale Thunderbolt iperf3 servers
+      ansible.builtin.shell: |
+        if [ -f /run/iperf3-thunderbolt.pid ]; then
+          kill "$(cat /run/iperf3-thunderbolt.pid)" 2>/dev/null || true
+          rm -f /run/iperf3-thunderbolt.pid
+        fi
+        pkill -f "[i]perf3 -s -B {{ thunderbolt_loopback_ipv4 }} -p {{ thunderbolt_io_test_port }}" 2>/dev/null || true
+      changed_when: false
+      when: thunderbolt_io_test_enabled | bool
+
+    - name: Start Thunderbolt iperf3 servers on loopback fabric IPs
+      ansible.builtin.command: >-
+        iperf3 -s -D
+        -B {{ thunderbolt_loopback_ipv4 }}
+        -p {{ thunderbolt_io_test_port }}
+        --pidfile /run/iperf3-thunderbolt.pid
+        --logfile {{ thunderbolt_io_test_log_dir }}/iperf3-server.log
+      when: thunderbolt_io_test_enabled | bool
+
+    - name: Wait for Thunderbolt iperf3 servers
+      ansible.builtin.wait_for:
+        host: "{{ thunderbolt_loopback_ipv4 }}"
+        port: "{{ thunderbolt_io_test_port }}"
+        timeout: 15
+      when: thunderbolt_io_test_enabled | bool
+
+    - name: Run sustained pairwise Thunderbolt throughput tests
+      ansible.builtin.command: >-
+        iperf3
+        -c {{ thunderbolt_peer_loopback_ipv4 }}
+        -B {{ thunderbolt_loopback_ipv4 }}
+        -p {{ thunderbolt_io_test_port }}
+        -t {{ thunderbolt_io_test_duration }}
+        -P {{ thunderbolt_io_test_parallel_streams }}
+        --json
+      register: thunderbolt_iperf_results
+      changed_when: false
+      throttle: 1
+      when:
+        - thunderbolt_io_test_enabled | bool
+        - item != inventory_hostname
+      loop: "{{ ansible_play_hosts_all }}"
+      loop_control:
+        label: "{{ inventory_hostname }} -> {{ item }}"
+
+    - name: Stop Thunderbolt iperf3 servers
+      ansible.builtin.shell: |
+        if [ -f /run/iperf3-thunderbolt.pid ]; then
+          kill "$(cat /run/iperf3-thunderbolt.pid)" 2>/dev/null || true
+          rm -f /run/iperf3-thunderbolt.pid
+        fi
+      changed_when: false
+      when: thunderbolt_io_test_enabled | bool
+
+    - name: Summarize Thunderbolt latency
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} -> {{ item.item }} {{ (item.stdout_lines | select('search', 'rtt min/avg/max') | list | first) | default('no rtt summary') }}"
+      loop: "{{ thunderbolt_ring_ping.results | default([]) }}"
+      loop_control:
+        label: "{{ inventory_hostname }} -> {{ item.item | default('unknown') }}"
+      when:
+        - thunderbolt_io_test_enabled | bool
+        - not (item.skipped | default(false))
+
+    - name: Summarize Thunderbolt throughput
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} -> {{ item.item }}:
+          {{ (((item.stdout | from_json).end.sum_received.bits_per_second | float) / 1000000000) | round(2) }} Gbit/s received,
+          retransmits={{ (item.stdout | from_json).end.sum_sent.retransmits | default('n/a') }}
+      loop: "{{ thunderbolt_iperf_results.results | default([]) }}"
+      loop_control:
+        label: "{{ inventory_hostname }} -> {{ item.item | default('unknown') }}"
+      when:
+        - thunderbolt_io_test_enabled | bool
+        - not (item.skipped | default(false))

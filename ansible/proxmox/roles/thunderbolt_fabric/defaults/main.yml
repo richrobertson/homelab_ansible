@@ -1,0 +1,25 @@
+---
+thunderbolt_links:
+  - path: pci-0000:00:0d.2
+    link_name: en05
+  - path: pci-0000:00:0d.3
+    link_name: en06
+
+thunderbolt_mtu: 65520
+thunderbolt_node_id: "{{ inventory_hostname | regex_search('[0-9]+') | default('1', true) }}"
+thunderbolt_loopback_ipv4: "10.0.0.8{{ thunderbolt_node_id }}"
+thunderbolt_loopback_ipv6: "fc00::8{{ thunderbolt_node_id }}"
+thunderbolt_fabric_id: 1
+thunderbolt_fabric_interfaces: "{{ thunderbolt_links | map(attribute='link_name') | list }}"
+thunderbolt_fabric_mtu: "{{ thunderbolt_mtu | default(65520) }}"
+thunderbolt_fabric_hello_interval: 1
+thunderbolt_fabric_hello_multiplier: 3
+thunderbolt_fabric_csnp_interval: 5
+thunderbolt_fabric_psnp_interval: 2
+thunderbolt_fabric_lsp_gen_interval: 5
+thunderbolt_fabric_config_file: /etc/frr/frr.conf.local
+thunderbolt_fabric_main_config_file: /etc/frr/frr.conf
+thunderbolt_fabric_main_include_line: "include {{ thunderbolt_fabric_config_file }}"
+thunderbolt_fabric_node_id: "{{ thunderbolt_node_id | default(inventory_hostname | regex_search('[0-9]+') | default('1', true)) }}"
+thunderbolt_fabric_net: "49.0000.0000.{{ '%04d' | format(thunderbolt_fabric_node_id | int) }}.00"
+thunderbolt_fabric_validate_routes: false
