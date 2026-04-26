@@ -16,6 +16,13 @@ PBS S3 datastore support is currently a technology preview. Keep the Scooter dat
 - Transitional Thunderbolt service path: `pve5` listens on `10.0.0.87:8007` and proxies to `192.168.1.217:8007`.
 - Current primary PBS datastore capacity: about 5.0 TiB total, about 1.4 TiB used.
 - Current primary PBS snapshot count visible from Proxmox: 310.
+- Replacement VM shell staged on `pve5`:
+  - VMID `217`, name `pbs-restore`
+  - state `stopped`
+  - boot disk `local-lvm:vm-217-disk-0`, 64 GiB
+  - object/cache disk `local-lvm:vm-217-disk-1`, 128 GiB
+  - installer ISO `local:iso/proxmox-backup-server_4.1-1.iso`
+  - NIC `vmbr1`, `link_down=1` to prevent duplicate address exposure before cutover
 - Thunderbolt host loopbacks:
   - pve3: `10.0.0.83/32`
   - pve4: `10.0.0.84/32`
@@ -169,24 +176,29 @@ In Synology VMM:
 
 If Synology only exports disk images, copy the boot disk to a Proxmox import-capable location such as `/var/lib/vz/template/iso` or a temporary NFS mount.
 
-## Phase 2: Import PBS Compute To Proxmox
+## Phase 2: Build Or Import PBS Compute To Proxmox
 
 Create the VM shell on the selected Proxmox node. Use a stable VMID that does not collide with existing IDs.
 
-Example pattern:
+Current staged shell on `pve5`:
 
 ```sh
 qm create 217 \
-  --name pbs \
+  --name pbs-restore \
   --memory 8192 \
   --cores 4 \
   --cpu host \
-  --net0 virtio,bridge=vmbr1 \
+  --net0 virtio,bridge=vmbr1,link_down=1 \
   --scsihw virtio-scsi-single \
-  --agent enabled=1
+  --agent enabled=1 \
+  --onboot 0
+qm set 217 --scsi0 local-lvm:64,discard=on,ssd=1
+qm set 217 --scsi1 local-lvm:128,discard=on,ssd=1
+qm set 217 --ide2 local:iso/proxmox-backup-server_4.1-1.iso,media=cdrom
+qm set 217 --boot order=ide2\;scsi0
 ```
 
-Import the exported disk:
+For a Synology disk import path, import the exported disk instead of installing fresh:
 
 ```sh
 qm importdisk 217 /path/to/pbs-disk.vmdk <target-storage>
@@ -194,7 +206,9 @@ qm set 217 --scsi0 <target-storage>:vm-217-disk-0,discard=on,ssd=1
 qm set 217 --boot order=scsi0
 ```
 
-Boot with only the LAN NIC first. Validate:
+For a config-from-Vault rebuild path, install PBS from the staged ISO, update packages, then stage the Vault restore. Keep the NIC link down until the restore has been reviewed and the live Synology PBS VM is stopped or otherwise isolated.
+
+Boot with only the intended LAN NIC active first. Validate:
 
 ```sh
 qm start 217

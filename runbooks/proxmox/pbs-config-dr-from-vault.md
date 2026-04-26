@@ -58,6 +58,14 @@ vault kv get -field=source_host secret/proxmox/pbs/prod/config
 vault kv get -field=pbs_version secret/proxmox/pbs/prod/config
 ```
 
+Current prod export:
+
+```text
+exported_at=2026-04-26T06:36:13Z
+source_host=pbs.myrobertson.net
+pbs_version=proxmox-backup-server 4.1.8-1 running version: 4.1.6
+```
+
 ## Stage Restore On A Replacement PBS VM
 
 Build a fresh PBS VM first, then stage the config without applying it:
@@ -70,6 +78,8 @@ ansible-playbook -i inventory/environments/production.ini \
 ```
 
 This writes the archive under `/root/pbs-config-restore` and prints the file list.
+
+The current Proxmox restore target is VMID `217` on `pve5`, named `pbs-restore`. It is intentionally powered off with its NIC link down until PBS is installed and the restore/cutover window is ready.
 
 ## Apply Restore
 
@@ -89,6 +99,8 @@ The restore playbook:
 2. Backs up current config paths under `/root/pbs-config-pre-restore-<timestamp>`.
 3. Extracts the Vault archive onto `/`.
 4. Starts `proxmox-backup` and `proxmox-backup-proxy`.
+
+The exported archive includes `/etc/network/interfaces`, `/etc/hosts`, and `/etc/hostname`. Applying it will make the replacement VM assume the live PBS identity, including `192.168.1.217` and `192.168.7.10`, so the Synology PBS VM must not be simultaneously active on those addresses.
 
 ## Post-Restore Checks
 
