@@ -16,6 +16,8 @@ This directory contains playbooks, roles, and templates for managing Proxmox clu
 - `configure_thunderbolt_transport.yml`: point Proxmox live migration and scheduled replication at the Thunderbolt ring
 - `ceph_thunderbolt_cluster_network.yml`: move Ceph OSD backend replication/recovery traffic onto the Thunderbolt ring
 - `pbs_thunderbolt_proxy.yml`: publish the Scooter-hosted PBS API through a Proxmox Thunderbolt service IP
+- `pbs_config_export_to_vault.yml`: archive PBS configuration into Vault for disaster recovery
+- `pbs_config_restore_from_vault.yml`: stage or apply a PBS configuration archive from Vault onto a replacement PBS VM
 - `proxmox_transport_metrics.yml`: export Proxmox migration, replication, backup storage route, and Ceph transport metrics through node-exporter textfile collection
 
 ## Roles and templates
@@ -40,6 +42,8 @@ ansible-playbook -i inventory/proxmox.yml ansible/proxmox/disable_vlan_hw_filter
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/configure_thunderbolt_transport.yml
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/ceph_thunderbolt_cluster_network.yml
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_thunderbolt_proxy.yml
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_config_export_to_vault.yml -e pbs_config_source_hosts=pbs.myrobertson.net
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_config_restore_from_vault.yml -e pbs_config_restore_hosts=pbs-restore.myrobertson.net
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/proxmox_transport_metrics.yml
 ```
 
@@ -133,3 +137,4 @@ REQUESTS_CA_BUNDLE=inventory/certs/proxmox-vault-ca.pem ansible-inventory -i inv
 - Operational Proxmox runbooks live under `runbooks/proxmox/` at the repository root.
 - Start with [runbooks/proxmox/README.md](../../runbooks/proxmox/README.md).
 - PBS migration from Scooter to Proxmox for Thunderbolt-routed backup traffic is documented in [runbooks/proxmox/pbs-scooter-to-proxmox-thunderbolt-migration.md](../../runbooks/proxmox/pbs-scooter-to-proxmox-thunderbolt-migration.md).
+- PBS configuration recovery from Git plus Vault is documented in [runbooks/proxmox/pbs-config-dr-from-vault.md](../../runbooks/proxmox/pbs-config-dr-from-vault.md).

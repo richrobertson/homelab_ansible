@@ -1,0 +1,86 @@
+---
+- name: Export PBS configuration into Vault for disaster recovery
+  hosts: "{{ pbs_config_source_hosts | default('pbs.myrobertson.net') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    pbs_config_vault_path: secret/proxmox/pbs/prod/config
+    pbs_config_paths:
+      - /etc/proxmox-backup
+      - /etc/apt/sources.list
+      - /etc/apt/sources.list.d
+      - /etc/network/interfaces
+      - /etc/hosts
+      - /etc/hostname
+      - /etc/systemd/timesyncd.conf
+      - /etc/chrony
+
+  tasks:
+    - name: Check PBS configuration paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ pbs_config_paths }}"
+      register: pbs_config_path_stats
+
+    - name: Build list of existing PBS configuration paths
+      ansible.builtin.set_fact:
+        pbs_existing_config_paths: >-
+          {{
+            pbs_config_path_stats.results
+            | selectattr('stat.exists')
+            | map(attribute='item')
+            | list
+          }}
+
+    - name: Require at least one PBS configuration path
+      ansible.builtin.assert:
+        that:
+          - pbs_existing_config_paths | length > 0
+        fail_msg: "No configured PBS paths exist on {{ inventory_hostname }}."
+
+    - name: Read PBS version
+      ansible.builtin.command: proxmox-backup-manager version
+      register: pbs_version
+      changed_when: false
+      failed_when: false
+
+    - name: Archive PBS configuration
+      ansible.builtin.shell: |
+        set -euo pipefail
+        tar_args=()
+        {% for path in pbs_existing_config_paths %}
+        tar_args+=("{{ path | regex_replace('^/', '') }}")
+        {% endfor %}
+        tar -C / -czf - "${tar_args[@]}" | base64 -w0
+      args:
+        executable: /bin/bash
+      register: pbs_config_archive
+      changed_when: false
+      no_log: true
+
+    - name: Store PBS configuration archive in Vault
+      ansible.builtin.shell: |
+        set -euo pipefail
+        vault kv put "{{ pbs_config_vault_path }}" \
+          source_host="{{ inventory_hostname }}" \
+          exported_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          pbs_version="$PBS_VERSION" \
+          config_paths="{{ pbs_existing_config_paths | join(',') }}" \
+          config_tar_gz_b64="$PBS_CONFIG_ARCHIVE"
+      args:
+        executable: /bin/bash
+      environment:
+        PBS_VERSION: "{{ pbs_version.stdout | default('unknown') | replace('\n', ' ') }}"
+        PBS_CONFIG_ARCHIVE: "{{ pbs_config_archive.stdout }}"
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      no_log: true
+
+    - name: Report PBS configuration export
+      ansible.builtin.debug:
+        msg:
+          - "Exported PBS configuration from {{ inventory_hostname }} to Vault path {{ pbs_config_vault_path }}."
+          - "Captured paths: {{ pbs_existing_config_paths | join(', ') }}"
+          - "PBS version: {{ pbs_version.stdout | default('unknown') | replace('\n', ' ') }}"

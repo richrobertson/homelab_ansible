@@ -1,0 +1,106 @@
+---
+- name: Restore PBS configuration from Vault
+  hosts: "{{ pbs_config_restore_hosts | default('pbs_restore') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    pbs_config_vault_path: secret/proxmox/pbs/prod/config
+    pbs_config_restore_dir: /root/pbs-config-restore
+    pbs_config_apply: false
+    pbs_config_backup_dir: "/root/pbs-config-pre-restore-{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+
+  tasks:
+    - name: Fetch PBS configuration archive from Vault
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - get
+          - -field=config_tar_gz_b64
+          - "{{ pbs_config_vault_path }}"
+      delegate_to: localhost
+      become: false
+      register: pbs_config_archive
+      changed_when: false
+      no_log: true
+
+    - name: Ensure restore staging directory exists
+      ansible.builtin.file:
+        path: "{{ pbs_config_restore_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Write archived PBS configuration to staging
+      ansible.builtin.copy:
+        dest: "{{ pbs_config_restore_dir }}/pbs-config.tar.gz.b64"
+        content: "{{ pbs_config_archive.stdout }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Decode archived PBS configuration on target
+      ansible.builtin.shell: |
+        set -euo pipefail
+        base64 -d "{{ pbs_config_restore_dir }}/pbs-config.tar.gz.b64" > "{{ pbs_config_restore_dir }}/pbs-config.tar.gz"
+        chmod 0600 "{{ pbs_config_restore_dir }}/pbs-config.tar.gz"
+        chown root:root "{{ pbs_config_restore_dir }}/pbs-config.tar.gz"
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: List archived PBS configuration contents
+      ansible.builtin.command:
+        cmd: "tar -tzf {{ pbs_config_restore_dir }}/pbs-config.tar.gz"
+      register: pbs_config_archive_contents
+      changed_when: false
+
+    - name: Show archived PBS configuration contents
+      ansible.builtin.debug:
+        var: pbs_config_archive_contents.stdout_lines
+
+    - name: Stop PBS services before applying restored configuration
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - proxmox-backup-proxy
+        - proxmox-backup
+      when: pbs_config_apply | bool
+
+    - name: Backup current PBS configuration paths before applying restore
+      ansible.builtin.shell: |
+        set -euo pipefail
+        mkdir -p "{{ pbs_config_backup_dir }}"
+        for path in /etc/proxmox-backup /etc/apt/sources.list /etc/apt/sources.list.d /etc/network/interfaces /etc/hosts /etc/hostname /etc/systemd/timesyncd.conf /etc/chrony; do
+          if [ -e "$path" ]; then
+            mkdir -p "{{ pbs_config_backup_dir }}/$(dirname "$path")"
+            cp -a "$path" "{{ pbs_config_backup_dir }}$path"
+          fi
+        done
+      args:
+        executable: /bin/bash
+      when: pbs_config_apply | bool
+
+    - name: Apply restored PBS configuration
+      ansible.builtin.command:
+        cmd: "tar -C / -xzf {{ pbs_config_restore_dir }}/pbs-config.tar.gz"
+      when: pbs_config_apply | bool
+
+    - name: Start PBS services after applying restored configuration
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - proxmox-backup
+        - proxmox-backup-proxy
+      when: pbs_config_apply | bool
+
+    - name: Report restore staging status
+      ansible.builtin.debug:
+        msg:
+          - "PBS configuration archive staged at {{ pbs_config_restore_dir }} on {{ inventory_hostname }}."
+          - "Set pbs_config_apply=true to stop PBS services, backup current config to {{ pbs_config_backup_dir }}, and extract the archive onto /."
