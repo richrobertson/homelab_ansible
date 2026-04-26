@@ -148,6 +148,28 @@
     label: "{{ link.link_name }}"
   when: thunderbolt_reload_networking | bool
 
+- name: Apply Thunderbolt receive packet steering
+  ansible.builtin.shell: |
+    set -e
+    changed=0
+    for rps_file in /sys/class/net/{{ link.link_name }}/queues/rx-*/rps_cpus; do
+      [ -e "$rps_file" ] || continue
+      current="$(cat "$rps_file")"
+      if [ "$current" != "{{ thunderbolt_rps_cpus }}" ]; then
+        echo "{{ thunderbolt_rps_cpus }}" > "$rps_file"
+        changed=1
+      fi
+    done
+    exit "$changed"
+  register: thunderbolt_rps_apply
+  changed_when: thunderbolt_rps_apply.rc == 1
+  failed_when: thunderbolt_rps_apply.rc not in [0, 1]
+  loop: "{{ thunderbolt_links }}"
+  loop_control:
+    loop_var: link
+    label: "{{ link.link_name }}"
+  when: thunderbolt_rps_enabled | bool
+
 - name: Remove stale Thunderbolt IPv4 loopbacks
   ansible.builtin.shell: |
     ip -o addr show dev lo |

@@ -4,6 +4,9 @@ auto {{ link.link_name }}
 iface {{ link.link_name }} inet manual
     pre-up ip link set dev $IFACE mtu {{ thunderbolt_mtu }} up
     post-up ip link set dev $IFACE mtu {{ thunderbolt_mtu }} up
+{% if thunderbolt_rps_enabled | bool %}
+    post-up find /sys/class/net/$IFACE/queues -path '*/rx-*/rps_cpus' -exec sh -c 'echo {{ thunderbolt_rps_cpus | quote }} > "$1"' _ {} \; || true
+{% endif %}
     post-down ip link set dev $IFACE down
 
 {% endfor %}

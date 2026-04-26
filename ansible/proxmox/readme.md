@@ -13,6 +13,8 @@ This directory contains playbooks, roles, and templates for managing Proxmox clu
 - `intel_vpro.yml`: configure Intel vPro interfaces on Proxmox nodes
 - `provision_certificates.yml`: configure Vault PKI and Vault Agent automation for Proxmox API certificates
 - `disable_vlan_hw_filtering.yml`: disable VLAN hardware filtering on Proxmox interfaces and keep it persistent across reboots
+- `configure_thunderbolt_transport.yml`: point Proxmox live migration and scheduled replication at the Thunderbolt ring
+- `proxmox_transport_metrics.yml`: export Proxmox migration and replication transport metrics through node-exporter textfile collection
 
 ## Roles and templates
 
@@ -33,6 +35,8 @@ ansible-playbook -i inventory/environments/production.ini ansible/proxmox/cpu_th
 ansible-playbook -i inventory/proxmox.yml ansible/proxmox/intel_vpro.yml
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/provision_certificates.yml --limit proxmox_cert_nodes
 ansible-playbook -i inventory/proxmox.yml ansible/proxmox/disable_vlan_hw_filtering.yml
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/configure_thunderbolt_transport.yml
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/proxmox_transport_metrics.yml
 ```
 
 Adjust the inventory path to match the environment you are targeting.

@@ -1,0 +1,114 @@
+#!/bin/bash
+set -euo pipefail
+
+TEXTFILE_DIR="{{ proxmox_transport_metrics_textfile_dir }}"
+OUT="${TEXTFILE_DIR}/proxmox_transport.prom"
+TMP="${OUT}.$$"
+NODE="$(hostname -s)"
+THUNDERBOLT_NETWORK="{{ proxmox_transport_metrics_thunderbolt_network }}"
+
+mkdir -p "$TEXTFILE_DIR"
+
+escape_label() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+write_metric() {
+  printf '%s\n' "$1" >> "$TMP"
+}
+
+: > "$TMP"
+
+OPTIONS_JSON="$(pvesh get /cluster/options --output-format json)"
+MIGRATION_NETWORK="$(jq -r '.migration.network // ""' <<<"$OPTIONS_JSON")"
+MIGRATION_TYPE="$(jq -r '.migration.type // "secure"' <<<"$OPTIONS_JSON")"
+REPLICATION_NETWORK="$(jq -r '.replication.network // ""' <<<"$OPTIONS_JSON")"
+REPLICATION_TYPE="$(jq -r '.replication.type // "secure"' <<<"$OPTIONS_JSON")"
+
+write_metric '# HELP proxmox_transport_datacenter_configured Proxmox datacenter migration and replication transport configuration state.'
+write_metric '# TYPE proxmox_transport_datacenter_configured gauge'
+write_metric "proxmox_transport_datacenter_configured{node=\"$(escape_label "$NODE")\",transport=\"migration\",network=\"$(escape_label "$MIGRATION_NETWORK")\",type=\"$(escape_label "$MIGRATION_TYPE")\"} 1"
+write_metric "proxmox_transport_datacenter_configured{node=\"$(escape_label "$NODE")\",transport=\"replication\",network=\"$(escape_label "$REPLICATION_NETWORK")\",type=\"$(escape_label "$REPLICATION_TYPE")\"} 1"
+
+write_metric '# HELP proxmox_transport_thunderbolt_network_configured Whether migration and replication are configured for the expected Thunderbolt network.'
+write_metric '# TYPE proxmox_transport_thunderbolt_network_configured gauge'
+[ "$MIGRATION_NETWORK" = "$THUNDERBOLT_NETWORK" ] && migration_ok=1 || migration_ok=0
+[ "$REPLICATION_NETWORK" = "$THUNDERBOLT_NETWORK" ] && replication_ok=1 || replication_ok=0
+write_metric "proxmox_transport_thunderbolt_network_configured{node=\"$(escape_label "$NODE")\",transport=\"migration\",network=\"$(escape_label "$THUNDERBOLT_NETWORK")\"} $migration_ok"
+write_metric "proxmox_transport_thunderbolt_network_configured{node=\"$(escape_label "$NODE")\",transport=\"replication\",network=\"$(escape_label "$THUNDERBOLT_NETWORK")\"} $replication_ok"
+
+write_metric '# HELP proxmox_transport_peer_route_up Whether this node routes to each peer Thunderbolt loopback through a Thunderbolt interface.'
+write_metric '# TYPE proxmox_transport_peer_route_up gauge'
+for peer in pve3 pve4 pve5; do
+  peer_id="${peer#pve}"
+  peer_ip="10.0.0.8${peer_id}"
+  [ "$peer" = "$NODE" ] && continue
+  if ip route get "$peer_ip" 2>/dev/null | grep -Eq 'dev en0[56]'; then
+    route_up=1
+  else
+    route_up=0
+  fi
+  write_metric "proxmox_transport_peer_route_up{node=\"$(escape_label "$NODE")\",peer=\"$(escape_label "$peer")\",peer_ip=\"$(escape_label "$peer_ip")\"} $route_up"
+done
+
+TASKS_JSON="$(pvesh get "/nodes/${NODE}/tasks" --limit 200 --output-format json)"
+now="$(date +%s)"
+window_start="$((now - 86400))"
+
+write_metric '# HELP proxmox_migration_tasks_24h Proxmox migration task count over the last 24 hours by status.'
+write_metric '# TYPE proxmox_migration_tasks_24h gauge'
+jq -r --argjson window_start "$window_start" '
+  [ .[]
+    | select((.type == "qmigrate" or .type == "vzmigrate") and (.starttime // 0) >= $window_start)
+    | {status: (if (.status // "") == "OK" then "ok" else "failed" end)}
+  ]
+  | group_by(.status)
+  | map({status: .[0].status, count: length})
+  | .[]
+  | "\(.status) \(.count)"
+' <<<"$TASKS_JSON" | while read -r status count; do
+  write_metric "proxmox_migration_tasks_24h{node=\"$(escape_label "$NODE")\",status=\"$(escape_label "$status")\"} $count"
+done
+
+for status in ok failed; do
+  if ! grep -q "proxmox_migration_tasks_24h{node=\"$(escape_label "$NODE")\",status=\"$status\"}" "$TMP"; then
+    write_metric "proxmox_migration_tasks_24h{node=\"$(escape_label "$NODE")\",status=\"$status\"} 0"
+  fi
+done
+
+write_metric '# HELP proxmox_migration_last_task_timestamp_seconds Last Proxmox migration task start timestamp by status.'
+write_metric '# TYPE proxmox_migration_last_task_timestamp_seconds gauge'
+jq -r '
+  [ .[] | select(.type == "qmigrate" or .type == "vzmigrate") ]
+  | group_by(if (.status // "") == "OK" then "ok" else "failed" end)
+  | map({status: (if (.[0].status // "") == "OK" then "ok" else "failed" end), ts: (map(.starttime // 0) | max)})
+  | .[]
+  | "\(.status) \(.ts)"
+' <<<"$TASKS_JSON" | while read -r status ts; do
+  write_metric "proxmox_migration_last_task_timestamp_seconds{node=\"$(escape_label "$NODE")\",status=\"$(escape_label "$status")\"} $ts"
+done
+
+REPLICATION_JSON="$(pvesh get /cluster/replication --output-format json)"
+write_metric '# HELP proxmox_replication_jobs Number of Proxmox replication jobs by enabled state.'
+write_metric '# TYPE proxmox_replication_jobs gauge'
+for enabled in true false; do
+  count="$(jq -r --argjson enabled "$enabled" '[.[] | select(((.disable // 0) | tonumber) == (if $enabled then 0 else 1 end))] | length' <<<"$REPLICATION_JSON")"
+  write_metric "proxmox_replication_jobs{node=\"$(escape_label "$NODE")\",enabled=\"$enabled\"} $count"
+done
+
+write_metric '# HELP proxmox_replication_job_config Proxmox replication job configuration metadata.'
+write_metric '# TYPE proxmox_replication_job_config gauge'
+jq -r '.[] | [.id, .target, (.rate // ""), (.schedule // ""), (.disable // 0)] | @tsv' <<<"$REPLICATION_JSON" |
+while IFS=$'\t' read -r job_id target rate schedule disable; do
+  [ -n "$job_id" ] || continue
+  [ "$disable" = "0" ] && enabled="true" || enabled="false"
+  write_metric "proxmox_replication_job_config{node=\"$(escape_label "$NODE")\",job_id=\"$(escape_label "$job_id")\",target=\"$(escape_label "$target")\",enabled=\"$(escape_label "$enabled")\",rate_mbps=\"$(escape_label "$rate")\",schedule=\"$(escape_label "$schedule")\"} 1"
+done
+
+write_metric '# HELP proxmox_transport_metrics_scrape_success Whether the Proxmox transport metrics collector completed successfully.'
+write_metric '# TYPE proxmox_transport_metrics_scrape_success gauge'
+write_metric "proxmox_transport_metrics_scrape_success{node=\"$(escape_label "$NODE")\"} 1"
+
+chown prometheus:prometheus "$TMP" 2>/dev/null || true
+chmod 0644 "$TMP"
+mv "$TMP" "$OUT"

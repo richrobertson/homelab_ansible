@@ -17,6 +17,8 @@ thunderbolt_udev_rules_file: /etc/udev/rules.d/10-tb-en.rules
 thunderbolt_udev_script_dir: /usr/local/bin
 thunderbolt_enable_iommu: true
 thunderbolt_reload_networking: true
+thunderbolt_rps_enabled: true
+thunderbolt_rps_cpus: "00fff"
 
 thunderbolt_node_id: "{{ inventory_hostname | regex_search('[0-9]+') | default('1', true) }}"
 thunderbolt_loopback_ipv4: "10.0.0.8{{ thunderbolt_node_id }}"

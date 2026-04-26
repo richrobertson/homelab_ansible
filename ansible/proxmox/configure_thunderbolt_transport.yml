@@ -1,0 +1,89 @@
+---
+- name: Use the Thunderbolt ring for Proxmox migration and replication
+  hosts: "{{ thunderbolt_transport_target_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    thunderbolt_node_id: "{{ inventory_hostname | regex_search('[0-9]+') | default('1', true) }}"
+    thunderbolt_loopback_ipv4: "10.0.0.8{{ thunderbolt_node_id }}"
+    thunderbolt_transport_network: 10.0.0.0/24
+    thunderbolt_transport_migration_type: secure
+    thunderbolt_transport_replication_type: secure
+
+  tasks:
+    - name: Verify this node has its Thunderbolt loopback address
+      ansible.builtin.command: "ip -o -4 addr show dev lo to {{ thunderbolt_loopback_ipv4 }}/32"
+      changed_when: false
+
+    - name: Verify routes to peer Thunderbolt loopbacks
+      ansible.builtin.command: "ip route get 10.0.0.8{{ item | regex_search('[0-9]+') | default('1', true) }}"
+      register: thunderbolt_transport_route_checks
+      changed_when: false
+      failed_when:
+        - thunderbolt_transport_route_checks.rc != 0
+          or thunderbolt_transport_route_checks.stdout is not search('dev en0[56]')
+      loop: "{{ ansible_play_hosts_all }}"
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - item != inventory_hostname
+
+    - name: Configure Proxmox migration and replication networks
+      ansible.builtin.shell: |
+        set -e
+        current_migration="$(
+          pvesh get /cluster/options --output-format json |
+          jq -r '.migration.network // ""'
+        )"
+        current_migration_type="$(
+          pvesh get /cluster/options --output-format json |
+          jq -r '.migration.type // "secure"'
+        )"
+        current_replication="$(
+          pvesh get /cluster/options --output-format json |
+          jq -r '.replication.network // ""'
+        )"
+        current_replication_type="$(
+          pvesh get /cluster/options --output-format json |
+          jq -r '.replication.type // "secure"'
+        )"
+
+        if [ "$current_migration" = "{{ thunderbolt_transport_network }}" ] &&
+           [ "$current_migration_type" = "{{ thunderbolt_transport_migration_type }}" ] &&
+           [ "$current_replication" = "{{ thunderbolt_transport_network }}" ] &&
+           [ "$current_replication_type" = "{{ thunderbolt_transport_replication_type }}" ]; then
+          exit 0
+        fi
+
+        pvesh set /cluster/options \
+          --migration "type={{ thunderbolt_transport_migration_type }},network={{ thunderbolt_transport_network }}" \
+          --replication "type={{ thunderbolt_transport_replication_type }},network={{ thunderbolt_transport_network }}"
+        exit 2
+      args:
+        executable: /bin/bash
+      register: thunderbolt_transport_configure
+      changed_when: thunderbolt_transport_configure.rc == 2
+      failed_when: thunderbolt_transport_configure.rc not in [0, 2]
+      run_once: true
+
+    - name: Verify Proxmox migration and replication networks
+      ansible.builtin.command: pvesh get /cluster/options --output-format json
+      register: thunderbolt_transport_cluster_options
+      changed_when: false
+      failed_when: >-
+        (thunderbolt_transport_cluster_options.stdout | from_json).migration.network != thunderbolt_transport_network
+        or
+        ((thunderbolt_transport_cluster_options.stdout | from_json).migration.type | default('secure')) != thunderbolt_transport_migration_type
+        or
+        (thunderbolt_transport_cluster_options.stdout | from_json).replication.network != thunderbolt_transport_network
+        or
+        ((thunderbolt_transport_cluster_options.stdout | from_json).replication.type | default('secure')) != thunderbolt_transport_replication_type
+      run_once: true
+
+    - name: Show Proxmox transport settings
+      ansible.builtin.debug:
+        msg:
+          migration: "{{ (thunderbolt_transport_cluster_options.stdout | from_json).migration }}"
+          replication: "{{ (thunderbolt_transport_cluster_options.stdout | from_json).replication }}"
+      run_once: true

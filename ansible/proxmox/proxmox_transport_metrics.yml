@@ -1,0 +1,100 @@
+---
+- name: Export Proxmox migration and replication transport metrics
+  hosts: "{{ proxmox_transport_metrics_target_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    proxmox_transport_metrics_textfile_dir: /var/lib/prometheus/node-exporter
+    proxmox_transport_metrics_script: /usr/local/sbin/proxmox-transport-metrics.sh
+    proxmox_transport_metrics_thunderbolt_network: 10.0.0.0/24
+    proxmox_transport_metrics_interval: 60s
+    proxmox_node_exporter_args: "--collector.textfile.directory={{ proxmox_transport_metrics_textfile_dir }}"
+
+  tasks:
+    - name: Ensure node exporter textfile directory exists
+      ansible.builtin.file:
+        path: "{{ proxmox_transport_metrics_textfile_dir }}"
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: "0755"
+
+    - name: Enable node exporter textfile collector
+      ansible.builtin.lineinfile:
+        path: /etc/default/prometheus-node-exporter
+        regexp: '^ARGS='
+        line: 'ARGS="{{ proxmox_node_exporter_args }}"'
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart prometheus-node-exporter
+
+    - name: Install Proxmox transport metrics collector
+      ansible.builtin.template:
+        src: proxmox-transport-metrics.sh.j2
+        dest: "{{ proxmox_transport_metrics_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install Proxmox transport metrics service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/proxmox-transport-metrics.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Collect Proxmox migration and replication transport metrics
+          Wants=network-online.target
+          After=network-online.target pve-cluster.service
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ proxmox_transport_metrics_script }}
+
+    - name: Install Proxmox transport metrics timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/proxmox-transport-metrics.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run Proxmox transport metrics collector every {{ proxmox_transport_metrics_interval }}
+
+          [Timer]
+          OnBootSec=30s
+          OnUnitActiveSec={{ proxmox_transport_metrics_interval }}
+          AccuracySec=10s
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable and run Proxmox transport metrics timer
+      ansible.builtin.systemd:
+        name: proxmox-transport-metrics.timer
+        enabled: true
+        state: started
+
+    - name: Run Proxmox transport metrics collector now
+      ansible.builtin.command: "{{ proxmox_transport_metrics_script }}"
+      changed_when: false
+
+    - name: Verify transport metrics file exists
+      ansible.builtin.stat:
+        path: "{{ proxmox_transport_metrics_textfile_dir }}/proxmox_transport.prom"
+      register: proxmox_transport_metrics_file
+      failed_when: not proxmox_transport_metrics_file.stat.exists
+
+  handlers:
+    - name: Restart prometheus-node-exporter
+      ansible.builtin.systemd:
+        name: prometheus-node-exporter
+        state: restarted

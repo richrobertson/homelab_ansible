@@ -4,15 +4,28 @@ set -u
 LOGFILE="/tmp/udev-debug.log"
 VERBOSE="" # Set this to "-v" for verbose logging
 IF="{{ link.link_name }}"
+RPS_ENABLED="{{ thunderbolt_rps_enabled | bool | ternary('true', 'false') }}"
+RPS_CPUS="{{ thunderbolt_rps_cpus }}"
 
 echo "$(date): pve-$IF.sh triggered by udev" >> "$LOGFILE"
+
+apply_rps() {
+    [ "$RPS_ENABLED" = "true" ] || return 0
+
+    for rps_file in /sys/class/net/"$IF"/queues/rx-*/rps_cpus; do
+        [ -e "$rps_file" ] || continue
+        echo "$RPS_CPUS" > "$rps_file" 2>> "$LOGFILE" || true
+    done
+}
 
 # If multiple interfaces go up at the same time,
 # retry 10 times and break the retry when successful
 for i in {1..10}; do
     echo "$(date): Attempt $i to bring up $IF" >> "$LOGFILE"
     /usr/sbin/ip link set dev "$IF" mtu "{{ thunderbolt_mtu }}" up >> "$LOGFILE" 2>&1 || true
+    apply_rps
     /usr/sbin/ifup --allow=auto $VERBOSE "$IF" >> "$LOGFILE" 2>&1 && {
+        apply_rps
         echo "$(date): Successfully brought up $IF on attempt $i" >> "$LOGFILE"
         exit 0
     }
