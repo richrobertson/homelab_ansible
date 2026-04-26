@@ -20,6 +20,7 @@ This directory contains playbooks, roles, and templates for managing Proxmox clu
 - `pbs_config_restore_from_vault.yml`: stage or apply a PBS configuration archive from Vault onto a replacement PBS VM
 - `proxmox_transport_metrics.yml`: export Proxmox migration, replication, backup storage route, and Ceph transport metrics through node-exporter textfile collection
 - `pbs_guest_agent_freeze_audit.yml`: audit PBS-backed QEMU VMs for Proxmox guest-agent enablement, guest-agent responsiveness, and filesystem freeze/thaw readiness
+- `configure_authelia_sso.yml`: seed Proxmox/Authelia OIDC secrets in Vault and configure the Proxmox OpenID Connect realm for Authelia SSO
 
 ## Roles and templates
 
@@ -47,6 +48,7 @@ ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_co
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_config_restore_from_vault.yml -e pbs_config_restore_hosts=pbs-restore.myrobertson.net
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_guest_agent_freeze_audit.yml
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/proxmox_transport_metrics.yml
+VAULT_ADDR=https://vault.myrobertson.net:8200 VAULT_TOKEN=<token> ansible-playbook -i inventory/environments/production.ini ansible/proxmox/configure_authelia_sso.yml
 ```
 
 Adjust the inventory path to match the environment you are targeting.

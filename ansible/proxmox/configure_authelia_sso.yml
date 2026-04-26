@@ -1,0 +1,277 @@
+---
+- name: Prepare Proxmox Authelia SSO secrets in Vault
+  hosts: localhost
+  gather_facts: false
+  vars:
+    proxmox_sso_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    proxmox_sso_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    proxmox_sso_vault_mount: secret
+    proxmox_sso_vault_path: proxmox/cl0/sso/authelia
+    proxmox_sso_authelia_vault_path: authelia/prod
+    proxmox_sso_authelia_hash_key: pve_oidc
+    proxmox_sso_client_id: proxmox_prod
+    proxmox_sso_client_name: Proxmox VE cl0
+    proxmox_sso_realm: authelia
+    proxmox_sso_issuer_url: https://auth.myrobertson.com
+    proxmox_sso_rotate_secret: false
+  tasks:
+    - name: Require Vault environment
+      ansible.builtin.assert:
+        that:
+          - proxmox_sso_vault_addr | length > 0
+          - proxmox_sso_vault_token | length > 0
+        fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running this playbook.
+
+    - name: Read existing Proxmox SSO secret from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ proxmox_sso_vault_addr }}"
+        token: "{{ proxmox_sso_vault_token }}"
+        engine_mount_point: "{{ proxmox_sso_vault_mount }}"
+        path: "{{ proxmox_sso_vault_path }}"
+      register: proxmox_sso_vault_existing
+      failed_when: false
+      no_log: true
+
+    - name: Select existing client secret when rotation is disabled
+      ansible.builtin.set_fact:
+        proxmox_sso_existing_client_secret: "{{ proxmox_sso_vault_existing.secret.client_secret | default('') }}"
+      no_log: true
+
+    - name: Generate a new Proxmox OIDC client secret when needed
+      ansible.builtin.set_fact:
+        proxmox_sso_client_secret: >-
+          {{
+            lookup(
+              'ansible.builtin.password',
+              '/dev/null',
+              chars='ascii_letters,digits',
+              length=72
+            )
+          }}
+        proxmox_sso_generated_client_secret: true
+      when: proxmox_sso_rotate_secret | bool or proxmox_sso_existing_client_secret | length == 0
+      no_log: true
+
+    - name: Reuse current Proxmox OIDC client secret
+      ansible.builtin.set_fact:
+        proxmox_sso_client_secret: "{{ proxmox_sso_existing_client_secret }}"
+        proxmox_sso_generated_client_secret: false
+      when:
+        - not (proxmox_sso_rotate_secret | bool)
+        - proxmox_sso_existing_client_secret | length > 0
+      no_log: true
+
+    - name: Read Authelia production secret from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ proxmox_sso_vault_addr }}"
+        token: "{{ proxmox_sso_vault_token }}"
+        engine_mount_point: "{{ proxmox_sso_vault_mount }}"
+        path: "{{ proxmox_sso_authelia_vault_path }}"
+      register: proxmox_sso_authelia_vault_existing
+      no_log: true
+
+    - name: Generate Authelia PBKDF2 hash for the Proxmox OIDC client secret
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import base64, hashlib, os, secrets
+            password = os.environ["PROXMOX_SSO_CLIENT_SECRET"].encode()
+            salt = secrets.token_bytes(16)
+            digest = hashlib.pbkdf2_hmac("sha512", password, salt, 310000)
+            enc = lambda b: base64.b64encode(b).decode().rstrip("=")
+            print("$pbkdf2-sha512$310000$%s$%s" % (enc(salt), enc(digest)))
+      environment:
+        PROXMOX_SSO_CLIENT_SECRET: "{{ proxmox_sso_client_secret }}"
+      register: proxmox_sso_client_secret_hash
+      changed_when: false
+      when: >-
+        proxmox_sso_rotate_secret | bool
+        or proxmox_sso_generated_client_secret | bool
+        or proxmox_sso_authelia_vault_existing.secret[proxmox_sso_authelia_hash_key] is not defined
+      no_log: true
+
+    - name: Select Authelia PBKDF2 hash for the Proxmox OIDC client secret
+      ansible.builtin.set_fact:
+        proxmox_sso_client_secret_hash_value: >-
+          {{
+            proxmox_sso_client_secret_hash.stdout
+            if (
+              proxmox_sso_rotate_secret | bool
+              or proxmox_sso_generated_client_secret | bool
+              or proxmox_sso_authelia_vault_existing.secret[proxmox_sso_authelia_hash_key] is not defined
+            )
+            else proxmox_sso_authelia_vault_existing.secret[proxmox_sso_authelia_hash_key]
+          }}
+      no_log: true
+
+    - name: Store Proxmox OIDC client secret in Vault
+      community.hashi_vault.vault_kv2_write:
+        url: "{{ proxmox_sso_vault_addr }}"
+        token: "{{ proxmox_sso_vault_token }}"
+        engine_mount_point: "{{ proxmox_sso_vault_mount }}"
+        path: "{{ proxmox_sso_vault_path }}"
+        read_before_write: true
+        data:
+          client_id: "{{ proxmox_sso_client_id }}"
+          client_secret: "{{ proxmox_sso_client_secret }}"
+          client_name: "{{ proxmox_sso_client_name }}"
+          realm: "{{ proxmox_sso_realm }}"
+          issuer_url: "{{ proxmox_sso_issuer_url }}"
+      no_log: true
+
+    - name: Store Authelia OIDC client secret hash in Vault
+      community.hashi_vault.vault_kv2_write:
+        url: "{{ proxmox_sso_vault_addr }}"
+        token: "{{ proxmox_sso_vault_token }}"
+        engine_mount_point: "{{ proxmox_sso_vault_mount }}"
+        path: "{{ proxmox_sso_authelia_vault_path }}"
+        read_before_write: true
+        data: >-
+          {{
+            proxmox_sso_authelia_vault_existing.secret
+            | combine({proxmox_sso_authelia_hash_key: proxmox_sso_client_secret_hash_value})
+          }}
+      no_log: true
+
+- name: Configure Proxmox Authelia SSO realm
+  hosts: "{{ proxmox_sso_target_hosts | default('proxmox_nodes') }}"
+  gather_facts: false
+  run_once: true
+  vars:
+    proxmox_sso_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    proxmox_sso_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    proxmox_sso_vault_mount: secret
+    proxmox_sso_vault_path: proxmox/cl0/sso/authelia
+    proxmox_sso_realm: authelia
+    proxmox_sso_issuer_url: https://auth.myrobertson.com
+    proxmox_sso_client_id: proxmox_prod
+    proxmox_sso_scopes: "openid email profile groups proxmox_groups"
+    proxmox_sso_groups_claim: proxmox_groups
+    proxmox_sso_admin_group: "proxAdmins-authelia"
+    proxmox_sso_disable_local_pve_users: false
+    proxmox_sso_keep_local_users:
+      - root@pam
+  tasks:
+    - name: Read Proxmox OIDC client secret from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ proxmox_sso_vault_addr }}"
+        token: "{{ proxmox_sso_vault_token }}"
+        engine_mount_point: "{{ proxmox_sso_vault_mount }}"
+        path: "{{ proxmox_sso_vault_path }}"
+      delegate_to: localhost
+      register: proxmox_sso_vault_secret
+      no_log: true
+
+    - name: List Proxmox realms
+      ansible.builtin.command: pveum realm list --output-format json
+      register: proxmox_sso_realms
+      changed_when: false
+
+    - name: Track whether the Authelia realm exists
+      ansible.builtin.set_fact:
+        proxmox_sso_realm_exists: "{{ proxmox_sso_realm in ((proxmox_sso_realms.stdout | from_json) | map(attribute='realm') | list) }}"
+
+    - name: Add the Authelia OpenID Connect realm
+      ansible.builtin.command:
+        argv:
+          - pveum
+          - realm
+          - add
+          - "{{ proxmox_sso_realm }}"
+          - --type
+          - openid
+          - --issuer-url
+          - "{{ proxmox_sso_issuer_url }}"
+          - --client-id
+          - "{{ proxmox_sso_client_id }}"
+          - --client-key
+          - "{{ proxmox_sso_vault_secret.secret.client_secret }}"
+          - --username-claim
+          - subject
+          - --scopes
+          - "{{ proxmox_sso_scopes }}"
+          - --query-userinfo
+          - "1"
+          - --autocreate
+          - "1"
+          - --groups-autocreate
+          - "1"
+          - --groups-claim
+          - "{{ proxmox_sso_groups_claim }}"
+      when: not (proxmox_sso_realm_exists | bool)
+      no_log: true
+
+    - name: Update the Authelia OpenID Connect realm
+      ansible.builtin.command:
+        argv:
+          - pveum
+          - realm
+          - modify
+          - "{{ proxmox_sso_realm }}"
+          - --issuer-url
+          - "{{ proxmox_sso_issuer_url }}"
+          - --client-id
+          - "{{ proxmox_sso_client_id }}"
+          - --client-key
+          - "{{ proxmox_sso_vault_secret.secret.client_secret }}"
+          - --scopes
+          - "{{ proxmox_sso_scopes }}"
+          - --query-userinfo
+          - "1"
+          - --autocreate
+          - "1"
+          - --groups-autocreate
+          - "1"
+          - --groups-claim
+          - "{{ proxmox_sso_groups_claim }}"
+      when: proxmox_sso_realm_exists | bool
+      no_log: true
+
+    - name: List Proxmox groups
+      ansible.builtin.command: pveum group list --output-format json
+      register: proxmox_sso_groups
+      changed_when: false
+
+    - name: Create mapped Proxmox admins group if missing
+      ansible.builtin.command:
+        argv:
+          - pveum
+          - group
+          - add
+          - "{{ proxmox_sso_admin_group }}"
+          - --comment
+          - "Authelia OIDC mapped proxAdmins"
+      when: proxmox_sso_admin_group not in ((proxmox_sso_groups.stdout | from_json) | map(attribute='groupid') | list)
+
+    - name: Grant Administrator role to mapped proxAdmins group
+      ansible.builtin.command:
+        argv:
+          - pveum
+          - aclmod
+          - /
+          - -group
+          - "{{ proxmox_sso_admin_group }}"
+          - -role
+          - Administrator
+
+    - name: List Proxmox users
+      ansible.builtin.command: pveum user list --output-format json
+      register: proxmox_sso_users
+      changed_when: false
+      when: proxmox_sso_disable_local_pve_users | bool
+
+    - name: Disable local pve realm users after SSO is enabled
+      ansible.builtin.command:
+        argv:
+          - pveum
+          - user
+          - modify
+          - "{{ item.userid }}"
+          - --enable
+          - "0"
+      loop: "{{ (proxmox_sso_users.stdout | from_json) | selectattr('userid', 'match', '.*@pve$') | rejectattr('userid', 'in', proxmox_sso_keep_local_users) | list }}"
+      loop_control:
+        label: "{{ item.userid }}"
+      when: proxmox_sso_disable_local_pve_users | bool
