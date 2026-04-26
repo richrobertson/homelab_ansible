@@ -29,7 +29,9 @@ PBS S3 datastore support is currently a technology preview. Keep the Scooter dat
   - local S3 cache disk is mounted at `/mnt/datastore/pbs-s3-cache`
 - Current datastore status:
   - `store1` is restored in PBS config but unavailable until the Scooter-backed datastore disk/path is attached.
-  - `pbs-s3` is restored in PBS config but still references the old AWS S3 endpoint. Replace it with the Backblaze B2-backed datastore after storing a bucket-scoped Backblaze application key in Vault.
+  - `pbs-s3` is restored in PBS config and should continue to use the existing AWS S3 endpoint `aws-homelab-pbs` with bucket `myrobertson-homelab-pbs`.
+  - `pbs-s3` is currently blocked by an empty replacement cache path at `/mnt/datastore/pbs-s3-cache`; restore or refresh the S3 cache metadata before expecting Proxmox storage health to turn active.
+  - The Backblaze B2 bucket `myrobertson-pbs` is for a new additional datastore, not a replacement for `pbs-s3`.
 - Thunderbolt host loopbacks:
   - pve3: `10.0.0.83/32`
   - pve4: `10.0.0.84/32`
