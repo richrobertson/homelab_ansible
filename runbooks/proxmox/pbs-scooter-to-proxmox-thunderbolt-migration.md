@@ -18,12 +18,18 @@ PBS S3 datastore support is currently a technology preview. Keep the Scooter dat
 - Current primary PBS snapshot count visible from Proxmox: 310.
 - Replacement VM shell staged on `pve5`:
   - VMID `217`, name `pbs-restore`
-  - state `running`, booted from installer ISO after the Scooter PBS VM was shut down
+  - state `running`, installed from unattended PBS auto-install ISO after the Scooter PBS VM was shut down
   - boot disk `local-lvm:vm-217-disk-0`, 64 GiB
   - object/cache disk `local-lvm:vm-217-disk-1`, 128 GiB
-  - installer ISO `local:iso/proxmox-backup-server_4.1-1.iso`
+  - installer ISO detached after install; boot order is `scsi0`
   - NIC `vmbr1`
-  - `192.168.1.217:8007` is expected to stay down until the PBS installer completes and the Vault restore is applied
+  - `192.168.1.217:8007` is online
+  - PBS configuration was restored from Vault with the fresh Proxmox VM network configuration preserved
+  - generated install root password is stored at `secret/proxmox/pbs/prod/install`
+  - local S3 cache disk is mounted at `/mnt/datastore/pbs-s3-cache`
+- Current datastore status:
+  - `store1` is restored in PBS config but unavailable until the Scooter-backed datastore disk/path is attached.
+  - `pbs-s3` is restored in PBS config but still references the old AWS S3 endpoint. Replace it with the Backblaze B2-backed datastore after storing a bucket-scoped Backblaze application key in Vault.
 - Thunderbolt host loopbacks:
   - pve3: `10.0.0.83/32`
   - pve4: `10.0.0.84/32`
@@ -72,9 +78,13 @@ Use the matching endpoint profile:
 
 ### Backblaze B2
 
-- Endpoint example already used by Kubernetes backups: `s3.us-west-002.backblazeb2.com`
-- Region example: `us-west-002`
-- Bucket: create a dedicated PBS bucket, for example `myrobertson-pbs-prod`
+- Endpoint: `s3.us-west-002.backblazeb2.com`
+- Region: `us-west-002`
+- Bucket: `myrobertson-pbs`
+- Bucket ID: `bb288c2b85cbce8e9cd3091b`
+- Bucket type: private
+- File lifecycle: keep all versions
+- Object Lock: default 3 days
 - Recommended key scope: bucket-specific key with list, read, write, and delete permissions only for this bucket
 
 Example PBS endpoint:
@@ -123,7 +133,7 @@ Create the S3 datastore after the endpoint is configured:
 
 ```sh
 proxmox-backup-manager datastore create pbs-object /mnt/datastore/pbs-object-cache \
-  --backend type=s3,client=<backblaze-b2-pbs-or-cloudflare-r2-pbs>,bucket=myrobertson-pbs-prod
+  --backend type=s3,client=backblaze-b2-pbs,bucket=myrobertson-pbs
 proxmox-backup-manager datastore update pbs-object --gc-schedule 'daily 04:15'
 proxmox-backup-manager datastore list
 ```
@@ -162,6 +172,7 @@ Confirm:
 - Object-store bucket exists before PBS configuration.
 - Object-store lifecycle rules, object lock, retention, and cost alerts are reviewed before production use.
 - Object-store key is scoped to the PBS bucket and stored in Vault, not committed to Git.
+- Backblaze B2 application key for bucket `myrobertson-pbs` is stored in Vault before creating the PBS S3 endpoint.
 - Existing Scooter datastore is not mounted read-write by more than one PBS instance at the same time.
 
 The existing Scooter datastore is directory-backed on a Unix filesystem. Use a Scooter-backed block device or mount that preserves the required filesystem semantics for PBS chunk directories, fsync, permissions, and locking while it remains attached.
@@ -207,7 +218,20 @@ qm set 217 --scsi0 <target-storage>:vm-217-disk-0,discard=on,ssd=1
 qm set 217 --boot order=scsi0
 ```
 
-For a config-from-Vault rebuild path, install PBS from the staged ISO, update packages, then stage the Vault restore. Keep the NIC link down until the restore has been reviewed and the live Synology PBS VM is stopped or otherwise isolated.
+For a config-from-Vault rebuild path, install PBS from an unattended auto-install ISO, update packages, then stage the Vault restore. Keep the NIC link down until the restore has been reviewed and the live Synology PBS VM is stopped or otherwise isolated.
+
+The replacement install used `proxmox-auto-install-assistant` with `reboot-mode = "power-off"` to avoid an auto-install reboot loop. After the installer powered the VM off, the ISO was detached and boot order was changed to `scsi0`.
+
+Apply the Vault restore with the replacement VM network preserved:
+
+```sh
+source ~/.bash_profile
+ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i '192.168.1.217,' \
+  ansible/proxmox/pbs_config_restore_from_vault.yml \
+  -e pbs_config_restore_hosts=192.168.1.217 \
+  -e ansible_user=root \
+  -e pbs_config_apply=true
+```
 
 Boot with only the intended LAN NIC active first. Validate:
 

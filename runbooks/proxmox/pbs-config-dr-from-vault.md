@@ -100,7 +100,9 @@ The restore playbook:
 3. Extracts the Vault archive onto `/`.
 4. Starts `proxmox-backup` and `proxmox-backup-proxy`.
 
-The exported archive includes `/etc/network/interfaces`, `/etc/hosts`, and `/etc/hostname`. Applying it will make the replacement VM assume the live PBS identity, including `192.168.1.217` and `192.168.7.10`, so the Synology PBS VM must not be simultaneously active on those addresses.
+By default `pbs_config_preserve_network=true`, so `/etc/network/interfaces` from the archive is not applied. This keeps the replacement VM reachable when its NIC names differ from the original Synology VM.
+
+The exported archive includes `/etc/network/interfaces`, `/etc/hosts`, and `/etc/hostname`. Applying it with `pbs_config_preserve_network=false` will make the replacement VM assume the live PBS network identity from the archive, including `192.168.1.217` and `192.168.7.10`, so the Synology PBS VM must not be simultaneously active on those addresses.
 
 ## Post-Restore Checks
 

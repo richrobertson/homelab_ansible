@@ -8,6 +8,7 @@
     pbs_config_vault_path: secret/proxmox/pbs/prod/config
     pbs_config_restore_dir: /root/pbs-config-restore
     pbs_config_apply: false
+    pbs_config_preserve_network: true
     pbs_config_backup_dir: "/root/pbs-config-pre-restore-{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
 
   tasks:
@@ -85,10 +86,25 @@
         executable: /bin/bash
       when: pbs_config_apply | bool
 
+    - name: Apply restored PBS configuration while preserving target network
+      ansible.builtin.command:
+        argv:
+          - tar
+          - --exclude=etc/network/interfaces
+          - -C
+          - /
+          - -xzf
+          - "{{ pbs_config_restore_dir }}/pbs-config.tar.gz"
+      when:
+        - pbs_config_apply | bool
+        - pbs_config_preserve_network | bool
+
     - name: Apply restored PBS configuration
       ansible.builtin.command:
         cmd: "tar -C / -xzf {{ pbs_config_restore_dir }}/pbs-config.tar.gz"
-      when: pbs_config_apply | bool
+      when:
+        - pbs_config_apply | bool
+        - not (pbs_config_preserve_network | bool)
 
     - name: Start PBS services after applying restored configuration
       ansible.builtin.systemd:
@@ -104,3 +120,4 @@
         msg:
           - "PBS configuration archive staged at {{ pbs_config_restore_dir }} on {{ inventory_hostname }}."
           - "Set pbs_config_apply=true to stop PBS services, backup current config to {{ pbs_config_backup_dir }}, and extract the archive onto /."
+          - "By default pbs_config_preserve_network=true keeps the replacement VM network file intact."
