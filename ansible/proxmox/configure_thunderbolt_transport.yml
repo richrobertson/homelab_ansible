@@ -10,8 +10,40 @@
     thunderbolt_transport_network: 10.0.0.0/24
     thunderbolt_transport_migration_type: insecure
     thunderbolt_transport_replication_type: secure
+    thunderbolt_transport_tcp_sysctls:
+      net.core.rmem_max: "134217728"
+      net.core.wmem_max: "134217728"
+      net.ipv4.tcp_rmem: "4096 87380 134217728"
+      net.ipv4.tcp_wmem: "4096 65536 134217728"
+      net.core.default_qdisc: fq
+      net.ipv4.tcp_congestion_control: bbr
 
   tasks:
+    - name: Load BBR congestion control module
+      community.general.modprobe:
+        name: tcp_bbr
+        state: present
+
+    - name: Load BBR congestion control module at boot
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/tcp_bbr.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          tcp_bbr
+
+    - name: Tune TCP for Thunderbolt migration throughput
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.d/90-thunderbolt-migration.conf
+        reload: true
+        state: present
+      loop: "{{ thunderbolt_transport_tcp_sysctls | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
     - name: Verify this node has its Thunderbolt loopback address
       ansible.builtin.command: "ip -o -4 addr show dev lo to {{ thunderbolt_loopback_ipv4 }}/32"
       changed_when: false
