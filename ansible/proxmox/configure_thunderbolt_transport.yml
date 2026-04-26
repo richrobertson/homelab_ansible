@@ -8,7 +8,7 @@
     thunderbolt_node_id: "{{ inventory_hostname | regex_search('[0-9]+') | default('1', true) }}"
     thunderbolt_loopback_ipv4: "10.0.0.8{{ thunderbolt_node_id }}"
     thunderbolt_transport_network: 10.0.0.0/24
-    thunderbolt_transport_migration_type: secure
+    thunderbolt_transport_migration_type: insecure
     thunderbolt_transport_replication_type: secure
 
   tasks:
