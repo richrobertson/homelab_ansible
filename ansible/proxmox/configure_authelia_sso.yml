@@ -14,6 +14,7 @@
     proxmox_sso_realm: authelia
     proxmox_sso_issuer_url: https://auth.myrobertson.com
     proxmox_sso_rotate_secret: false
+    proxmox_sso_regenerate_authelia_hash: false
   tasks:
     - name: Require Vault environment
       ansible.builtin.assert:
@@ -80,7 +81,7 @@
             password = os.environ["PROXMOX_SSO_CLIENT_SECRET"].encode()
             salt = secrets.token_bytes(16)
             digest = hashlib.pbkdf2_hmac("sha512", password, salt, 310000)
-            enc = lambda b: base64.b64encode(b).decode().rstrip("=")
+            enc = lambda b: base64.b64encode(b).decode().rstrip("=").replace("+", ".")
             print("$pbkdf2-sha512$310000$%s$%s" % (enc(salt), enc(digest)))
       environment:
         PROXMOX_SSO_CLIENT_SECRET: "{{ proxmox_sso_client_secret }}"
@@ -88,6 +89,7 @@
       changed_when: false
       when: >-
         proxmox_sso_rotate_secret | bool
+        or proxmox_sso_regenerate_authelia_hash | bool
         or proxmox_sso_generated_client_secret | bool
         or proxmox_sso_authelia_vault_existing.secret[proxmox_sso_authelia_hash_key] is not defined
       no_log: true
@@ -99,6 +101,7 @@
             proxmox_sso_client_secret_hash.stdout
             if (
               proxmox_sso_rotate_secret | bool
+              or proxmox_sso_regenerate_authelia_hash | bool
               or proxmox_sso_generated_client_secret | bool
               or proxmox_sso_authelia_vault_existing.secret[proxmox_sso_authelia_hash_key] is not defined
             )
