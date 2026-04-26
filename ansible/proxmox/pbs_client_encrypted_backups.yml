@@ -1,0 +1,153 @@
+---
+- name: Configure encrypted Proxmox guest backups to Backblaze-backed PBS
+  hosts: "{{ proxmox_backup_config_hosts | default('pve5.myrobertson.net') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    pbs_encrypted_storage_id: pbs-b2-encrypted
+    pbs_encrypted_source_storage_id: pbs-b2
+    pbs_encrypted_datastore: pbs-b2
+    pbs_encrypted_server: 10.0.0.87
+    pbs_encrypted_username: root@pam
+    pbs_encrypted_fingerprint: "F1:11:5D:F7:5A:E5:71:E9:98:5E:CA:3C:44:6D:99:6E:50:21:4A:8E:F4:0E:E4:CA:93:93:56:06:0B:A6:3E:E3"
+    pbs_encrypted_vault_path: secret/proxmox/pbs/prod/client-encryption/pbs-b2-encrypted
+    pbs_encrypted_backup_job_id: non-k8s-r2-encrypted-nightly
+    pbs_encrypted_backup_schedule: "mon,tue,wed,thu,fri,sat,sun 05:30"
+    pbs_encrypted_backup_vmids:
+      - 1001 # dns-01
+      - 1002 # bdc
+      - 101  # Rhonda
+      - 112  # janice
+      - 129  # datacenter-mgr
+      - 137  # netbox
+      - 200  # subdb1
+      - 202  # subns
+      - 208  # ns1
+    pbs_encrypted_backup_prune: keep-last=7,keep-weekly=4,keep-monthly=12
+    pbs_encrypted_backup_comment: Nightly encrypted Backblaze R2/B2 backup for non-k8s non-jellyfin non-pbs non-vault guests
+
+  tasks:
+    - name: Fetch PBS client encryption key from Vault
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - get
+          - -field=key_b64
+          - "{{ pbs_encrypted_vault_path }}"
+      delegate_to: localhost
+      become: false
+      register: pbs_encrypted_key_b64
+      changed_when: false
+      no_log: true
+
+    - name: Stage PBS client encryption key on Proxmox node
+      ansible.builtin.copy:
+        dest: "/root/{{ pbs_encrypted_storage_id }}.enc.b64"
+        content: "{{ pbs_encrypted_key_b64.stdout }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Decode staged PBS client encryption key
+      ansible.builtin.shell: |
+        set -euo pipefail
+        base64 -d "/root/{{ pbs_encrypted_storage_id }}.enc.b64" > "/root/{{ pbs_encrypted_storage_id }}.enc"
+        chmod 0600 "/root/{{ pbs_encrypted_storage_id }}.enc"
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: Ensure encrypted PBS storage and backup job are configured
+      ansible.builtin.shell: |
+        set -euo pipefail
+        storage_id="{{ pbs_encrypted_storage_id }}"
+        source_storage_id="{{ pbs_encrypted_source_storage_id }}"
+        key_file="/root/{{ pbs_encrypted_storage_id }}.enc"
+        vmids="{{ pbs_encrypted_backup_vmids | join(',') }}"
+        changed=0
+
+        if ! pvesm status --storage "$storage_id" >/dev/null 2>&1; then
+          pw="$(cat "/etc/pve/priv/storage/${source_storage_id}.pw")"
+          pvesm add pbs "$storage_id" \
+            --datastore "{{ pbs_encrypted_datastore }}" \
+            --server "{{ pbs_encrypted_server }}" \
+            --content backup \
+            --fingerprint "{{ pbs_encrypted_fingerprint }}" \
+            --prune-backups "{{ pbs_encrypted_backup_prune }}" \
+            --username "{{ pbs_encrypted_username }}" \
+            --password "$pw" \
+            --encryption-key "$key_file" >/dev/null
+          changed=1
+        elif ! awk -v id="$storage_id" '
+          /^pbs: / { in_block = ($2 == id) }
+          in_block && $1 == "encryption-key" { found = 1 }
+          END { exit found ? 0 : 1 }
+        ' /etc/pve/storage.cfg; then
+          pvesm set "$storage_id" --encryption-key "$key_file" >/dev/null
+          changed=1
+        fi
+
+        if pvesh get /cluster/backup --output-format json \
+          | jq -e --arg id "{{ pbs_encrypted_backup_job_id }}" '.[] | select(.id == $id)' >/dev/null; then
+          pvesh set "/cluster/backup/{{ pbs_encrypted_backup_job_id }}" \
+            --comment "{{ pbs_encrypted_backup_comment }}" \
+            --schedule "{{ pbs_encrypted_backup_schedule }}" \
+            --vmid "$vmids" \
+            --storage "$storage_id" \
+            --mode snapshot \
+            --compress zstd \
+            --notes-template "{{ '{{guestname}}' }}" \
+            --notification-mode notification-system \
+            --pbs-change-detection-mode metadata \
+            --performance max-workers=2 \
+            --prune-backups "{{ pbs_encrypted_backup_prune }}" \
+            --fleecing enabled=1,storage=p0 \
+            --repeat-missed 1 \
+            --enabled 1 >/dev/null
+        else
+          pvesh create /cluster/backup \
+            --id "{{ pbs_encrypted_backup_job_id }}" \
+            --comment "{{ pbs_encrypted_backup_comment }}" \
+            --schedule "{{ pbs_encrypted_backup_schedule }}" \
+            --vmid "$vmids" \
+            --storage "$storage_id" \
+            --mode snapshot \
+            --compress zstd \
+            --notes-template "{{ '{{guestname}}' }}" \
+            --notification-mode notification-system \
+            --pbs-change-detection-mode metadata \
+            --performance max-workers=2 \
+            --prune-backups "{{ pbs_encrypted_backup_prune }}" \
+            --fleecing enabled=1,storage=p0 \
+            --repeat-missed 1 \
+            --enabled 1 >/dev/null
+          changed=1
+        fi
+
+        rm -f "$key_file" "/root/{{ pbs_encrypted_storage_id }}.enc.b64"
+        if [ "$changed" -eq 1 ]; then
+          echo changed
+        else
+          echo unchanged
+        fi
+      args:
+        executable: /bin/bash
+      register: pbs_encrypted_configure
+      changed_when: "'changed' in pbs_encrypted_configure.stdout"
+      no_log: true
+
+    - name: Verify encrypted PBS storage is active
+      ansible.builtin.command: "pvesm status --storage {{ pbs_encrypted_storage_id }}"
+      changed_when: false
+
+    - name: Verify encrypted backup job
+      ansible.builtin.command: "pvesh get /cluster/backup/{{ pbs_encrypted_backup_job_id }} --output-format json-pretty"
+      register: pbs_encrypted_backup_job
+      changed_when: false
+
+    - name: Report encrypted backup job
+      ansible.builtin.debug:
+        var: pbs_encrypted_backup_job.stdout_lines

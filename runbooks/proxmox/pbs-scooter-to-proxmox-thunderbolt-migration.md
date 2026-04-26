@@ -33,6 +33,8 @@ PBS S3 datastore support is currently a technology preview. Keep the Scooter dat
   - `pbs-s3` is active after rebuilding the replacement cache path's `.chunks` shard tree under `/mnt/datastore/pbs-s3-cache`.
   - `pbs-b2` is a new additional datastore using Backblaze B2 endpoint `backblaze-b2-pbs`, bucket `myrobertson-pbs`, and cache path `/mnt/datastore/pbs-b2-cache`.
   - `pbs-b2` is also configured as Proxmox storage through the Thunderbolt service IP `10.0.0.87`.
+  - `pbs-b2-encrypted` is a Proxmox client storage alias for datastore `pbs-b2` with PBS client-side encryption enabled. The encryption key is escrowed in Vault at `secret/proxmox/pbs/prod/client-encryption/pbs-b2-encrypted`.
+  - Vault VM backups intentionally remain on an unencrypted PBS client target because the Vault guest disk is already encrypted and the recovery key is managed separately.
 - Thunderbolt host loopbacks:
   - pve3: `10.0.0.83/32`
   - pve4: `10.0.0.84/32`
@@ -46,6 +48,7 @@ PBS S3 datastore support is currently a technology preview. Keep the Scooter dat
 - `proxmox_backup_storage_route_up{expected_network="thunderbolt"}` changes from `0` to `1` on pve3/pve4/pve5.
 - New backups land on an S3-backed PBS datastore with a persistent local cache disk on the Proxmox-hosted PBS VM.
 - The old Scooter datastore remains mounted read-only or offline-retained until the S3 datastore has proven restore reliability.
+- Non-k8s, non-Jellyfin, non-PBS, non-Vault Proxmox guests use the encrypted Proxmox storage alias `pbs-b2-encrypted` so object-store backups are client-side encrypted before PBS writes them to Backblaze B2.
 
 Do not place the PBS datastore on the same Ceph cluster it protects. That makes disaster recovery circular.
 The desired durable state is split-path:
@@ -69,6 +72,33 @@ Use a two-step migration:
 7. Keep the old Scooter datastore intact until the retention horizon and restore drills are complete.
 
 This keeps current backups recoverable while the new PBS host and object datastore are proven.
+
+## Client-Side Encryption Policy
+
+Use two Proxmox PBS storage IDs for the same Backblaze-backed PBS datastore:
+
+- `pbs-b2`: unencrypted PBS client target for guests that are already protected at the disk/application layer, currently the Vault VM.
+- `pbs-b2-encrypted`: encrypted PBS client target for regular Proxmox VM/LXC backups. Its key must be restored from Vault before relying on encrypted snapshots in a full DR scenario.
+
+Current encrypted backup job:
+
+- Job ID: `non-k8s-r2-encrypted-nightly`
+- Schedule: `mon,tue,wed,thu,fri,sat,sun 05:30`
+- Storage: `pbs-b2-encrypted`
+- Included guests: `1001,1002,101,112,129,137,200,202,208`
+- Excluded by policy: k8s nodes, Jellyfin, PBS, and Vault.
+
+The encryption key is stored at:
+
+```sh
+vault kv get secret/proxmox/pbs/prod/client-encryption/pbs-b2-encrypted
+```
+
+Apply or recover the encrypted Proxmox storage alias and job with:
+
+```sh
+ansible-playbook ansible/proxmox/pbs_client_encrypted_backups.yml
+```
 
 ## Object Store Choice
 

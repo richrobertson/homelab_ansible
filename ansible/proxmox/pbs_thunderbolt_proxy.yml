@@ -12,6 +12,8 @@
     pbs_thunderbolt_backend_port: 8007
     pbs_thunderbolt_storage_ids:
       - pbs-s3
+      - pbs-b2
+      - pbs-b2-encrypted
       - pbs.myrobertson.net
 
   tasks:
