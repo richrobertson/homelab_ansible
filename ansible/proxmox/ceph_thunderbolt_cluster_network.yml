@@ -1,0 +1,177 @@
+---
+- name: Move Ceph OSD backend traffic to the Thunderbolt ring
+  hosts: "{{ ceph_thunderbolt_target_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    ceph_thunderbolt_cluster_network: 10.0.0.0/24
+    ceph_public_network: 192.168.10.0/24
+    ceph_config_file: /etc/pve/ceph.conf
+
+  tasks:
+    - name: Verify Ceph is healthy before changing network config
+      ansible.builtin.command: ceph health
+      register: ceph_preflight_health
+      changed_when: false
+      failed_when: ceph_preflight_health.stdout | trim != "HEALTH_OK"
+      run_once: true
+
+    - name: Verify Thunderbolt routes to peer loopbacks
+      ansible.builtin.command: "ip route get 10.0.0.8{{ item | regex_search('[0-9]+') | default('1', true) }}"
+      register: ceph_thunderbolt_route_checks
+      changed_when: false
+      failed_when:
+        - ceph_thunderbolt_route_checks.rc != 0
+          or ceph_thunderbolt_route_checks.stdout is not search('dev en0[56]')
+      loop: "{{ ansible_play_hosts_all }}"
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - item != inventory_hostname
+
+    - name: Configure Ceph cluster network in the monitor config database
+      ansible.builtin.shell: |
+        set -euo pipefail
+        current="$(ceph config dump --format json |
+          jq -r '.[] | select(.name == "cluster_network" and .section == "global") | .value' |
+          tail -n 1)"
+        if [ "$current" = "{{ ceph_thunderbolt_cluster_network }}" ]; then
+          exit 0
+        fi
+        ceph config set global cluster_network "{{ ceph_thunderbolt_cluster_network }}"
+        exit 2
+      args:
+        executable: /bin/bash
+      register: ceph_cluster_network_config
+      changed_when: ceph_cluster_network_config.rc == 2
+      failed_when: ceph_cluster_network_config.rc not in [0, 2]
+      run_once: true
+
+    - name: Backup shared Ceph config before editing it
+      ansible.builtin.command: "cp -a {{ ceph_config_file }} {{ ceph_config_file }}.pre-thunderbolt-cluster-network"
+      args:
+        creates: "{{ ceph_config_file }}.pre-thunderbolt-cluster-network"
+      run_once: true
+
+    - name: Persist Ceph cluster network in shared Ceph config
+      ansible.builtin.lineinfile:
+        path: "{{ ceph_config_file }}"
+        regexp: '^(\s*cluster_network\s*=\s*).*$'
+        line: "\tcluster_network = {{ ceph_thunderbolt_cluster_network }}"
+      run_once: true
+
+    - name: Keep Ceph public network client-facing
+      ansible.builtin.lineinfile:
+        path: "{{ ceph_config_file }}"
+        regexp: '^(\s*public_network\s*=\s*).*$'
+        line: "\tpublic_network = {{ ceph_public_network }}"
+      run_once: true
+
+    - name: Discover OSDs hosted by Thunderbolt nodes
+      ansible.builtin.shell: |
+        set -euo pipefail
+        ceph osd metadata --format json |
+          jq -r --arg hosts '{{ ansible_play_hosts_all | join(" ") }}' '
+            ($hosts | split(" ") | map(sub("\\..*$"; ""))) as $short_hosts
+            |
+            .[]
+            | select(.hostname as $host | $short_hosts | index($host))
+            | [.hostname, .id] | @tsv
+          ' | sort
+      args:
+        executable: /bin/bash
+      register: ceph_thunderbolt_osds
+      changed_when: false
+      run_once: true
+
+    - name: Require OSDs to restart
+      ansible.builtin.assert:
+        that:
+          - ceph_thunderbolt_osds.stdout_lines | length > 0
+        fail_msg: No OSDs were discovered on the target Proxmox hosts.
+      run_once: true
+
+    - name: Check whether OSD backend addresses already use Thunderbolt
+      ansible.builtin.shell: |
+        set -euo pipefail
+        ceph osd metadata --format json |
+          jq -er '
+            all(.[]; .back_addr | test("10\\.0\\.0\\.8[3-5]:"))
+          ' >/dev/null
+      args:
+        executable: /bin/bash
+      register: ceph_thunderbolt_backend_check
+      changed_when: false
+      failed_when: false
+      run_once: true
+
+    - name: Set noout before rolling OSD restarts
+      ansible.builtin.command: ceph osd set noout
+      changed_when: "'noout is set' in ceph_osd_noout_set.stdout"
+      register: ceph_osd_noout_set
+      when: ceph_thunderbolt_backend_check.rc != 0
+      run_once: true
+
+    - name: Restart OSDs one at a time so they bind backend traffic to Thunderbolt
+      ansible.builtin.shell: |
+        set -euo pipefail
+        host="$(awk '{print $1}' <<< "{{ item }}")"
+        osd_id="$(awk '{print $2}' <<< "{{ item }}")"
+
+        echo "restarting osd.${osd_id} on ${host}"
+        ssh "root@${host}" "systemctl restart ceph-osd@${osd_id}"
+
+        for _ in $(seq 1 60); do
+          state="$(
+            ceph osd dump --format json |
+            jq -r --argjson id "$osd_id" '
+              .osds[]
+              | select(.osd == $id)
+              | if (.up == 1 and .in == 1) then "up-in" else "waiting" end
+            '
+          )"
+          [ "$state" = "up-in" ] && break
+          sleep 2
+        done
+
+        ceph osd metadata "osd.${osd_id}" --format json |
+          jq -er --arg network "{{ ceph_thunderbolt_cluster_network | regex_replace('/.*$', '') | regex_replace('\\.0$', '.') }}" '
+            .back_addr
+            | contains($network)
+          ' >/dev/null
+      args:
+        executable: /bin/bash
+      register: ceph_thunderbolt_osd_restarts
+      changed_when: "'restarting osd.' in ceph_thunderbolt_osd_restarts.stdout"
+      loop: "{{ ceph_thunderbolt_osds.stdout_lines }}"
+      loop_control:
+        label: "{{ item }}"
+      when: ceph_thunderbolt_backend_check.rc != 0
+      run_once: true
+
+    - name: Unset noout after rolling OSD restarts
+      ansible.builtin.command: ceph osd unset noout
+      changed_when: "'noout is unset' in ceph_osd_noout_unset.stdout"
+      register: ceph_osd_noout_unset
+      when: ceph_thunderbolt_backend_check.rc != 0
+      run_once: true
+
+    - name: Verify Ceph returned to HEALTH_OK
+      ansible.builtin.command: ceph health
+      register: ceph_post_health
+      changed_when: false
+      failed_when: ceph_post_health.stdout | trim != "HEALTH_OK"
+      run_once: true
+
+    - name: Verify OSD backend addresses are on the Thunderbolt ring
+      ansible.builtin.shell: |
+        set -euo pipefail
+        ceph osd metadata --format json |
+          jq -er '
+            all(.[]; .back_addr | test("10\\.0\\.0\\.8[3-5]:"))
+          ' >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+      run_once: true
