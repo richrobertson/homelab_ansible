@@ -173,6 +173,51 @@ for status in ok failed; do
   fi
 done
 
+write_metric '# HELP proxmox_backup_restore_tasks_24h Proxmox backup and restore task count over the last 24 hours by status.'
+write_metric '# TYPE proxmox_backup_restore_tasks_24h gauge'
+jq -r --argjson window_start "$window_start" '
+  [ .[]
+    | select((.type == "vzdump" or .type == "qmrestore" or .type == "vzrestore") and (.starttime // 0) >= $window_start)
+    | {
+        operation: (if .type == "vzdump" then "backup" else "restore" end),
+        status: (if (.status // "") == "OK" then "ok" else "failed" end)
+      }
+  ]
+  | group_by(.operation, .status)
+  | map({operation: .[0].operation, status: .[0].status, count: length})
+  | .[]
+  | "\(.operation) \(.status) \(.count)"
+' <<<"$TASKS_JSON" | while read -r operation status count; do
+  write_metric "proxmox_backup_restore_tasks_24h{node=\"$(escape_label "$NODE")\",operation=\"$(escape_label "$operation")\",status=\"$(escape_label "$status")\"} $count"
+done
+
+for operation in backup restore; do
+  for status in ok failed; do
+    if ! grep -q "proxmox_backup_restore_tasks_24h{node=\"$(escape_label "$NODE")\",operation=\"$operation\",status=\"$status\"}" "$TMP"; then
+      write_metric "proxmox_backup_restore_tasks_24h{node=\"$(escape_label "$NODE")\",operation=\"$operation\",status=\"$status\"} 0"
+    fi
+  done
+done
+
+write_metric '# HELP proxmox_backup_restore_last_task_timestamp_seconds Last Proxmox backup or restore task start timestamp by operation and status.'
+write_metric '# TYPE proxmox_backup_restore_last_task_timestamp_seconds gauge'
+jq -r '
+  [ .[]
+    | select(.type == "vzdump" or .type == "qmrestore" or .type == "vzrestore")
+    | {
+        operation: (if .type == "vzdump" then "backup" else "restore" end),
+        status: (if (.status // "") == "OK" then "ok" else "failed" end),
+        ts: (.starttime // 0)
+      }
+  ]
+  | group_by(.operation, .status)
+  | map({operation: .[0].operation, status: .[0].status, ts: (map(.ts) | max)})
+  | .[]
+  | "\(.operation) \(.status) \(.ts)"
+' <<<"$TASKS_JSON" | while read -r operation status ts; do
+  write_metric "proxmox_backup_restore_last_task_timestamp_seconds{node=\"$(escape_label "$NODE")\",operation=\"$(escape_label "$operation")\",status=\"$(escape_label "$status")\"} $ts"
+done
+
 write_metric '# HELP proxmox_migration_last_task_timestamp_seconds Last Proxmox migration task start timestamp by status.'
 write_metric '# TYPE proxmox_migration_last_task_timestamp_seconds gauge'
 jq -r '
