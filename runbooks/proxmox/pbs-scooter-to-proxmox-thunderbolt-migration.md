@@ -18,11 +18,12 @@ PBS S3 datastore support is currently a technology preview. Keep the Scooter dat
 - Current primary PBS snapshot count visible from Proxmox: 310.
 - Replacement VM shell staged on `pve5`:
   - VMID `217`, name `pbs-restore`
-  - state `stopped`
+  - state `running`, booted from installer ISO after the Scooter PBS VM was shut down
   - boot disk `local-lvm:vm-217-disk-0`, 64 GiB
   - object/cache disk `local-lvm:vm-217-disk-1`, 128 GiB
   - installer ISO `local:iso/proxmox-backup-server_4.1-1.iso`
-  - NIC `vmbr1`, `link_down=1` to prevent duplicate address exposure before cutover
+  - NIC `vmbr1`
+  - `192.168.1.217:8007` is expected to stay down until the PBS installer completes and the Vault restore is applied
 - Thunderbolt host loopbacks:
   - pve3: `10.0.0.83/32`
   - pve4: `10.0.0.84/32`
