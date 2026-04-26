@@ -130,3 +130,4 @@ REQUESTS_CA_BUNDLE=inventory/certs/proxmox-vault-ca.pem ansible-inventory -i inv
 
 - Operational Proxmox runbooks live under `runbooks/proxmox/` at the repository root.
 - Start with [runbooks/proxmox/README.md](../../runbooks/proxmox/README.md).
+- PBS migration from Scooter to Proxmox for Thunderbolt-routed backup traffic is documented in [runbooks/proxmox/pbs-scooter-to-proxmox-thunderbolt-migration.md](../../runbooks/proxmox/pbs-scooter-to-proxmox-thunderbolt-migration.md).

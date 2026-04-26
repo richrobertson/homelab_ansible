@@ -8,6 +8,7 @@ This folder contains operational runbooks captured from real maintenance and inc
 - [HA rule recovery and ha-manager CLI stabilization](./ha-rule-and-cli-recovery.md)
 - [CephFS storage activation and mountpoint recovery](./cephfs-storage-recovery.md)
 - [Vault connectivity and Proxmox cert-agent recovery](./vault-connectivity-and-cert-agent-recovery.md)
+- [PBS Scooter VM to Proxmox Thunderbolt migration](./pbs-scooter-to-proxmox-thunderbolt-migration.md)
 - [Staging cluster rebuild and SDN investigation (2026-03-31)](./staging-cluster-rebuild-and-sdn-investigation-2026-03-31.md)
 
 ## Scope
