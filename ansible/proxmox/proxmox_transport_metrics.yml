@@ -8,6 +8,7 @@
     proxmox_transport_metrics_textfile_dir: /var/lib/prometheus/node-exporter
     proxmox_transport_metrics_script: /usr/local/sbin/proxmox-transport-metrics.sh
     proxmox_transport_metrics_thunderbolt_network: 10.0.0.0/24
+    proxmox_transport_metrics_thunderbolt_route_regex: "dev en0[56]"
     proxmox_transport_metrics_interval: 60s
     proxmox_node_exporter_args: "--collector.textfile.directory={{ proxmox_transport_metrics_textfile_dir }}"
 

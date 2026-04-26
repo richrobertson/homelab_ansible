@@ -6,6 +6,7 @@ OUT="${TEXTFILE_DIR}/proxmox_transport.prom"
 TMP="${OUT}.$$"
 NODE="$(hostname -s)"
 THUNDERBOLT_NETWORK="{{ proxmox_transport_metrics_thunderbolt_network }}"
+THUNDERBOLT_ROUTE_REGEX="{{ proxmox_transport_metrics_thunderbolt_route_regex | default('dev en0[56]') }}"
 
 mkdir -p "$TEXTFILE_DIR"
 
@@ -43,13 +44,107 @@ for peer in pve3 pve4 pve5; do
   peer_id="${peer#pve}"
   peer_ip="10.0.0.8${peer_id}"
   [ "$peer" = "$NODE" ] && continue
-  if ip route get "$peer_ip" 2>/dev/null | grep -Eq 'dev en0[56]'; then
+  if ip route get "$peer_ip" 2>/dev/null | grep -Eq "$THUNDERBOLT_ROUTE_REGEX"; then
     route_up=1
   else
     route_up=0
   fi
   write_metric "proxmox_transport_peer_route_up{node=\"$(escape_label "$NODE")\",peer=\"$(escape_label "$peer")\",peer_ip=\"$(escape_label "$peer_ip")\"} $route_up"
 done
+
+write_metric '# HELP proxmox_backup_storage_info Proxmox backup storage configuration metadata.'
+write_metric '# TYPE proxmox_backup_storage_info gauge'
+write_metric '# HELP proxmox_backup_storage_route_up Whether the configured backup storage resolves and routes through a Thunderbolt interface.'
+write_metric '# TYPE proxmox_backup_storage_route_up gauge'
+awk '
+  function emit() {
+    if (storage != "") {
+      printf "%s\t%s\t%s\n", storage, server, datastore
+    }
+  }
+  /^pbs:[[:space:]]+/ {
+    emit()
+    storage=$2
+    server=""
+    datastore=""
+    next
+  }
+  storage != "" && /^[[:space:]]+server[[:space:]]+/ {
+    server=$2
+    next
+  }
+  storage != "" && /^[[:space:]]+datastore[[:space:]]+/ {
+    datastore=$2
+    next
+  }
+  /^$/ {
+    emit()
+    storage=""
+    server=""
+    datastore=""
+    next
+  }
+  END {
+    emit()
+  }
+' /etc/pve/storage.cfg | while IFS=$'\t' read -r storage server datastore; do
+  [ -n "$storage" ] || continue
+  resolved_ip="$(getent ahostsv4 "$server" 2>/dev/null | awk 'NR==1{print $1}')"
+  route_dev=""
+  route_up=0
+  if [ -n "$resolved_ip" ]; then
+    route_line="$(ip route get "$resolved_ip" 2>/dev/null | head -n1 || true)"
+    route_dev="$(awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}' <<<"$route_line")"
+    if grep -Eq "$THUNDERBOLT_ROUTE_REGEX" <<<"$route_line"; then
+      route_up=1
+    fi
+  fi
+  write_metric "proxmox_backup_storage_info{node=\"$(escape_label "$NODE")\",storage=\"$(escape_label "$storage")\",server=\"$(escape_label "$server")\",datastore=\"$(escape_label "$datastore")\",expected_network=\"thunderbolt\"} 1"
+  write_metric "proxmox_backup_storage_route_up{node=\"$(escape_label "$NODE")\",storage=\"$(escape_label "$storage")\",server=\"$(escape_label "$server")\",datastore=\"$(escape_label "$datastore")\",resolved_ip=\"$(escape_label "$resolved_ip")\",route_dev=\"$(escape_label "$route_dev")\",expected_network=\"thunderbolt\"} $route_up"
+done
+
+write_metric '# HELP proxmox_ceph_network_configured Ceph public and cluster network configuration observed from the Proxmox Ceph config database.'
+write_metric '# TYPE proxmox_ceph_network_configured gauge'
+if command -v ceph >/dev/null 2>&1; then
+  ceph_cluster_network="$(ceph config get global cluster_network 2>/dev/null || true)"
+  ceph_public_network="$(ceph config get global public_network 2>/dev/null || true)"
+  if [ -z "$ceph_cluster_network" ]; then
+    ceph_cluster_network="$(ceph config dump --format json 2>/dev/null | jq -r '[.[] | select(.name == "cluster_network")][0].value // empty' || true)"
+  fi
+  if [ -z "$ceph_public_network" ]; then
+    ceph_public_network="$(ceph config dump --format json 2>/dev/null | jq -r '[.[] | select(.name == "public_network")][0].value // empty' || true)"
+  fi
+  if [ -z "$ceph_cluster_network" ] && [ -r /etc/pve/ceph.conf ]; then
+    ceph_cluster_network="$(awk -F= '/^[[:space:]]*cluster_network[[:space:]]*=/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' /etc/pve/ceph.conf)"
+  fi
+  if [ -z "$ceph_public_network" ] && [ -r /etc/pve/ceph.conf ]; then
+    ceph_public_network="$(awk -F= '/^[[:space:]]*public_network[[:space:]]*=/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' /etc/pve/ceph.conf)"
+  fi
+  [ "$ceph_cluster_network" = "$THUNDERBOLT_NETWORK" ] && ceph_cluster_ok=1 || ceph_cluster_ok=0
+  [ "$ceph_public_network" = "$THUNDERBOLT_NETWORK" ] && ceph_public_ok=1 || ceph_public_ok=0
+  write_metric "proxmox_ceph_network_configured{node=\"$(escape_label "$NODE")\",network_role=\"cluster\",network=\"$(escape_label "$ceph_cluster_network")\",expected_network=\"$(escape_label "$THUNDERBOLT_NETWORK")\"} $ceph_cluster_ok"
+  write_metric "proxmox_ceph_network_configured{node=\"$(escape_label "$NODE")\",network_role=\"public\",network=\"$(escape_label "$ceph_public_network")\",expected_network=\"$(escape_label "$THUNDERBOLT_NETWORK")\"} $ceph_public_ok"
+
+  write_metric '# HELP proxmox_ceph_osd_address_on_thunderbolt Whether OSD front/back addresses are on the Thunderbolt node address range.'
+  write_metric '# TYPE proxmox_ceph_osd_address_on_thunderbolt gauge'
+  ceph osd metadata --format json 2>/dev/null |
+    jq -r --arg node "$NODE" '
+      .[]
+      | select(.hostname == $node)
+      | [
+          (.id | tostring),
+          (.front_addr // ""),
+          (.back_addr // "")
+        ]
+      | @tsv
+    ' | while IFS=$'\t' read -r osd_id front_addr back_addr; do
+      [ -n "$osd_id" ] || continue
+      [[ "$front_addr" == *"10.0.0."* ]] && front_ok=1 || front_ok=0
+      [[ "$back_addr" == *"10.0.0."* ]] && back_ok=1 || back_ok=0
+      write_metric "proxmox_ceph_osd_address_on_thunderbolt{node=\"$(escape_label "$NODE")\",osd=\"$(escape_label "$osd_id")\",address_role=\"front\",address=\"$(escape_label "$front_addr")\"} $front_ok"
+      write_metric "proxmox_ceph_osd_address_on_thunderbolt{node=\"$(escape_label "$NODE")\",osd=\"$(escape_label "$osd_id")\",address_role=\"back\",address=\"$(escape_label "$back_addr")\"} $back_ok"
+    done
+fi
 
 TASKS_JSON="$(pvesh get "/nodes/${NODE}/tasks" --limit 200 --output-format json)"
 now="$(date +%s)"
