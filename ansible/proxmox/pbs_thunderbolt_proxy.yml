@@ -14,7 +14,6 @@
       - pbs-s3
       - pbs-b2
       - pbs-b2-encrypted
-      - pbs.myrobertson.net
 
   tasks:
     - name: Verify socat is installed for the PBS TCP proxy

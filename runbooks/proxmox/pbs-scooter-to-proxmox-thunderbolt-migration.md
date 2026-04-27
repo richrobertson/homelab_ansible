@@ -10,7 +10,6 @@ PBS S3 datastore support is currently a technology preview. Keep the Scooter dat
 - PBS service name: `pbs.myrobertson.net`
 - Current PBS address: `192.168.1.217`
 - Current Proxmox storages:
-  - `pbs.myrobertson.net` datastore `store1`
   - `pbs-s3` datastore `pbs-s3`
 - Current Proxmox PBS storage endpoints point at Thunderbolt service IP `10.0.0.87`.
 - Transitional Thunderbolt service path: `pve5` listens on `10.0.0.87:8007` and proxies to `192.168.1.217:8007`.
@@ -28,13 +27,13 @@ PBS S3 datastore support is currently a technology preview. Keep the Scooter dat
   - generated install root password is stored at `secret/proxmox/pbs/prod/install`
   - local S3 cache disk is mounted at `/mnt/datastore/pbs-s3-cache`
 - Current datastore status:
-  - `store1` is restored in PBS config but unavailable until the Scooter-backed datastore disk/path is attached.
   - `pbs-s3` is restored in PBS config and should continue to use the existing AWS S3 endpoint `aws-homelab-pbs` with bucket `myrobertson-homelab-pbs`.
   - `pbs-s3` is active after rebuilding the replacement cache path's `.chunks` shard tree under `/mnt/datastore/pbs-s3-cache`.
   - `pbs-b2` is a new additional datastore using Backblaze B2 endpoint `backblaze-b2-pbs`, bucket `myrobertson-pbs`, and cache path `/mnt/datastore/pbs-b2-cache`.
   - `pbs-b2` is also configured as Proxmox storage through the Thunderbolt service IP `10.0.0.87`.
   - `pbs-b2-encrypted` is a Proxmox client storage alias for datastore `pbs-b2` with PBS client-side encryption enabled. The encryption key is escrowed in Vault at `secret/proxmox/pbs/prod/client-encryption/pbs-b2-encrypted`.
   - Vault VM backups intentionally remain on an unencrypted PBS client target because the Vault guest disk is already encrypted and the recovery key is managed separately.
+  - Legacy `store1` history is no longer wired into active Proxmox storage configuration and should be treated as retired unless deliberately reattached for historical restore work.
 - Thunderbolt host loopbacks:
   - pve3: `10.0.0.83/32`
   - pve4: `10.0.0.84/32`
