@@ -1,0 +1,296 @@
+---
+- name: Tune PBS datastore maintenance for S3-backed homelab backups
+  hosts: "{{ pbs_maintenance_hosts | default('pbs.myrobertson.net') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    pbs_retired_datastores:
+      - store1
+    pbs_cache_paths_requiring_relatime:
+      - /mnt/datastore/pbs-s3-cache
+    pbs_datastore_notify: gc=error,prune=error,verify=error
+    pbs_datastore_tuning: sync-level=filesystem,gc-atime-safety-check=1,default-verification-readers=1,default-verification-workers=2
+    pbs_managed_datastores:
+      - name: pbs-s3
+        gc_schedule: "sun 11:30"
+        prune_job:
+          id: prune-pbs-s3
+          schedule: "mon..sun 06:15"
+          comment: Daily prune for the AWS-backed vault datastore
+          keep_last: 7
+          keep_weekly: 4
+          keep_monthly: 12
+        verify_jobs:
+          - id: verify-pbs-s3-daily
+            schedule: "mon..sun 07:00"
+            comment: Daily rolling verify for recent AWS-backed backups
+            ignore_verified: true
+            outdated_after: 30
+            read_threads: 1
+            verify_threads: 2
+          - id: verify-pbs-s3-monthly
+            schedule: "Sat *-1..7 08:00"
+            comment: Monthly full verify for the AWS-backed vault datastore
+            ignore_verified: false
+            read_threads: 1
+            verify_threads: 2
+      - name: pbs-b2
+        gc_schedule: "sun 14:30"
+        prune_job:
+          id: prune-pbs-b2
+          schedule: "mon..sun 07:30"
+          comment: Daily prune for the primary S3-compatible datastore
+          keep_last: 7
+          keep_weekly: 4
+          keep_monthly: 12
+        verify_jobs:
+          - id: verify-pbs-b2-daily
+            schedule: "mon..sun 08:15"
+            comment: Daily rolling verify for recent S3-compatible backups
+            ignore_verified: true
+            outdated_after: 30
+            read_threads: 1
+            verify_threads: 2
+          - id: verify-pbs-b2-monthly
+            schedule: "Sun *-1..7 09:30"
+            comment: Monthly full verify for the primary S3-compatible datastore
+            ignore_verified: false
+            read_threads: 1
+            verify_threads: 2
+
+  tasks:
+    - name: Build managed datastore and job lists
+      ansible.builtin.set_fact:
+        pbs_managed_store_names: "{{ pbs_managed_datastores | map(attribute='name') | list }}"
+        pbs_managed_prune_job_ids: "{{ pbs_managed_datastores | map(attribute='prune_job') | map(attribute='id') | list }}"
+        pbs_managed_verify_jobs: "{{ pbs_managed_datastores | map(attribute='verify_jobs') | list | flatten }}"
+        pbs_managed_verify_job_ids: "{{ (pbs_managed_datastores | map(attribute='verify_jobs') | list | flatten) | map(attribute='id') | list }}"
+
+    - name: Ensure PBS object cache mounts keep access times for GC
+      ansible.builtin.shell: |
+        set -euo pipefail
+        mount_path="{{ item }}"
+        python3 - "$mount_path" <<'PY'
+        import pathlib
+        import sys
+
+        mount_path = sys.argv[1]
+        fstab = pathlib.Path("/etc/fstab")
+        lines = fstab.read_text().splitlines()
+        changed = False
+        rewritten = []
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                rewritten.append(line)
+                continue
+
+            fields = line.split()
+            if len(fields) >= 4 and fields[1] == mount_path:
+                opts = [opt for opt in fields[3].split(",") if opt]
+                wants_change = "noatime" in opts or "relatime" not in opts
+                if wants_change:
+                    opts = [opt for opt in opts if opt != "noatime"]
+                    if "relatime" not in opts:
+                        opts.append("relatime")
+                    fields[3] = ",".join(opts)
+                    line = " ".join(fields)
+                    changed = True
+            rewritten.append(line)
+
+        if changed:
+            fstab.write_text("\n".join(rewritten) + "\n")
+            print("changed")
+        else:
+            print("unchanged")
+        PY
+      args:
+        executable: /bin/bash
+      loop: "{{ pbs_cache_paths_requiring_relatime }}"
+      register: pbs_cache_mount_fixes
+      changed_when: false
+
+    - name: Remount cache paths after fixing atime options
+      ansible.builtin.command: "mount -o remount,relatime {{ item.item }}"
+      loop: "{{ pbs_cache_mount_fixes.results }}"
+      when: item.stdout is search('changed')
+      changed_when: true
+
+    - name: Verify object cache mounts are not using noatime
+      ansible.builtin.shell: |
+        set -euo pipefail
+        opts="$(findmnt -no OPTIONS -T {{ item }})"
+        echo "$opts"
+        if echo "$opts" | grep -qw noatime; then
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ pbs_cache_paths_requiring_relatime }}"
+      register: pbs_cache_mount_options
+      changed_when: false
+
+    - name: Check for retired datastores that should be removed
+      ansible.builtin.command: "proxmox-backup-manager datastore show {{ item }} --output-format json"
+      loop: "{{ pbs_retired_datastores }}"
+      register: pbs_retired_datastore_checks
+      failed_when: false
+      changed_when: false
+
+    - name: Remove retired datastore configs and their old maintenance jobs
+      ansible.builtin.command: "proxmox-backup-manager datastore remove {{ item.item }}"
+      loop: "{{ pbs_retired_datastore_checks.results }}"
+      when: item.rc == 0
+      changed_when: true
+
+    - name: Apply datastore GC, notification, and verification defaults
+      ansible.builtin.command:
+        argv:
+          - proxmox-backup-manager
+          - datastore
+          - update
+          - "{{ item.name }}"
+          - --gc-schedule
+          - "{{ item.gc_schedule }}"
+          - --notification-mode
+          - notification-system
+          - --notify
+          - "{{ pbs_datastore_notify }}"
+          - --verify-new
+          - "false"
+          - --tuning
+          - "{{ pbs_datastore_tuning }}"
+      loop: "{{ pbs_managed_datastores }}"
+      changed_when: true
+
+    - name: Read current prune jobs
+      ansible.builtin.command: proxmox-backup-manager prune-job list --output-format json
+      register: pbs_prune_jobs
+      changed_when: false
+
+    - name: Remove stale prune jobs for managed datastores
+      ansible.builtin.command: "proxmox-backup-manager prune-job remove {{ item.id }}"
+      loop: >-
+        {{
+          (pbs_prune_jobs.stdout | from_json)
+          | selectattr('store', 'in', pbs_managed_store_names)
+          | rejectattr('id', 'in', pbs_managed_prune_job_ids)
+          | list
+        }}
+      changed_when: true
+
+    - name: Reconcile prune jobs for managed datastores
+      ansible.builtin.shell: |
+        set -euo pipefail
+        id="{{ item.prune_job.id }}"
+        if proxmox-backup-manager prune-job show "$id" --output-format json >/dev/null 2>&1; then
+          action=update
+        else
+          action=create
+        fi
+
+        cmd=(
+          proxmox-backup-manager prune-job "$action" "$id"
+          --store "{{ item.name }}"
+          --schedule "{{ item.prune_job.schedule }}"
+          --comment "{{ item.prune_job.comment }}"
+          --keep-last "{{ item.prune_job.keep_last }}"
+          --keep-weekly "{{ item.prune_job.keep_weekly }}"
+          --keep-monthly "{{ item.prune_job.keep_monthly }}"
+        )
+
+        if [ "$action" = update ]; then
+          cmd+=(
+            --delete keep-hourly
+            --delete keep-daily
+            --delete keep-yearly
+            --delete ns
+            --delete max-depth
+          )
+        fi
+
+        "${cmd[@]}"
+      args:
+        executable: /bin/bash
+      loop: "{{ pbs_managed_datastores }}"
+      changed_when: true
+
+    - name: Read current verify jobs
+      ansible.builtin.command: proxmox-backup-manager verify-job list --output-format json
+      register: pbs_verify_jobs
+      changed_when: false
+
+    - name: Remove stale verify jobs for managed datastores
+      ansible.builtin.command: "proxmox-backup-manager verify-job remove {{ item.id }}"
+      loop: >-
+        {{
+          (pbs_verify_jobs.stdout | from_json)
+          | selectattr('store', 'in', pbs_managed_store_names)
+          | rejectattr('id', 'in', pbs_managed_verify_job_ids)
+          | list
+        }}
+      changed_when: true
+
+    - name: Reconcile verify jobs for managed datastores
+      ansible.builtin.shell: |
+        set -euo pipefail
+        id="{{ item.1.id }}"
+        if proxmox-backup-manager verify-job show "$id" --output-format json >/dev/null 2>&1; then
+          action=update
+        else
+          action=create
+        fi
+
+        cmd=(
+          proxmox-backup-manager verify-job "$action" "$id"
+          --store "{{ item.0.name }}"
+          --schedule "{{ item.1.schedule }}"
+          --comment "{{ item.1.comment }}"
+          --ignore-verified "{{ 'true' if item.1.ignore_verified else 'false' }}"
+          --read-threads "{{ item.1.read_threads }}"
+          --verify-threads "{{ item.1.verify_threads }}"
+        )
+
+        {% if item.1.outdated_after is defined %}
+        cmd+=(--outdated-after "{{ item.1.outdated_after }}")
+        {% endif %}
+
+        if [ "$action" = update ]; then
+          cmd+=(
+            --delete ns
+            --delete max-depth
+          )
+          {% if item.1.outdated_after is not defined %}
+          cmd+=(--delete outdated-after)
+          {% endif %}
+        fi
+
+        "${cmd[@]}"
+      args:
+        executable: /bin/bash
+      loop: "{{ query('subelements', pbs_managed_datastores, 'verify_jobs') }}"
+      changed_when: true
+
+    - name: Report tuned datastores
+      ansible.builtin.command: proxmox-backup-manager datastore list --output-format json-pretty
+      register: pbs_tuned_datastores
+      changed_when: false
+
+    - name: Report tuned prune jobs
+      ansible.builtin.command: proxmox-backup-manager prune-job list --output-format json-pretty
+      register: pbs_tuned_prune_jobs
+      changed_when: false
+
+    - name: Report tuned verify jobs
+      ansible.builtin.command: proxmox-backup-manager verify-job list --output-format json-pretty
+      register: pbs_tuned_verify_jobs
+      changed_when: false
+
+    - name: Show PBS maintenance tuning summary
+      ansible.builtin.debug:
+        msg:
+          - "{{ pbs_tuned_datastores.stdout }}"
+          - "{{ pbs_tuned_prune_jobs.stdout }}"
+          - "{{ pbs_tuned_verify_jobs.stdout }}"

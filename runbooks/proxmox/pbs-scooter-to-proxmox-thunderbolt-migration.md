@@ -163,7 +163,7 @@ Example inside the PBS VM:
 ```sh
 mkfs.xfs /dev/disk/by-id/<pbs-s3-cache-disk>
 mkdir -p /mnt/datastore/pbs-object-cache
-echo '/dev/disk/by-id/<pbs-s3-cache-disk> /mnt/datastore/pbs-object-cache xfs defaults,noatime 0 2' >> /etc/fstab
+echo '/dev/disk/by-id/<pbs-s3-cache-disk> /mnt/datastore/pbs-object-cache xfs defaults,relatime 0 2' >> /etc/fstab
 mount /mnt/datastore/pbs-object-cache
 ```
 
@@ -172,7 +172,7 @@ Create the S3 datastore after the endpoint is configured:
 ```sh
 proxmox-backup-manager datastore create pbs-object /mnt/datastore/pbs-object-cache \
   --backend type=s3,client=backblaze-b2-pbs,bucket=myrobertson-pbs
-proxmox-backup-manager datastore update pbs-object --gc-schedule 'daily 04:15'
+proxmox-backup-manager datastore update pbs-object --gc-schedule 'sun 14:30'
 proxmox-backup-manager datastore list
 ```
 
@@ -181,11 +181,12 @@ The production Backblaze datastore was created as:
 ```sh
 proxmox-backup-manager datastore create pbs-b2 /mnt/datastore/pbs-b2-cache \
   --backend type=s3,client=backblaze-b2-pbs,bucket=myrobertson-pbs \
-  --gc-schedule daily \
+  --gc-schedule 'sun 14:30' \
   --notification-mode notification-system
 ```
 
 The local cache path is not the full datastore. It is a required persistent cache used by PBS to reduce backend API calls and improve performance.
+Do not use `noatime` on PBS cache filesystems: garbage collection relies on access times, and the atime safety check should stay enabled.
 
 ## Rebuild An Existing S3 Datastore Cache
 
