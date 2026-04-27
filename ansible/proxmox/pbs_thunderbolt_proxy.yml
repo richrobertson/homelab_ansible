@@ -72,6 +72,10 @@
         enabled: true
         state: started
 
+    - name: Reassert PBS Thunderbolt service IP
+      ansible.builtin.command: "ip addr replace {{ pbs_thunderbolt_proxy_ip }}/{{ pbs_thunderbolt_proxy_prefix }} dev lo"
+      changed_when: false
+
     - name: Enable and start PBS Thunderbolt proxy
       ansible.builtin.systemd:
         name: pbs-thunderbolt-proxy.service
