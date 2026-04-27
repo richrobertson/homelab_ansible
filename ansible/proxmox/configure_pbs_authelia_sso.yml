@@ -1,0 +1,272 @@
+---
+- name: Prepare PBS Authelia SSO secrets in Vault
+  hosts: localhost
+  gather_facts: false
+  vars:
+    pbs_sso_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    pbs_sso_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    pbs_sso_vault_mount: secret
+    pbs_sso_vault_path: proxmox/pbs/prod/sso/authelia
+    pbs_sso_authelia_vault_path: authelia/prod
+    pbs_sso_authelia_hash_key: pbs_oidc
+    pbs_sso_client_id: pbs_prod
+    pbs_sso_client_name: Proxmox Backup Server
+    pbs_sso_realm: authelia
+    pbs_sso_issuer_url: https://auth.myrobertson.com
+    pbs_sso_rotate_secret: false
+    pbs_sso_regenerate_authelia_hash: false
+  tasks:
+    - name: Require Vault environment
+      ansible.builtin.assert:
+        that:
+          - pbs_sso_vault_addr | length > 0
+          - pbs_sso_vault_token | length > 0
+        fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running this playbook.
+
+    - name: Read existing PBS SSO secret from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ pbs_sso_vault_addr }}"
+        token: "{{ pbs_sso_vault_token }}"
+        engine_mount_point: "{{ pbs_sso_vault_mount }}"
+        path: "{{ pbs_sso_vault_path }}"
+      register: pbs_sso_vault_existing
+      failed_when: false
+      no_log: true
+
+    - name: Select existing client secret when rotation is disabled
+      ansible.builtin.set_fact:
+        pbs_sso_existing_client_secret: "{{ pbs_sso_vault_existing.secret.client_secret | default('') }}"
+      no_log: true
+
+    - name: Generate a new PBS OIDC client secret when needed
+      ansible.builtin.set_fact:
+        pbs_sso_client_secret: >-
+          {{
+            lookup(
+              'ansible.builtin.password',
+              '/dev/null',
+              chars='ascii_letters,digits',
+              length=72
+            )
+          }}
+        pbs_sso_generated_client_secret: true
+      when: pbs_sso_rotate_secret | bool or pbs_sso_existing_client_secret | length == 0
+      no_log: true
+
+    - name: Reuse current PBS OIDC client secret
+      ansible.builtin.set_fact:
+        pbs_sso_client_secret: "{{ pbs_sso_existing_client_secret }}"
+        pbs_sso_generated_client_secret: false
+      when:
+        - not (pbs_sso_rotate_secret | bool)
+        - pbs_sso_existing_client_secret | length > 0
+      no_log: true
+
+    - name: Read Authelia production secret from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ pbs_sso_vault_addr }}"
+        token: "{{ pbs_sso_vault_token }}"
+        engine_mount_point: "{{ pbs_sso_vault_mount }}"
+        path: "{{ pbs_sso_authelia_vault_path }}"
+      register: pbs_sso_authelia_vault_existing
+      no_log: true
+
+    - name: Generate Authelia PBKDF2 hash for the PBS OIDC client secret
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import base64, hashlib, os, secrets
+            password = os.environ["PBS_SSO_CLIENT_SECRET"].encode()
+            salt = secrets.token_bytes(16)
+            digest = hashlib.pbkdf2_hmac("sha512", password, salt, 310000)
+            enc = lambda b: base64.b64encode(b).decode().rstrip("=").replace("+", ".")
+            print("$pbkdf2-sha512$310000$%s$%s" % (enc(salt), enc(digest)))
+      environment:
+        PBS_SSO_CLIENT_SECRET: "{{ pbs_sso_client_secret }}"
+      register: pbs_sso_client_secret_hash
+      changed_when: false
+      when: >-
+        pbs_sso_rotate_secret | bool
+        or pbs_sso_regenerate_authelia_hash | bool
+        or pbs_sso_generated_client_secret | bool
+        or pbs_sso_authelia_vault_existing.secret[pbs_sso_authelia_hash_key] is not defined
+      no_log: true
+
+    - name: Select Authelia PBKDF2 hash for the PBS OIDC client secret
+      ansible.builtin.set_fact:
+        pbs_sso_client_secret_hash_value: >-
+          {{
+            pbs_sso_client_secret_hash.stdout
+            if (
+              pbs_sso_rotate_secret | bool
+              or pbs_sso_regenerate_authelia_hash | bool
+              or pbs_sso_generated_client_secret | bool
+              or pbs_sso_authelia_vault_existing.secret[pbs_sso_authelia_hash_key] is not defined
+            )
+            else pbs_sso_authelia_vault_existing.secret[pbs_sso_authelia_hash_key]
+          }}
+      no_log: true
+
+    - name: Store PBS OIDC client secret in Vault
+      community.hashi_vault.vault_kv2_write:
+        url: "{{ pbs_sso_vault_addr }}"
+        token: "{{ pbs_sso_vault_token }}"
+        engine_mount_point: "{{ pbs_sso_vault_mount }}"
+        path: "{{ pbs_sso_vault_path }}"
+        read_before_write: true
+        data:
+          client_id: "{{ pbs_sso_client_id }}"
+          client_secret: "{{ pbs_sso_client_secret }}"
+          client_name: "{{ pbs_sso_client_name }}"
+          realm: "{{ pbs_sso_realm }}"
+          issuer_url: "{{ pbs_sso_issuer_url }}"
+      no_log: true
+
+    - name: Store Authelia OIDC client secret hash in Vault
+      community.hashi_vault.vault_kv2_write:
+        url: "{{ pbs_sso_vault_addr }}"
+        token: "{{ pbs_sso_vault_token }}"
+        engine_mount_point: "{{ pbs_sso_vault_mount }}"
+        path: "{{ pbs_sso_authelia_vault_path }}"
+        read_before_write: true
+        data: >-
+          {{
+            pbs_sso_authelia_vault_existing.secret
+            | combine({pbs_sso_authelia_hash_key: pbs_sso_client_secret_hash_value})
+          }}
+      no_log: true
+
+- name: Configure PBS Authelia SSO realm
+  hosts: "{{ pbs_sso_target_hosts | default('pbs_servers') }}"
+  gather_facts: false
+  vars:
+    pbs_sso_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    pbs_sso_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    pbs_sso_vault_mount: secret
+    pbs_sso_vault_path: proxmox/pbs/prod/sso/authelia
+    pbs_sso_realm: authelia
+    pbs_sso_issuer_url: https://auth.myrobertson.com
+    pbs_sso_client_id: pbs_prod
+    pbs_sso_scopes: "openid profile email"
+    pbs_sso_username_claim: preferred_username
+    pbs_sso_admin_source_realm: myrobertson.net
+    pbs_sso_admin_role: Admin
+  tasks:
+    - name: Read PBS OIDC client secret from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ pbs_sso_vault_addr }}"
+        token: "{{ pbs_sso_vault_token }}"
+        engine_mount_point: "{{ pbs_sso_vault_mount }}"
+        path: "{{ pbs_sso_vault_path }}"
+      delegate_to: localhost
+      register: pbs_sso_vault_secret
+      no_log: true
+
+    - name: List PBS OpenID realms
+      ansible.builtin.command: proxmox-backup-manager openid list --output-format json
+      register: pbs_sso_realms
+      changed_when: false
+
+    - name: Track whether the Authelia realm exists
+      ansible.builtin.set_fact:
+        pbs_sso_realm_exists: "{{ pbs_sso_realm in ((pbs_sso_realms.stdout | from_json) | map(attribute='realm') | list) }}"
+
+    - name: Add the Authelia OpenID Connect realm
+      ansible.builtin.command:
+        argv:
+          - proxmox-backup-manager
+          - openid
+          - create
+          - "{{ pbs_sso_realm }}"
+          - --issuer-url
+          - "{{ pbs_sso_issuer_url }}"
+          - --client-id
+          - "{{ pbs_sso_client_id }}"
+          - --client-key
+          - "{{ pbs_sso_vault_secret.secret.client_secret }}"
+          - --username-claim
+          - "{{ pbs_sso_username_claim }}"
+          - --scopes
+          - "{{ pbs_sso_scopes }}"
+          - --autocreate
+          - "true"
+      when: not (pbs_sso_realm_exists | bool)
+      no_log: true
+
+    - name: Update the Authelia OpenID Connect realm
+      ansible.builtin.command:
+        argv:
+          - proxmox-backup-manager
+          - openid
+          - update
+          - "{{ pbs_sso_realm }}"
+          - --issuer-url
+          - "{{ pbs_sso_issuer_url }}"
+          - --client-id
+          - "{{ pbs_sso_client_id }}"
+          - --client-key
+          - "{{ pbs_sso_vault_secret.secret.client_secret }}"
+          - --scopes
+          - "{{ pbs_sso_scopes }}"
+          - --autocreate
+          - "true"
+      when: pbs_sso_realm_exists | bool
+      no_log: true
+
+    - name: List PBS users
+      ansible.builtin.command: proxmox-backup-manager user list --output-format json
+      register: pbs_sso_users
+      changed_when: false
+
+    - name: Build Authelia admin users from synced proxAdmins realm users
+      ansible.builtin.set_fact:
+        pbs_sso_admin_users: >-
+          {{
+            (pbs_sso_users.stdout | from_json)
+            | selectattr('userid', 'search', '@' ~ pbs_sso_admin_source_realm ~ '$')
+            | map(attribute='userid')
+            | map('regex_replace', '@' ~ pbs_sso_admin_source_realm ~ '$', '@' ~ pbs_sso_realm)
+            | list
+          }}
+
+    - name: Create Authelia admin users if missing
+      ansible.builtin.command:
+        argv:
+          - proxmox-backup-manager
+          - user
+          - create
+          - "{{ item }}"
+          - --comment
+          - "Authelia OIDC proxAdmins member"
+      loop: "{{ pbs_sso_admin_users }}"
+      when: item not in ((pbs_sso_users.stdout | from_json) | map(attribute='userid') | list)
+
+    - name: Grant Admin role to Authelia proxAdmins users
+      ansible.builtin.command:
+        argv:
+          - proxmox-backup-manager
+          - acl
+          - update
+          - /
+          - "{{ pbs_sso_admin_role }}"
+          - --auth-id
+          - "{{ item }}"
+      loop: "{{ pbs_sso_admin_users }}"
+
+    - name: Verify PBS Authelia realm
+      ansible.builtin.command: "proxmox-backup-manager openid show {{ pbs_sso_realm }} --output-format json"
+      register: pbs_sso_realm_verify
+      changed_when: false
+
+    - name: Verify PBS ACLs
+      ansible.builtin.command: proxmox-backup-manager acl list --output-format json
+      register: pbs_sso_acl_verify
+      changed_when: false
+
+    - name: Show PBS SSO verification summary
+      ansible.builtin.debug:
+        msg:
+          - "Configured PBS OIDC realm {{ pbs_sso_realm }} with client {{ pbs_sso_client_id }}."
+          - "Authelia admin users granted {{ pbs_sso_admin_role }} on /: {{ pbs_sso_admin_users | join(', ') }}"

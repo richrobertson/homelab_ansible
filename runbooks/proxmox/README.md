@@ -10,6 +10,7 @@ This folder contains operational runbooks captured from real maintenance and inc
 - [Vault connectivity and Proxmox cert-agent recovery](./vault-connectivity-and-cert-agent-recovery.md)
 - [PBS Scooter VM to Proxmox Thunderbolt migration](./pbs-scooter-to-proxmox-thunderbolt-migration.md)
 - [PBS configuration DR from Vault](./pbs-config-dr-from-vault.md)
+- [PBS Authelia SSO](./pbs-authelia-sso.md)
 - [Proxmox Authelia SSO](./proxmox-authelia-sso.md)
 - [Staging cluster rebuild and SDN investigation (2026-03-31)](./staging-cluster-rebuild-and-sdn-investigation-2026-03-31.md)
 
