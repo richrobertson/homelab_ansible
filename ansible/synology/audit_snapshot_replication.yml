@@ -1,0 +1,78 @@
+---
+- name: Audit Synology Snapshot Replication posture
+  hosts: "{{ synology_audit_nas_group | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+  become: true
+  become_method: sudo
+
+  vars:
+    synology_snapshot_replication_pkg: SnapshotReplication
+    synology_snapshot_replication_bin_dir: /var/packages/SnapshotReplication/target/sbin
+
+  tasks:
+    - name: Check Snapshot Replication package status
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synopkg status {{ synology_snapshot_replication_pkg | quote }}
+        2>/dev/null
+        || /usr/syno/sbin/synopkg status {{ synology_snapshot_replication_pkg | quote }}
+        2>/dev/null
+      changed_when: false
+      register: synology_snapshot_pkg_status
+
+    - name: List share replication configuration
+      ansible.builtin.raw: >-
+        {{ synology_snapshot_replication_bin_dir }}/synosharereplica --list
+      changed_when: false
+      register: synology_share_replica_list
+
+    - name: List Btrfs replication configuration
+      ansible.builtin.raw: >-
+        {{ synology_snapshot_replication_bin_dir }}/synobtrfsreplica -l
+      changed_when: false
+      register: synology_btrfs_replica_list
+
+    - name: List snapshot and replication schedules
+      ansible.builtin.raw: >-
+        {{ synology_snapshot_replication_bin_dir }}/synodrsnapschedtool list_sched_task
+      changed_when: false
+      register: synology_snapshot_sched_list
+
+    - name: Read local share snapshot config
+      ansible.builtin.raw: >-
+        cat /usr/syno/etc/sharesnap/sharesnap.conf 2>/dev/null || true
+      changed_when: false
+      register: synology_sharesnap_config
+
+    - name: List share retention policies
+      ansible.builtin.raw: |
+        /usr/syno/sbin/synoshare --enum ALL 2>/dev/null |
+        awk 'seen && NF {print} /Listed:/ {seen=1}' |
+        while IFS= read -r share; do
+          [ -z "${share}" ] && continue
+          policy="$(/usr/syno/bin/synoretentionconf --get "Share#" "${share}" 2>&1 || true)"
+          if printf '%s\n' "${policy}" | grep -q "Can't get policy info"; then
+            printf 'MISSING %s\n' "${share}"
+          else
+            printf 'POLICY %s | %s | %s | %s | %s | %s | %s | %s\n' \
+              "${share}" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Policy type:/ {print $2}')" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Advance Daily:/ {print "daily=" $2}')" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Advance Weekly:/ {print "weekly=" $2}')" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Advance Monthly:/ {print "monthly=" $2}')" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Advance Yearly:/ {print "yearly=" $2}')" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Advance RetainDay:/ {print "retain_all_days=" $2}')" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Advance Minimum:/ {print "minimum=" $2}')"
+          fi
+        done
+      changed_when: false
+      register: synology_retention_policies
+
+    - name: Summarize audit output
+      ansible.builtin.debug:
+        msg:
+          - "Package status: {{ synology_snapshot_pkg_status.stdout | regex_search('\"status\"\\s*:\\s*\"[^\"]+\"') | default('unknown') }}"
+          - "Replica config count: {{ synology_share_replica_list.stdout | regex_findall('\"replica_id\"') | length }}"
+          - "Schedule count: {{ synology_snapshot_sched_list.stdout | regex_findall('\"snap_sched_target_id\"') | length }}"
+          - "Local snapshot config sections: {{ synology_sharesnap_config.stdout | regex_findall('^\\[[^\\]]+\\]', multiline=True) | length }}"
+          - "Retention policy count: {{ synology_retention_policies.stdout | regex_findall('^POLICY ', multiline=True) | length }}"
+          - "Retention policy missing count: {{ synology_retention_policies.stdout | regex_findall('^MISSING ', multiline=True) | length }}"
