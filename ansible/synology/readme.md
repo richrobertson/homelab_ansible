@@ -7,6 +7,7 @@ The playbooks target the inventory group `synology_nas` and use host vars from `
 
 - `preflight_nas_connectivity.yml`: Verifies SSH reachability, API auth, and LUN endpoint shape.
 - `audit_snapshot_replication.yml`: Audits Snapshot Replication package status, configured replica count, schedules, local share snapshot config, retention policy coverage, and DSM notification email settings. It can also apply the desired DSM notification email settings when explicitly enabled.
+- `configure_authelia_sso.yml`: Seeds per-NAS Authelia OIDC client secrets in Vault and configures DSM OIDC SSO for scooter and kermit.
 - `discover_orphaned_luns.yml`: Lists likely orphaned LUN UUIDs using mapping heuristics.
 - `cleanup_orphaned_luns.yml`: Deletes explicitly provided orphan LUN UUIDs.
 - `discover_and_cleanup_orphaned_luns.yml`: One-shot flow for discovery + optional cleanup.
@@ -45,6 +46,23 @@ SMTP_PASS="$(vault kv get -field=password -mount=secret mailu/prod/accounts/nas-
 ```
 
 The notification sender account is `nas-notifications@myrobertson.net`, with its password stored at `secret/mailu/prod/accounts/nas-notifications`. The playbook defaults the SMTP endpoint to `mail.myrobertson.net:587` with DSM's SSL/TLS flag enabled and preserves the current notification recipients, `rich@myrobertson.com` and `roy@myrobertson.com`.
+
+## Synology Authelia SSO
+
+The Synology SSO playbook provisions per-NAS OIDC client secrets, stores the Authelia-compatible PBKDF2 hashes in `secret/authelia/prod`, and configures DSM to use `https://auth.myrobertson.com/.well-known/openid-configuration`.
+
+```bash
+source ~/.bash_profile
+SYNO_USER="$(vault kv get -field=username -mount=secret synology/dsm-admin/local-ssh-account)"
+SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local-ssh-account)"
+.venv/bin/ansible-playbook ansible/synology/configure_authelia_sso.yml \
+  -i inventory/environments/production.ini \
+  -e "ansible_user=${SYNO_USER}" \
+  -e "ansible_password=${SYNO_PASS}" \
+  -e "ansible_become_password=${SYNO_PASS}"
+```
+
+By default the playbook keeps DSM local login as the default and enables Authelia as an available OIDC sign-in path. The OIDC user claim is `preferred_username`, and local DSM users are allowed so the existing break-glass admin account remains usable.
 
 ## 1) Preflight (always run first)
 

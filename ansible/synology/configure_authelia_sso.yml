@@ -1,0 +1,317 @@
+---
+- name: Prepare Synology Authelia SSO secrets in Vault
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /opt/homebrew/bin/python3
+    synology_sso_nas_group: synology_snapshot_replication_nas
+    synology_sso_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    synology_sso_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    synology_sso_vault_mount: secret
+    synology_sso_vault_prefix: synology/prod/sso/authelia
+    synology_sso_authelia_vault_path: authelia/prod
+    synology_sso_rotate_secret: false
+    synology_sso_regenerate_authelia_hash: false
+    synology_sso_clients: "{{ groups[synology_sso_nas_group] | default([]) }}"
+  tasks:
+    - name: Require Vault environment
+      ansible.builtin.assert:
+        that:
+          - synology_sso_vault_addr | length > 0
+          - synology_sso_vault_token | length > 0
+          - synology_sso_clients | length > 0
+        fail_msg: Set VAULT_ADDR and VAULT_TOKEN, and target a non-empty Synology NAS group.
+
+    - name: Read Authelia production secret from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ synology_sso_vault_addr }}"
+        token: "{{ synology_sso_vault_token }}"
+        engine_mount_point: "{{ synology_sso_vault_mount }}"
+        path: "{{ synology_sso_authelia_vault_path }}"
+      register: synology_sso_authelia_vault_existing
+      no_log: true
+
+    - name: Read existing Synology SSO client secrets from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ synology_sso_vault_addr }}"
+        token: "{{ synology_sso_vault_token }}"
+        engine_mount_point: "{{ synology_sso_vault_mount }}"
+        path: "{{ synology_sso_vault_prefix }}/{{ item.split('.')[0] }}"
+      loop: "{{ synology_sso_clients }}"
+      register: synology_sso_vault_existing
+      failed_when: false
+      no_log: true
+
+    - name: Build Synology SSO client secret records
+      ansible.builtin.set_fact:
+        synology_sso_secret_records: "{{ synology_sso_secret_records | default([]) + [record] }}"
+      vars:
+        host_short: "{{ item.item.split('.')[0] }}"
+        existing_secret: "{{ item.secret.client_secret | default('') }}"
+        generated_secret: >-
+          {{
+            lookup(
+              'ansible.builtin.password',
+              '/dev/null',
+              chars='ascii_letters,digits',
+              length=72
+            )
+          }}
+        selected_secret: >-
+          {{
+            generated_secret
+            if (synology_sso_rotate_secret | bool or existing_secret | length == 0)
+            else existing_secret
+          }}
+        record:
+          hostname: "{{ item.item }}"
+          host_short: "{{ host_short }}"
+          client_id: "synology_{{ host_short }}_prod"
+          client_name: "Synology {{ host_short | title }}"
+          client_secret: "{{ selected_secret }}"
+          generated: "{{ synology_sso_rotate_secret | bool or existing_secret | length == 0 }}"
+          authelia_hash_key: "synology_{{ host_short }}_oidc"
+      loop: "{{ synology_sso_vault_existing.results }}"
+      no_log: true
+
+    - name: Generate Authelia PBKDF2 hashes for Synology OIDC client secrets
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import base64, hashlib, os, secrets
+            password = os.environ["SYNOLOGY_SSO_CLIENT_SECRET"].encode()
+            salt = secrets.token_bytes(16)
+            digest = hashlib.pbkdf2_hmac("sha512", password, salt, 310000)
+            enc = lambda b: base64.b64encode(b).decode().rstrip("=").replace("+", ".")
+            print("$pbkdf2-sha512$310000$%s$%s" % (enc(salt), enc(digest)))
+      environment:
+        SYNOLOGY_SSO_CLIENT_SECRET: "{{ item.client_secret }}"
+      loop: "{{ synology_sso_secret_records }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      register: synology_sso_client_secret_hashes
+      changed_when: false
+      when: >-
+        synology_sso_rotate_secret | bool
+        or synology_sso_regenerate_authelia_hash | bool
+        or item.generated | bool
+        or synology_sso_authelia_vault_existing.secret[item.authelia_hash_key] is not defined
+      no_log: true
+
+    - name: Build Authelia hash update
+      ansible.builtin.set_fact:
+        synology_sso_authelia_hash_update: >-
+          {{
+            synology_sso_authelia_hash_update | default({})
+            | combine({item.authelia_hash_key: hash_value})
+          }}
+      vars:
+        hash_result: >-
+          {{
+            synology_sso_client_secret_hashes.results
+            | selectattr('item.hostname', 'equalto', item.hostname)
+            | list
+            | first
+            | default({})
+          }}
+        hash_value: >-
+          {{
+            hash_result.stdout
+            if (
+              synology_sso_rotate_secret | bool
+              or synology_sso_regenerate_authelia_hash | bool
+              or item.generated | bool
+              or synology_sso_authelia_vault_existing.secret[item.authelia_hash_key] is not defined
+            )
+            else synology_sso_authelia_vault_existing.secret[item.authelia_hash_key]
+          }}
+      loop: "{{ synology_sso_secret_records }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      no_log: true
+
+    - name: Store Synology OIDC client secrets in Vault
+      community.hashi_vault.vault_kv2_write:
+        url: "{{ synology_sso_vault_addr }}"
+        token: "{{ synology_sso_vault_token }}"
+        engine_mount_point: "{{ synology_sso_vault_mount }}"
+        path: "{{ synology_sso_vault_prefix }}/{{ item.host_short }}"
+        read_before_write: true
+        data:
+          client_id: "{{ item.client_id }}"
+          client_secret: "{{ item.client_secret }}"
+          client_name: "{{ item.client_name }}"
+          issuer_url: https://auth.myrobertson.com
+          wellknown_url: https://auth.myrobertson.com/.well-known/openid-configuration
+          redirect_uri: "https://{{ item.hostname }}:5001/webman/ssoclient/token_relay.html"
+      loop: "{{ synology_sso_secret_records }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      no_log: true
+
+    - name: Store Authelia OIDC client secret hashes in Vault
+      community.hashi_vault.vault_kv2_write:
+        url: "{{ synology_sso_vault_addr }}"
+        token: "{{ synology_sso_vault_token }}"
+        engine_mount_point: "{{ synology_sso_vault_mount }}"
+        path: "{{ synology_sso_authelia_vault_path }}"
+        read_before_write: true
+        data: >-
+          {{
+            synology_sso_authelia_vault_existing.secret
+            | combine(synology_sso_authelia_hash_update)
+          }}
+      no_log: true
+
+- name: Configure Synology DSM Authelia OIDC SSO
+  hosts: "{{ synology_sso_nas_group | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+  become: true
+  become_method: sudo
+  vars:
+    synology_sso_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    synology_sso_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    synology_sso_vault_mount: secret
+    synology_sso_vault_prefix: synology/prod/sso/authelia
+    synology_sso_wellknown_url: https://auth.myrobertson.com/.well-known/openid-configuration
+    synology_sso_scope: "openid profile email groups"
+    synology_sso_user_claim: preferred_username
+    synology_sso_allow_local_user: true
+    synology_sso_enable_default_login: false
+    synology_sso_disable_legacy_synology_sso: true
+    synology_sso_redirect_uris_by_host:
+      kermit.myrobertson.net:
+        - https://kermit.myrobertson.com/webman/ssoclient/token_relay.html
+        - https://kermit.myrobertson.net:5001/webman/ssoclient/token_relay.html
+      scooter.myrobertson.net:
+        - https://scooter.myrobertson.net:5001/webman/ssoclient/token_relay.html
+  tasks:
+    - name: Require Vault environment
+      ansible.builtin.assert:
+        that:
+          - synology_sso_vault_addr | length > 0
+          - synology_sso_vault_token | length > 0
+        fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running this playbook.
+
+    - name: Read Synology OIDC client secret from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ synology_sso_vault_addr }}"
+        token: "{{ synology_sso_vault_token }}"
+        engine_mount_point: "{{ synology_sso_vault_mount }}"
+        path: "{{ synology_sso_vault_prefix }}/{{ inventory_hostname_short }}"
+      register: synology_sso_vault_secret
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_python_interpreter: /opt/homebrew/bin/python3
+      no_log: true
+
+    - name: Build host OIDC redirect URI list
+      ansible.builtin.set_fact:
+        synology_sso_redirect_uris: >-
+          {{
+            synology_sso_redirect_uris_by_host[inventory_hostname]
+            | default(['https://' ~ inventory_hostname ~ ':5001/webman/ssoclient/token_relay.html'])
+          }}
+
+    - name: Read DSM OIDC SSO settings before configuration
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Directory.OIDC.SSO
+        method=get
+        version=1
+        2>&1
+      changed_when: false
+      register: synology_sso_oidc_before
+      failed_when: "'\"success\" : true' not in synology_sso_oidc_before.stdout"
+
+    - name: Configure DSM OIDC profile for Authelia
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Directory.OIDC.SSO
+        method=set
+        version=1
+        profile=oidc
+        oidc_name=Authelia
+        oidc_wellknown={{ synology_sso_wellknown_url | quote }}
+        oidc_client_id={{ synology_sso_vault_secret.secret.client_id | quote }}
+        oidc_client_secret={{ synology_sso_vault_secret.secret.client_secret | quote }}
+        oidc_redirect_uri={{ synology_sso_redirect_uris | join(',') | quote }}
+        oidc_scope={{ synology_sso_scope | quote }}
+        oidc_user_claim={{ synology_sso_user_claim | quote }}
+        oidc_allow_local_user={{ synology_sso_allow_local_user | lower }}
+        2>&1
+      register: synology_sso_oidc_set
+      changed_when: true
+      failed_when: "'\"success\" : true' not in synology_sso_oidc_set.stdout"
+      no_log: true
+
+    - name: Enable DSM OIDC SSO profile
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Directory.SSO.Profile
+        method=set
+        version=1
+        sso_enable=true
+        sso_profile=oidc
+        2>&1
+      register: synology_sso_profile_set
+      changed_when: true
+      failed_when: "'\"success\" : true' not in synology_sso_profile_set.stdout"
+
+    - name: Keep DSM local login as the default
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Directory.SSO.Setting
+        method=set
+        version=1
+        sso_default_login={{ synology_sso_enable_default_login | lower }}
+        2>&1
+      register: synology_sso_setting_set
+      changed_when: true
+      failed_when: "'\"success\" : true' not in synology_sso_setting_set.stdout"
+
+    - name: Disable stale Synology SSO client setting
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Directory.SSO.Status
+        method=set
+        version=1
+        enabled=false
+        2>&1
+      register: synology_sso_legacy_status_set
+      changed_when: true
+      failed_when: false
+      when: synology_sso_disable_legacy_synology_sso | bool
+
+    - name: Read DSM OIDC SSO settings after configuration
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Directory.OIDC.SSO
+        method=get
+        version=1
+        2>&1
+      changed_when: false
+      register: synology_sso_oidc_after
+      failed_when: "'\"success\" : true' not in synology_sso_oidc_after.stdout"
+
+    - name: Read DSM SSO profile after configuration
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Directory.SSO.Profile
+        method=get
+        version=1
+        2>&1
+      changed_when: false
+      register: synology_sso_profile_after
+      failed_when: "'\"success\" : true' not in synology_sso_profile_after.stdout"
+
+    - name: Summarize Synology Authelia SSO configuration
+      ansible.builtin.debug:
+        msg:
+          - "OIDC client: {{ synology_sso_vault_secret.secret.client_id }}"
+          - "OIDC redirects: {{ synology_sso_redirect_uris | join(', ') }}"
+          - "OIDC profile: {{ synology_sso_profile_after.stdout | regex_search('\"sso_profile\"\\s*:\\s*\"[^\"]+\"') | default('unknown') }}"
+          - "OIDC enabled: {{ synology_sso_profile_after.stdout | regex_search('\"sso_enable\"\\s*:\\s*(true|false)') | default('unknown') }}"
