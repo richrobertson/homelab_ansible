@@ -1,0 +1,171 @@
+---
+- name: Audit Synology Snapshot Replication posture
+  hosts: "{{ synology_audit_nas_group | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+  become: true
+  become_method: sudo
+
+  vars:
+    synology_snapshot_replication_pkg: SnapshotReplication
+    synology_snapshot_replication_bin_dir: /var/packages/SnapshotReplication/target/sbin
+    synology_notification_email_apply: false
+    synology_notification_smtp_server: mail.myrobertson.net
+    synology_notification_smtp_port: 587
+    synology_notification_smtp_ssl: true
+    synology_notification_smtp_verify_cert: false
+    synology_notification_sender_name: ""
+    synology_notification_subject_prefix: ""
+    synology_notification_recipients:
+      - rich@myrobertson.com
+      - roy@myrobertson.com
+    synology_notification_send_welcome_mail: true
+
+  tasks:
+    - name: Check Snapshot Replication package status
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synopkg status {{ synology_snapshot_replication_pkg | quote }}
+        2>/dev/null
+        || /usr/syno/sbin/synopkg status {{ synology_snapshot_replication_pkg | quote }}
+        2>/dev/null
+      changed_when: false
+      register: synology_snapshot_pkg_status
+
+    - name: List share replication configuration
+      ansible.builtin.raw: >-
+        {{ synology_snapshot_replication_bin_dir }}/synosharereplica --list
+      changed_when: false
+      register: synology_share_replica_list
+
+    - name: List Btrfs replication configuration
+      ansible.builtin.raw: >-
+        {{ synology_snapshot_replication_bin_dir }}/synobtrfsreplica -l
+      changed_when: false
+      register: synology_btrfs_replica_list
+
+    - name: List snapshot and replication schedules
+      ansible.builtin.raw: >-
+        {{ synology_snapshot_replication_bin_dir }}/synodrsnapschedtool list_sched_task
+      changed_when: false
+      register: synology_snapshot_sched_list
+
+    - name: Read local share snapshot config
+      ansible.builtin.raw: >-
+        cat /usr/syno/etc/sharesnap/sharesnap.conf 2>/dev/null || true
+      changed_when: false
+      register: synology_sharesnap_config
+
+    - name: List share retention policies
+      ansible.builtin.raw: |
+        /usr/syno/sbin/synoshare --enum ALL 2>/dev/null |
+        awk 'seen && NF {print} /Listed:/ {seen=1}' |
+        while IFS= read -r share; do
+          [ -z "${share}" ] && continue
+          policy="$(/usr/syno/bin/synoretentionconf --get "Share#" "${share}" 2>&1 || true)"
+          if printf '%s\n' "${policy}" | grep -q "Can't get policy info"; then
+            printf 'MISSING %s\n' "${share}"
+          else
+            printf 'POLICY %s | %s | %s | %s | %s | %s | %s | %s\n' \
+              "${share}" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Policy type:/ {print $2}')" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Advance Daily:/ {print "daily=" $2}')" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Advance Weekly:/ {print "weekly=" $2}')" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Advance Monthly:/ {print "monthly=" $2}')" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Advance Yearly:/ {print "yearly=" $2}')" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Advance RetainDay:/ {print "retain_all_days=" $2}')" \
+              "$(printf '%s\n' "${policy}" | awk -F': ' '/^Advance Minimum:/ {print "minimum=" $2}')"
+          fi
+        done
+      changed_when: false
+      register: synology_retention_policies
+
+    - name: Read DSM notification mail settings before optional configuration
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Notification.Mail.Conf
+        method=get
+        version=2
+        2>&1
+      changed_when: false
+      register: synology_notification_conf_before
+
+    - name: Validate notification SMTP variables
+      ansible.builtin.assert:
+        that:
+          - synology_notification_smtp_user is defined
+          - synology_notification_smtp_user | length > 0
+          - synology_notification_smtp_password is defined
+          - synology_notification_smtp_password | length > 0
+        fail_msg: >-
+          Set synology_notification_smtp_user and synology_notification_smtp_password
+          before enabling synology_notification_email_apply.
+      when: synology_notification_email_apply | bool
+
+    - name: Configure DSM notification mail settings
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Notification.Mail.Conf
+        method=set
+        version=2
+        enable_mail=true
+        mail={{ synology_notification_recipients | to_json | quote }}
+        sender_mail={{ synology_notification_smtp_user | quote }}
+        sender_name={{ synology_notification_sender_name | quote }}
+        subject_prefix={{ synology_notification_subject_prefix | quote }}
+        smtp_info={{
+          {
+            "server": synology_notification_smtp_server,
+            "port": synology_notification_smtp_port,
+            "ssl": synology_notification_smtp_ssl,
+            "verifyCert": synology_notification_smtp_verify_cert
+          } | to_json | quote
+        }}
+        send_welcome_mail={{ synology_notification_send_welcome_mail | lower }}
+        2>&1
+      register: synology_notification_conf_set
+      changed_when: true
+      failed_when: "'\"success\" : true' not in synology_notification_conf_set.stdout"
+      when: synology_notification_email_apply | bool
+
+    - name: Configure DSM notification SMTP authentication
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Notification.Mail.Auth
+        method=set
+        version=1
+        smtp_auth={{
+          {
+            "enable": true,
+            "user": synology_notification_smtp_user,
+            "pass": synology_notification_smtp_password
+          } | to_json | quote
+        }}
+        2>&1
+      register: synology_notification_auth_set
+      changed_when: true
+      failed_when: "'\"success\" : true' not in synology_notification_auth_set.stdout"
+      no_log: true
+      when: synology_notification_email_apply | bool
+
+    - name: Read DSM notification mail settings after optional configuration
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Notification.Mail.Conf
+        method=get
+        version=2
+        2>&1
+      changed_when: false
+      register: synology_notification_conf_after
+      failed_when: "'\"success\" : true' not in synology_notification_conf_after.stdout"
+
+    - name: Summarize audit output
+      ansible.builtin.debug:
+        msg:
+          - "Package status: {{ synology_snapshot_pkg_status.stdout | regex_search('\"status\"\\s*:\\s*\"[^\"]+\"') | default('unknown') }}"
+          - "Replica config count: {{ synology_share_replica_list.stdout | regex_findall('\"replica_id\"') | length }}"
+          - "Schedule count: {{ synology_snapshot_sched_list.stdout | regex_findall('\"snap_sched_target_id\"') | length }}"
+          - "Local snapshot config sections: {{ synology_sharesnap_config.stdout | regex_findall('^\\[[^\\]]+\\]', multiline=True) | length }}"
+          - "Retention policy count: {{ synology_retention_policies.stdout | regex_findall('^POLICY ', multiline=True) | length }}"
+          - "Retention policy missing count: {{ synology_retention_policies.stdout | regex_findall('^MISSING ', multiline=True) | length }}"
+          - "Notification mail server: {{ synology_notification_conf_after.stdout | regex_search('\"server\"\\s*:\\s*\"[^\"]+\"') | default('unknown') }}"
+          - "Notification sender: {{ synology_notification_conf_after.stdout | regex_search('\"sender_mail\"\\s*:\\s*\"[^\"]+\"') | default('unknown') }}"
+          - "Notification recipients: {{ synology_notification_conf_after.stdout | regex_search('\"mail\"\\s*:\\s*\"[^\"]+\"') | default('unknown') }}"

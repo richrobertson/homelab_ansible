@@ -6,9 +6,45 @@ The playbooks target the inventory group `synology_nas` and use host vars from `
 ## Playbooks
 
 - `preflight_nas_connectivity.yml`: Verifies SSH reachability, API auth, and LUN endpoint shape.
+- `audit_snapshot_replication.yml`: Audits Snapshot Replication package status, configured replica count, schedules, local share snapshot config, retention policy coverage, and DSM notification email settings. It can also apply the desired DSM notification email settings when explicitly enabled.
 - `discover_orphaned_luns.yml`: Lists likely orphaned LUN UUIDs using mapping heuristics.
 - `cleanup_orphaned_luns.yml`: Deletes explicitly provided orphan LUN UUIDs.
 - `discover_and_cleanup_orphaned_luns.yml`: One-shot flow for discovery + optional cleanup.
+
+## Synology observation and notification email
+
+Run the Snapshot Replication audit with the Vault-backed local SSH account:
+
+```bash
+source ~/.bash_profile
+SYNO_USER="$(vault kv get -field=username -mount=secret synology/dsm-admin/local-ssh-account)"
+SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local-ssh-account)"
+.venv/bin/ansible-playbook ansible/synology/audit_snapshot_replication.yml \
+  -i inventory/environments/production.ini \
+  -e "ansible_user=${SYNO_USER}" \
+  -e "ansible_password=${SYNO_PASS}" \
+  -e "ansible_become_password=${SYNO_PASS}"
+```
+
+Apply the DSM notification email configuration from the same audit/observation playbook:
+
+```bash
+source ~/.bash_profile
+SYNO_USER="$(vault kv get -field=username -mount=secret synology/dsm-admin/local-ssh-account)"
+SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local-ssh-account)"
+SMTP_USER="$(vault kv get -field=username -mount=secret mailu/prod/accounts/nas-notifications)"
+SMTP_PASS="$(vault kv get -field=password -mount=secret mailu/prod/accounts/nas-notifications)"
+.venv/bin/ansible-playbook ansible/synology/audit_snapshot_replication.yml \
+  -i inventory/environments/production.ini \
+  -e "ansible_user=${SYNO_USER}" \
+  -e "ansible_password=${SYNO_PASS}" \
+  -e "ansible_become_password=${SYNO_PASS}" \
+  -e synology_notification_email_apply=true \
+  -e "synology_notification_smtp_user=${SMTP_USER}" \
+  -e "synology_notification_smtp_password=${SMTP_PASS}"
+```
+
+The notification sender account is `nas-notifications@myrobertson.net`, with its password stored at `secret/mailu/prod/accounts/nas-notifications`. The playbook defaults the SMTP endpoint to `mail.myrobertson.net:587` with DSM's SSL/TLS flag enabled and preserves the current notification recipients, `rich@myrobertson.com` and `roy@myrobertson.com`.
 
 ## 1) Preflight (always run first)
 
