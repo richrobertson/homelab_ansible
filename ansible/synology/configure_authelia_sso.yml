@@ -186,6 +186,7 @@
         - https://kermit.myrobertson.com/webman/ssoclient/token_relay.html
         - https://kermit.myrobertson.net:5001/webman/ssoclient/token_relay.html
       scooter.myrobertson.net:
+        - https://scooter.myrobertson.net:5011/webman/ssoclient/token_relay.html
         - https://scooter.myrobertson.net:5001/webman/ssoclient/token_relay.html
   tasks:
     - name: Require Vault environment
