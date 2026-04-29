@@ -1,0 +1,507 @@
+---
+- name: Prepare Synology Snapshot Replication service account secret in Vault
+  hosts: localhost
+  gather_facts: false
+  tags:
+    - vault
+    - synology_replication
+  vars:
+    synology_replication_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    synology_replication_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    synology_replication_vault_mount: secret
+    synology_replication_vault_path: synology/snapshot-replication/ad-service-account
+    synology_replication_rotate_password: false
+    synology_replication_domain_dns: myrobertson.net
+    synology_replication_sam: svc-syno-repl
+    synology_replication_display_name: Synology Snapshot Replication
+    synology_replication_group_name: GG-Synology-Snapshot-Replication
+    synology_replication_password_length: 48
+
+  tasks:
+    - name: Require Vault environment
+      ansible.builtin.assert:
+        that:
+          - synology_replication_vault_addr | length > 0
+          - synology_replication_vault_token | length > 0
+        fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running this playbook.
+
+    - name: Read existing Synology replication account secret from Vault
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - get
+          - -format=json
+          - "-mount={{ synology_replication_vault_mount }}"
+          - "{{ synology_replication_vault_path }}"
+      environment:
+        VAULT_ADDR: "{{ synology_replication_vault_addr }}"
+        VAULT_TOKEN: "{{ synology_replication_vault_token }}"
+      register: synology_replication_vault_existing
+      failed_when: false
+      changed_when: false
+      no_log: true
+
+    - name: Select existing password when rotation is disabled
+      ansible.builtin.set_fact:
+        synology_replication_existing_secret: >-
+          {{
+            (
+              synology_replication_vault_existing.stdout
+              | default('{}', true)
+              | from_json
+            ).data.data
+            | default({})
+          }}
+        synology_replication_existing_password: >-
+          {{
+            (
+              synology_replication_vault_existing.stdout
+              | default('{}', true)
+              | from_json
+            ).data.data.password
+            | default('')
+          }}
+      no_log: true
+
+    - name: Generate Synology replication service account password when needed
+      ansible.builtin.set_fact:
+        synology_replication_password: >-
+          {{
+            lookup(
+              'ansible.builtin.password',
+              '/dev/null',
+              chars='ascii_letters,digits',
+              length=synology_replication_password_length
+            )
+          }}
+        synology_replication_generated_password: true
+      when:
+        - synology_replication_rotate_password | bool or synology_replication_existing_password | length == 0
+      no_log: true
+
+    - name: Reuse current Synology replication service account password
+      ansible.builtin.set_fact:
+        synology_replication_password: "{{ synology_replication_existing_password }}"
+        synology_replication_generated_password: false
+      when:
+        - not (synology_replication_rotate_password | bool)
+        - synology_replication_existing_password | length > 0
+      no_log: true
+
+    - name: Store Synology replication service account secret in Vault
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - put
+          - "-mount={{ synology_replication_vault_mount }}"
+          - "{{ synology_replication_vault_path }}"
+          - "domain_dns={{ synology_replication_domain_dns }}"
+          - "sam={{ synology_replication_sam }}"
+          - "upn={{ synology_replication_sam }}@{{ synology_replication_domain_dns }}"
+          - "username={{ synology_replication_domain_dns }}\\{{ synology_replication_sam }}"
+          - "display_name={{ synology_replication_display_name }}"
+          - "group_name={{ synology_replication_group_name }}"
+          - "password={{ synology_replication_password }}"
+          - purpose=Synology Snapshot Replication partner authentication
+      environment:
+        VAULT_ADDR: "{{ synology_replication_vault_addr }}"
+        VAULT_TOKEN: "{{ synology_replication_vault_token }}"
+      no_log: true
+
+    - name: Show Vault secret summary
+      ansible.builtin.debug:
+        msg:
+          - "Vault path: {{ synology_replication_vault_mount }}/data/{{ synology_replication_vault_path }}"
+          - "AD account: {{ synology_replication_sam }}@{{ synology_replication_domain_dns }}"
+          - "Password generated or rotated: {{ synology_replication_generated_password }}"
+
+- name: Ensure Active Directory service account for Synology Snapshot Replication
+  hosts: "{{ synology_replication_domain_target_group | default('domain_controllers_windows') }}"
+  gather_facts: false
+  tags:
+    - ad
+    - synology_replication
+  vars:
+    synology_replication_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    synology_replication_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    synology_replication_vault_mount: secret
+    synology_replication_vault_path: synology/snapshot-replication/ad-service-account
+    synology_replication_domain_dns: myrobertson.net
+    synology_replication_sam: svc-syno-repl
+    synology_replication_display_name: Synology Snapshot Replication
+    synology_replication_group_name: GG-Synology-Snapshot-Replication
+    synology_replication_account_description: Service account used by Synology Snapshot Replication between scooter and kermit.
+    synology_replication_ad_ou: ""
+    synology_replication_password_never_expires: true
+    synology_replication_rotate_password: false
+    synology_replication_extra_ad_groups:
+      - Backup Operators
+    synology_replication_add_group_to_domain_admins: false
+
+  tasks:
+    - name: Read Synology replication account secret from Vault
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - get
+          - -format=json
+          - "-mount={{ synology_replication_vault_mount }}"
+          - "{{ synology_replication_vault_path }}"
+      environment:
+        VAULT_ADDR: "{{ synology_replication_vault_addr }}"
+        VAULT_TOKEN: "{{ synology_replication_vault_token }}"
+      delegate_to: localhost
+      register: synology_replication_vault_secret
+      changed_when: false
+      no_log: true
+      run_once: true
+
+    - name: Parse Synology replication account secret
+      ansible.builtin.set_fact:
+        synology_replication_vault_secret_data: >-
+          {{
+            (
+              synology_replication_vault_secret.stdout
+              | from_json
+            ).data.data
+          }}
+      no_log: true
+      run_once: true
+
+    - name: Ensure ActiveDirectory PowerShell module is available
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
+            throw 'The ActiveDirectory PowerShell module is not available on this host.'
+          }
+          'ActiveDirectory module available'
+      changed_when: false
+      run_once: true
+
+    - name: Ensure Synology replication AD group exists
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $groupName = {{ synology_replication_group_name | to_json }}
+          $description = 'Allows Synology DSM admin/Snapshot Replication access for dedicated replication credentials.'
+          $ou = {{ synology_replication_ad_ou | to_json }}
+          $existing = Get-ADGroup -LDAPFilter "(sAMAccountName=$groupName)" -Properties Description -ErrorAction SilentlyContinue
+
+          if ($existing) {
+            if ($existing.Description -ne $description) {
+              Set-ADGroup -Identity $existing.DistinguishedName -Description $description
+              Write-Output 'Updated'
+            }
+            else {
+              Write-Output 'Present'
+            }
+            exit 0
+          }
+
+          $params = @{
+            Name = $groupName
+            SamAccountName = $groupName
+            GroupCategory = 'Security'
+            GroupScope = 'Global'
+            Description = $description
+          }
+          if ($ou) {
+            $params['Path'] = $ou
+          }
+
+          New-ADGroup @params
+          Write-Output 'Created'
+      register: synology_replication_ad_group_result
+      changed_when: >-
+        'Created' in synology_replication_ad_group_result.output
+        or 'Updated' in synology_replication_ad_group_result.output
+      run_once: true
+
+    - name: Ensure Synology replication AD user exists
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $sam = {{ synology_replication_sam | to_json }}
+          $upn = {{ synology_replication_vault_secret_data.upn | to_json }}
+          $displayName = {{ synology_replication_display_name | to_json }}
+          $description = {{ synology_replication_account_description | to_json }}
+          $password = ConvertTo-SecureString {{ synology_replication_vault_secret_data.password | to_json }} -AsPlainText -Force
+          $ou = {{ synology_replication_ad_ou | to_json }}
+          $passwordNeverExpires = [System.Convert]::ToBoolean('{{ synology_replication_password_never_expires | bool | ternary("true", "false") }}')
+          $rotatePassword = [System.Convert]::ToBoolean('{{ synology_replication_rotate_password | bool | ternary("true", "false") }}')
+
+          $existing = Get-ADUser -LDAPFilter "(sAMAccountName=$sam)" -Properties DisplayName,Description,Enabled,PasswordNeverExpires,UserPrincipalName -ErrorAction SilentlyContinue
+          if (-not $existing) {
+            $params = @{
+              Name = $displayName
+              SamAccountName = $sam
+              UserPrincipalName = $upn
+              DisplayName = $displayName
+              Description = $description
+              AccountPassword = $password
+              Enabled = $true
+              PasswordNeverExpires = $passwordNeverExpires
+            }
+            if ($ou) {
+              $params['Path'] = $ou
+            }
+            New-ADUser @params
+            Write-Output 'Created'
+            exit 0
+          }
+
+          $changed = $false
+          $setParams = @{
+            Identity = $existing.DistinguishedName
+            DisplayName = $displayName
+            Description = $description
+            UserPrincipalName = $upn
+            Enabled = $true
+            PasswordNeverExpires = $passwordNeverExpires
+          }
+          Set-ADUser @setParams
+
+          if ($rotatePassword) {
+            Set-ADAccountPassword -Identity $existing.DistinguishedName -Reset -NewPassword $password
+            $changed = $true
+          }
+
+          if (-not $existing.Enabled -or
+              $existing.DisplayName -ne $displayName -or
+              $existing.Description -ne $description -or
+              $existing.UserPrincipalName -ne $upn -or
+              $existing.PasswordNeverExpires -ne $passwordNeverExpires) {
+            $changed = $true
+          }
+
+          if ($changed) {
+            Write-Output 'Updated'
+          }
+          else {
+            Write-Output 'Present'
+          }
+      register: synology_replication_ad_user_result
+      changed_when: >-
+        'Created' in synology_replication_ad_user_result.output
+        or 'Updated' in synology_replication_ad_user_result.output
+      no_log: true
+      run_once: true
+
+    - name: Ensure Synology replication user is a member of its AD group
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $sam = {{ synology_replication_sam | to_json }}
+          $groupName = {{ synology_replication_group_name | to_json }}
+          $user = Get-ADUser -Identity $sam -ErrorAction Stop
+          $group = Get-ADGroup -Identity $groupName -ErrorAction Stop
+          $member = Get-ADGroupMember -Identity $group.DistinguishedName -Recursive |
+            Where-Object { $_.DistinguishedName -eq $user.DistinguishedName }
+
+          if ($member) {
+            Write-Output 'Present'
+            exit 0
+          }
+
+          Add-ADGroupMember -Identity $group.DistinguishedName -Members $user.DistinguishedName
+          Write-Output 'Added'
+      register: synology_replication_ad_membership_result
+      changed_when: "'Added' in synology_replication_ad_membership_result.output"
+      run_once: true
+
+    - name: Ensure Synology replication user is a member of extra AD groups
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $sam = {{ synology_replication_sam | to_json }}
+          $groupNames = ConvertFrom-Json -InputObject @'
+          {{ synology_replication_extra_ad_groups | to_json }}
+          '@
+          $user = Get-ADUser -Identity $sam -ErrorAction Stop
+          $changed = $false
+
+          foreach ($groupName in $groupNames) {
+            $group = Get-ADGroup -Identity $groupName -ErrorAction Stop
+            $member = Get-ADGroupMember -Identity $group.DistinguishedName -Recursive |
+              Where-Object { $_.DistinguishedName -eq $user.DistinguishedName }
+
+            if ($member) {
+              Write-Output "Present: $groupName"
+              continue
+            }
+
+            Add-ADGroupMember -Identity $group.DistinguishedName -Members $user.DistinguishedName
+            Write-Output "Added: $groupName"
+            $changed = $true
+          }
+
+          if (-not $changed) {
+            Write-Output 'No changes'
+          }
+      register: synology_replication_extra_ad_membership_result
+      changed_when: "'Added:' in synology_replication_extra_ad_membership_result.output"
+      when: synology_replication_extra_ad_groups | length > 0
+      run_once: true
+
+    - name: Optionally add Synology replication group to Domain Admins
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $groupName = {{ synology_replication_group_name | to_json }}
+          $sourceGroup = Get-ADGroup -Identity $groupName -ErrorAction Stop
+          $domainAdmins = Get-ADGroup -Identity 'Domain Admins' -ErrorAction Stop
+          $member = Get-ADGroupMember -Identity $domainAdmins.DistinguishedName -Recursive |
+            Where-Object { $_.DistinguishedName -eq $sourceGroup.DistinguishedName }
+
+          if ($member) {
+            Write-Output 'Present'
+            exit 0
+          }
+
+          Add-ADGroupMember -Identity $domainAdmins.DistinguishedName -Members $sourceGroup.DistinguishedName
+          Write-Output 'Added'
+      register: synology_replication_domain_admin_result
+      changed_when: "'Added' in synology_replication_domain_admin_result.output"
+      when: synology_replication_add_group_to_domain_admins | bool
+      run_once: true
+
+    - name: Show AD service account summary
+      ansible.builtin.debug:
+        msg:
+          - "AD account ensured: {{ synology_replication_sam }}@{{ synology_replication_domain_dns }}"
+          - "AD group ensured: {{ synology_replication_group_name }}"
+          - "Extra AD groups ensured: {{ synology_replication_extra_ad_groups | join(', ') }}"
+          - "Domain Admins membership requested: {{ synology_replication_add_group_to_domain_admins }}"
+      run_once: true
+
+- name: Validate and configure Synology Snapshot Replication partner credentials
+  hosts: "{{ synology_replication_nas_group | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+  tags:
+    - nas
+    - synology_replication
+  vars:
+    synology_replication_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    synology_replication_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    synology_replication_vault_mount: secret
+    synology_replication_vault_path: synology/snapshot-replication/ad-service-account
+    synology_replication_data_port: 5566
+    synology_replication_dsm_port: 443
+    synology_replication_partner_dsm_check_cmd: >-
+      curl -kfsS --connect-timeout 5
+      https://{{ synology_replication_partner_host }}:{{ synology_replication_dsm_port }}/
+      >/dev/null
+    synology_replication_partner_data_check_cmd: >-
+      nc -z -w 5
+      {{ synology_replication_partner_host }}
+      {{ synology_replication_data_port }}
+    synology_replication_apply_partner_credentials: false
+    synology_replication_task_update_commands: []
+
+  tasks:
+    - name: Read Synology replication account secret from Vault
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - get
+          - -format=json
+          - "-mount={{ synology_replication_vault_mount }}"
+          - "{{ synology_replication_vault_path }}"
+      environment:
+        VAULT_ADDR: "{{ synology_replication_vault_addr }}"
+        VAULT_TOKEN: "{{ synology_replication_vault_token }}"
+      delegate_to: localhost
+      register: synology_replication_vault_secret
+      changed_when: false
+      no_log: true
+
+    - name: Parse Synology replication account secret
+      ansible.builtin.set_fact:
+        synology_replication_vault_secret_data: >-
+          {{
+            (
+              synology_replication_vault_secret.stdout
+              | from_json
+            ).data.data
+          }}
+      no_log: true
+
+    - name: Validate partner topology is defined for this NAS
+      ansible.builtin.assert:
+        that:
+          - synology_replication_partner_host is defined
+          - synology_replication_partner_host | length > 0
+        fail_msg: >-
+          Set synology_replication_partner_host for each NAS host. scooter should
+          point at kermit, and kermit should point at scooter.
+
+    - name: Check partner DSM HTTPS port from this NAS
+      ansible.builtin.raw: "{{ synology_replication_partner_dsm_check_cmd }}"
+      register: synology_replication_partner_dsm_port_check
+      changed_when: false
+      failed_when: synology_replication_partner_dsm_port_check.rc != 0
+
+    - name: Check partner Snapshot Replication data port from this NAS
+      ansible.builtin.raw: "{{ synology_replication_partner_data_check_cmd }}"
+      register: synology_replication_partner_data_port_check
+      changed_when: false
+      failed_when: synology_replication_partner_data_port_check.rc != 0
+
+    - name: Query local Snapshot Replication API inventory
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi
+        --exec
+        api=SYNO.API.Info
+        method=query
+        version=1
+        query=SYNO.SnapshotReplication
+      register: synology_replication_api_info_raw
+      changed_when: false
+
+    - name: Show local Snapshot Replication API inventory
+      ansible.builtin.debug:
+        var: synology_replication_api_info_raw.stdout
+
+    - name: Apply DSM-specific Snapshot Replication partner credential update commands
+      ansible.builtin.raw: "{{ item }}"
+      loop: "{{ synology_replication_task_update_commands }}"
+      loop_control:
+        label: "{{ item | regex_replace(synology_replication_vault_secret_data.password, '********') }}"
+      environment:
+        SYNOLOGY_REPLICATION_USERNAME: "{{ synology_replication_vault_secret_data.username }}"
+        SYNOLOGY_REPLICATION_UPN: "{{ synology_replication_vault_secret_data.upn }}"
+        SYNOLOGY_REPLICATION_PASSWORD: "{{ synology_replication_vault_secret_data.password }}"
+        SYNOLOGY_REPLICATION_PARTNER_HOST: "{{ synology_replication_partner_host }}"
+      register: synology_replication_task_update_results
+      changed_when: true
+      no_log: true
+      when:
+        - synology_replication_apply_partner_credentials | bool
+        - synology_replication_task_update_commands | length > 0
+
+    - name: Require explicit DSM update commands before applying credentials
+      ansible.builtin.fail:
+        msg: >-
+          Synology Snapshot Replication credential application is gated because
+          DSM package API names differ by version. The AD account and Vault
+          secret are ready; set synology_replication_task_update_commands and
+          synology_replication_apply_partner_credentials=true after validating
+          the API inventory shown above.
+      when:
+        - synology_replication_apply_partner_credentials | bool
+        - synology_replication_task_update_commands | length == 0

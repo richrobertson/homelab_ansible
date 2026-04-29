@@ -17,7 +17,7 @@
     vault_tls_days_valid: 825
     vault_listener_address: 0.0.0.0:8200
     vault_cluster_address: 0.0.0.0:8201
-    vault_api_addr: "https://{{ ansible_default_ipv4.address }}:8200"
+    vault_api_addr: "https://{{ vault_ui_cert_fqdn }}:8200"
     vault_cluster_addr: "https://{{ ansible_default_ipv4.address }}:8201"
     vault_tls_disable: false
     vault_ui: true
@@ -43,12 +43,23 @@
     vault_ui_cert_issue_bundle_file: /etc/vault.d/tls/vault-ui-issue-bundle.pem
     vault_ui_cert_apply_script: /usr/local/bin/vault_ui_cert_apply.sh
     vault_ui_cert_fqdn: vault.myrobertson.net
-    vault_ui_cert_ttl: 720h
+    vault_ui_cert_ttl: 2160h
     vault_pki_mount: pki_int
     vault_pki_issuer_id: e1792b68-17a9-6afe-e99e-7db5ee405b76
     vault_pki_ui_role_name: vault-webui-myrobertson-net
     vault_ui_cert_policy_name: vault-ui-cert
     vault_root_token_file: /root/.vault-token
+    vault_manage_ui_proxy: true
+    vault_ui_proxy_package: nginx
+    vault_ui_proxy_service_name: nginx
+    vault_ui_proxy_config_file: /etc/nginx/conf.d/vault-ui.conf
+    vault_ui_proxy_backend_addr: https://127.0.0.1:8200
+    vault_ui_proxy_manage_firewalld: true
+    vault_ui_proxy_firewalld_services:
+      - http
+      - https
+    vault_ui_proxy_manage_selinux: true
+    vault_ui_proxy_selinux_boolean: httpd_can_network_connect
 
   tasks:
     - name: Check if systemd unit sets LimitMEMLOCK=infinity
@@ -443,6 +454,10 @@
           if pgrep -x vault >/dev/null; then
             pkill -HUP -x vault
           fi
+
+          if systemctl is-active --quiet {{ vault_ui_proxy_service_name }}; then
+            systemctl reload {{ vault_ui_proxy_service_name }}
+          fi
       when: vault_manage_ui_cert_agent
 
     - name: Write Vault UI cert agent config
@@ -532,6 +547,168 @@
         daemon_reload: true
       when: vault_manage_ui_cert_agent
 
+    - name: Install Vault UI proxy package
+      ansible.builtin.package:
+        name: "{{ vault_ui_proxy_package }}"
+        state: present
+      when:
+        - vault_manage_ui_proxy
+        - not vault_tls_disable
+
+    - name: Check firewalld state for Vault UI proxy
+      ansible.builtin.command:
+        cmd: firewall-cmd --state
+      register: vault_ui_proxy_firewalld_state
+      changed_when: false
+      failed_when: false
+      when:
+        - vault_manage_ui_proxy
+        - vault_ui_proxy_manage_firewalld
+        - not vault_tls_disable
+
+    - name: Check firewalld runtime services for Vault UI proxy
+      ansible.builtin.command:
+        cmd: firewall-cmd --query-service={{ item }}
+      loop: "{{ vault_ui_proxy_firewalld_services }}"
+      register: vault_ui_proxy_firewalld_runtime_queries
+      changed_when: false
+      failed_when: false
+      when:
+        - vault_manage_ui_proxy
+        - vault_ui_proxy_manage_firewalld
+        - not vault_tls_disable
+        - vault_ui_proxy_firewalld_state.rc == 0
+
+    - name: Check firewalld permanent services for Vault UI proxy
+      ansible.builtin.command:
+        cmd: firewall-cmd --permanent --query-service={{ item }}
+      loop: "{{ vault_ui_proxy_firewalld_services }}"
+      register: vault_ui_proxy_firewalld_permanent_queries
+      changed_when: false
+      failed_when: false
+      when:
+        - vault_manage_ui_proxy
+        - vault_ui_proxy_manage_firewalld
+        - not vault_tls_disable
+        - vault_ui_proxy_firewalld_state.rc == 0
+
+    - name: Check SELinux boolean for Vault UI proxy
+      ansible.builtin.command:
+        cmd: getsebool {{ vault_ui_proxy_selinux_boolean }}
+      register: vault_ui_proxy_selinux_state
+      changed_when: false
+      failed_when: false
+      when:
+        - vault_manage_ui_proxy
+        - vault_ui_proxy_manage_selinux
+        - not vault_tls_disable
+
+    - name: Allow Vault UI proxy services through firewalld permanently
+      ansible.builtin.command:
+        cmd: firewall-cmd --permanent --add-service={{ item.item }}
+      loop: "{{ vault_ui_proxy_firewalld_permanent_queries.results }}"
+      when:
+        - vault_manage_ui_proxy
+        - vault_ui_proxy_manage_firewalld
+        - not vault_tls_disable
+        - vault_ui_proxy_firewalld_state.rc == 0
+        - item.rc != 0 or item.stdout != "yes"
+      notify: Reload Firewalld
+
+    - name: Allow Vault UI proxy services through firewalld immediately
+      ansible.builtin.command:
+        cmd: firewall-cmd --add-service={{ item.item }}
+      loop: "{{ vault_ui_proxy_firewalld_runtime_queries.results }}"
+      when:
+        - vault_manage_ui_proxy
+        - vault_ui_proxy_manage_firewalld
+        - not vault_tls_disable
+        - vault_ui_proxy_firewalld_state.rc == 0
+        - item.rc != 0 or item.stdout != "yes"
+
+    - name: Permit Vault UI proxy to connect to Vault with SELinux
+      ansible.builtin.command:
+        cmd: setsebool -P {{ vault_ui_proxy_selinux_boolean }} on
+      when:
+        - vault_manage_ui_proxy
+        - vault_ui_proxy_manage_selinux
+        - not vault_tls_disable
+        - ansible_selinux is defined
+        - ansible_selinux.status == "enabled"
+        - vault_ui_proxy_selinux_state.rc == 0
+        - "'off' in vault_ui_proxy_selinux_state.stdout"
+
+    - name: Wait for Vault UI certificate before starting proxy
+      ansible.builtin.wait_for:
+        path: "{{ item }}"
+        timeout: 120
+      loop:
+        - "{{ vault_tls_cert_file }}"
+        - "{{ vault_tls_key_file }}"
+      when:
+        - vault_manage_ui_proxy
+        - not vault_tls_disable
+
+    - name: Write Vault UI proxy configuration
+      ansible.builtin.copy:
+        dest: "{{ vault_ui_proxy_config_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          server {
+            listen 80;
+            listen [::]:80;
+            server_name {{ vault_ui_cert_fqdn }};
+
+            return 301 https://$host$request_uri;
+          }
+
+          server {
+            listen 443 ssl http2;
+            listen [::]:443 ssl http2;
+            server_name {{ vault_ui_cert_fqdn }};
+
+            ssl_certificate {{ vault_tls_cert_file }};
+            ssl_certificate_key {{ vault_tls_key_file }};
+            ssl_protocols TLSv1.2 TLSv1.3;
+
+            add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+            add_header X-Content-Type-Options "nosniff" always;
+
+            location / {
+              proxy_pass {{ vault_ui_proxy_backend_addr }};
+              proxy_http_version 1.1;
+              proxy_ssl_server_name on;
+              proxy_ssl_name {{ vault_ui_cert_fqdn }};
+              proxy_ssl_verify off;
+
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Host $host;
+              proxy_set_header X-Forwarded-Proto https;
+              proxy_set_header X-Forwarded-Port 443;
+
+              proxy_read_timeout 300s;
+              proxy_redirect https://{{ vault_ui_cert_fqdn }}:8200/ https://{{ vault_ui_cert_fqdn }}/;
+            }
+          }
+      notify: Reload Vault UI Proxy
+      when:
+        - vault_manage_ui_proxy
+        - not vault_tls_disable
+
+    - name: Ensure Vault UI proxy service is enabled and started
+      ansible.builtin.systemd:
+        name: "{{ vault_ui_proxy_service_name }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      when:
+        - vault_manage_ui_proxy
+        - not vault_tls_disable
+
     - name: Gather service facts
       ansible.builtin.service_facts:
 
@@ -561,3 +738,13 @@
       ansible.builtin.systemd:
         name: "{{ vault_ui_cert_agent_service_name }}"
         state: restarted
+
+    - name: Reload Vault UI Proxy
+      ansible.builtin.systemd:
+        name: "{{ vault_ui_proxy_service_name }}"
+        state: reloaded
+
+    - name: Reload Firewalld
+      ansible.builtin.systemd:
+        name: firewalld
+        state: reloaded

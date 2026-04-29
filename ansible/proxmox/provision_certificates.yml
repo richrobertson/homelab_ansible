@@ -220,6 +220,11 @@
     proxmox_cert_agent_config_file: /etc/vault-agent.d/proxmox-pveproxy.hcl
     proxmox_cert_agent_token_file: /var/lib/vault-agent/proxmox-pveproxy/token
     proxmox_cert_apply_script: /usr/local/sbin/apply-proxmox-api-cert.sh
+    proxmox_cert_renew_script: /usr/local/sbin/renew-proxmox-api-cert.sh
+    proxmox_cert_renew_service_name: proxmox-api-cert-renew
+    proxmox_cert_renew_before_seconds: 604800
+    proxmox_cert_renew_timer_on_boot: 10min
+    proxmox_cert_renew_timer_interval: 12h
     proxmox_pveproxy_cert_file: /etc/pve/local/pveproxy-ssl.pem
     proxmox_pveproxy_key_file: /etc/pve/local/pveproxy-ssl.key
     proxmox_cert_vault_ca_file: /etc/vault-agent.d/vault-ca.pem
@@ -722,6 +727,88 @@
             systemctl restart pveproxy
           fi
 
+    - name: Write Proxmox certificate renewal script
+      ansible.builtin.copy:
+        dest: "{{ proxmox_cert_renew_script }}"
+        owner: root
+        group: root
+        mode: "0750"
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          VAULT_BIN="{{ proxmox_node_vault_cli_check.stdout }}"
+          APPLY_SCRIPT="{{ proxmox_cert_apply_script }}"
+          BUNDLE_FILE="{{ proxmox_cert_bundle_file }}"
+          CERT_FILE="{{ proxmox_pveproxy_cert_file }}"
+          ROLE_ID_FILE="{{ proxmox_cert_role_id_file }}"
+          SECRET_ID_FILE="{{ proxmox_cert_secret_id_file }}"
+          RENEW_BEFORE_SECONDS={{ proxmox_cert_renew_before_seconds }}
+
+          export VAULT_ADDR="{{ proxmox_vault_addr_resolved }}"
+          export VAULT_SKIP_VERIFY={{ proxmox_vault_skip_verify_resolved | string | lower }}
+          {% if not (proxmox_vault_skip_verify_resolved | bool) %}
+          export VAULT_CACERT="{{ proxmox_cert_vault_ca_file }}"
+          {% endif %}
+
+          needs_renewal=0
+          if [[ ! -s "$CERT_FILE" ]]; then
+            needs_renewal=1
+          else
+            not_after="$(openssl x509 -in "$CERT_FILE" -noout -enddate 2>/dev/null | cut -d= -f2- || true)"
+            if [[ -z "$not_after" ]]; then
+              needs_renewal=1
+            else
+              not_after_epoch="$(date -d "$not_after" +%s)"
+              now_epoch="$(date +%s)"
+              remaining_seconds=$((not_after_epoch - now_epoch))
+              if (( remaining_seconds <= RENEW_BEFORE_SECONDS )); then
+                needs_renewal=1
+              fi
+            fi
+          fi
+
+          if (( needs_renewal == 0 )); then
+            echo "certificate renewal not required"
+            exit 0
+          fi
+
+          role_id="$(tr -d '\n\r' < "$ROLE_ID_FILE")"
+          secret_id="$(tr -d '\n\r' < "$SECRET_ID_FILE")"
+          export VAULT_TOKEN="$("$VAULT_BIN" write -field=token auth/approle/login role_id="$role_id" secret_id="$secret_id")"
+
+          issue_json="$("$VAULT_BIN" write -format=json {{ proxmox_pki_mount }}/issue/{{ proxmox_pki_role_name }} \
+            common_name="{{ proxmox_cert_common_name }}" \
+            alt_names="{{ proxmox_cert_alt_names }}" \
+            ip_sans="{{ proxmox_cert_ip_sans }}" \
+            ttl="{{ proxmox_cert_ttl }}" \
+            key_type="rsa" \
+            key_bits="2048"{% if proxmox_pki_issuer_id | length > 0 %} \
+            issuer_ref="{{ proxmox_pki_issuer_id }}"{% endif %})"
+
+          bundle_tmp="$(mktemp)"
+          trap 'rm -f "$bundle_tmp"' EXIT
+          VAULT_ISSUE_JSON="$issue_json" python3 - "$bundle_tmp" <<'PY'
+          import json
+          import os
+          import sys
+
+          bundle_path = sys.argv[1]
+          cert_data = json.loads(os.environ["VAULT_ISSUE_JSON"])["data"]
+          with open(bundle_path, "w", encoding="utf-8") as bundle:
+              bundle.write("CERT_BEGIN\n")
+              bundle.write(cert_data["certificate"].strip() + "\n")
+              bundle.write(cert_data["issuing_ca"].strip() + "\n")
+              bundle.write("CERT_END\n")
+              bundle.write("KEY_BEGIN\n")
+              bundle.write(cert_data["private_key"].strip() + "\n")
+              bundle.write("KEY_END\n")
+          PY
+
+          install -m 0600 -o root -g root "$bundle_tmp" "$BUNDLE_FILE"
+          "$APPLY_SCRIPT"
+          echo "certificate renewal issued and applied"
+
     - name: Write Vault agent config for Proxmox API cert
       ansible.builtin.copy:
         dest: "{{ proxmox_cert_agent_config_file }}"
@@ -779,6 +866,43 @@
           }
       notify: Restart Proxmox cert agent
 
+    - name: Write systemd service for proactive Proxmox cert renewal
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ proxmox_cert_renew_service_name }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Renew Proxmox API certificate when expiry is near
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ proxmox_cert_renew_script }}
+      notify: Reload systemd
+
+    - name: Write systemd timer for proactive Proxmox cert renewal
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ proxmox_cert_renew_service_name }}.timer"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Schedule Proxmox API certificate renewal checks
+
+          [Timer]
+          OnBootSec={{ proxmox_cert_renew_timer_on_boot }}
+          OnUnitActiveSec={{ proxmox_cert_renew_timer_interval }}
+          Persistent=true
+          Unit={{ proxmox_cert_renew_service_name }}.service
+
+          [Install]
+          WantedBy=timers.target
+      notify: Reload systemd
+
     - name: Write systemd unit for Proxmox cert agent
       ansible.builtin.copy:
         dest: "/etc/systemd/system/{{ proxmox_cert_agent_name }}.service"
@@ -807,8 +931,20 @@
         state: started
         daemon_reload: true
 
+    - name: Ensure proactive Proxmox cert renewal timer is enabled and started
+      ansible.builtin.systemd:
+        name: "{{ proxmox_cert_renew_service_name }}.timer"
+        enabled: true
+        state: started
+        daemon_reload: true
+
     - name: Apply pending service restarts before certificate verification
       ansible.builtin.meta: flush_handlers
+
+    - name: Run Proxmox certificate renewal check now
+      ansible.builtin.command: "{{ proxmox_cert_renew_script }}"
+      register: proxmox_cert_renew_now
+      changed_when: proxmox_cert_renew_now.stdout is search('issued and applied')
 
     - name: Verify pveproxy serves Vault-issued certificate
       ansible.builtin.shell: |
@@ -827,6 +963,10 @@
       failed_when: proxmox_pveproxy_cert_issuer.stdout is not search(proxmox_cert_expected_issuer_pattern)
 
   handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
     - name: Restart Proxmox cert agent
       ansible.builtin.systemd:
         name: "{{ proxmox_cert_agent_name }}"

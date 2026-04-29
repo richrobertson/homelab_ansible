@@ -37,19 +37,25 @@ beatrice.myrobertson.net
 dhcp_primary_windows
 dhcp_partner_windows
 
+[rdp_servers_windows:children]
+domain_controllers_windows
+dhcp_servers_windows
+
 [domain_controllers_windows:vars]
 ansible_connection=winrm
-ansible_port=5986
+ansible_port=5985
+ansible_winrm_scheme=http
 ansible_winrm_transport=ntlm
 ansible_winrm_server_cert_validation=ignore
-ansible_user=Administrator
+ansible_user=ldap@myrobertson.net
 
 [dhcp_servers_windows:vars]
 ansible_connection=winrm
-ansible_port=5986
+ansible_port=5985
+ansible_winrm_scheme=http
 ansible_winrm_transport=ntlm
 ansible_winrm_server_cert_validation=ignore
-ansible_user=Administrator
+ansible_user=ldap@myrobertson.net
 
 [all:vars]
 # Connection settings

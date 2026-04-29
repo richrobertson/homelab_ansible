@@ -86,11 +86,20 @@
     _pdns_secrets: "{{ lookup('community.hashi_vault.hashi_vault', 'secret/data/powerdns', token=lookup('env', 'VAULT_TOKEN'), url=lookup('env', 'VAULT_ADDR')) }}"
     pdns_api_key: "{{ _pdns_secrets.get('api_key', (_pdns_secrets.get('data', {})).get('api_key')) }}"
     pdns_recursor_webserver_allow_from: "0.0.0.0/0"
-    # Must match the LAN-reachable LoadBalancer IP used by the shared myrobertson-com gateway.
+    # Disable the temporary Plex split-DNS override until local playback
+    # through plex.myrobertson.com is stable again.
+    # On 2026-04-24, local timeouts were caused by the shared Gateway to Plex
+    # path, not by public DNS itself. Pointing split DNS at 10.31.0.69 still
+    # hit the broken path until the prod Plex pod opted out of ambient mesh
+    # with istio.io/dataplane-mode=none.
+    pdns_rec_enable_plex_split_dns: false
+    # Must match the LAN-reachable LoadBalancer IP used by the shared
+    # myrobertson-com Gateway. This is not the direct PMS LoadBalancer;
+    # use 10.31.0.67:32400 for a direct LAN health check when debugging.
     pdns_rec_split_dns_gateway_ip: "10.31.0.69"
     pdns_rec_split_dns_zone_dir: "/etc/powerdns/recursor/zones"
     pdns_rec_split_dns_zone_file: "{{ pdns_rec_split_dns_zone_dir }}/plex.myrobertson.com.zone"
-    pdns_rec_config:
+    pdns_rec_config_base:
 
       # Listen Address
       local-address: "192.168.7.202"
@@ -120,13 +129,20 @@
         - "prod.myrobertson.net.=192.168.7.201:53;"
         - "dev.myrobertson.net.=192.168.7.201:53;"
         - "myrobertson.net.=192.168.1.244;192.168.1.245;192.168.1.2;"
-      auth-zones:
-        - "plex.myrobertson.com={{ pdns_rec_split_dns_zone_file }}"
 
       forward-zones-recurse:
         - ".=1.1.1.1;8.8.8.8;"
 
       max-negative-ttl: 15
+    pdns_rec_config: >-
+      {{
+        pdns_rec_config_base
+        | combine(
+            {'auth-zones': ['plex.myrobertson.com=' ~ pdns_rec_split_dns_zone_file]}
+            if pdns_rec_enable_plex_split_dns
+            else {}
+          )
+      }}
 
   pre_tasks:
     - name: Create recursor split-DNS zone directory
@@ -136,6 +152,7 @@
         owner: root
         group: root
         mode: "0755"
+      when: pdns_rec_enable_plex_split_dns
 
     - name: Install plex.myrobertson.com split-DNS auth zone
       ansible.builtin.copy:
@@ -150,6 +167,14 @@
           @ IN NS localhost.
           @ IN A {{ pdns_rec_split_dns_gateway_ip }}
       register: pdns_rec_split_dns_zone
+      when: pdns_rec_enable_plex_split_dns
+
+    - name: Remove plex.myrobertson.com split-DNS auth zone when disabled
+      ansible.builtin.file:
+        path: "{{ pdns_rec_split_dns_zone_file }}"
+        state: absent
+      register: pdns_rec_split_dns_zone_removed
+      when: not pdns_rec_enable_plex_split_dns
 
   roles:
     - { role: powerdns.pdns_recursor }
@@ -159,4 +184,6 @@
       ansible.builtin.service:
         name: pdns-recursor
         state: restarted
-      when: pdns_rec_split_dns_zone is changed
+      when:
+        - (pdns_rec_split_dns_zone is defined and pdns_rec_split_dns_zone is changed)
+          or (pdns_rec_split_dns_zone_removed is defined and pdns_rec_split_dns_zone_removed is changed)

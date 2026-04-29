@@ -186,7 +186,7 @@ Includes inventory/data build playbooks such as:
 
 Location: `ansible/domain/`
 
-Currently includes domain documentation and a placeholder playbook (`domain.yml`).
+Includes Windows-focused remediation playbooks for domain controller time drift, Windows DHCP HA, trusted RDP certificate binding, and targeted Group Policy rollout for AD CS-backed RDP certificates, alongside the placeholder `domain.yml` entrypoint for broader domain orchestration.
 
 ## Inventory model
 

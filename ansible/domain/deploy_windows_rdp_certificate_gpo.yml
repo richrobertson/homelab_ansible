@@ -1,0 +1,377 @@
+---
+- name: Deploy a targeted RDP certificate GPO for Windows servers
+  hosts: domain_controllers_windows
+  gather_facts: false
+
+  vars:
+    rdp_gpo_name: "Windows RDP Certificate Autoenrollment"
+    rdp_gpo_comment: >-
+      Managed by Ansible. Enables machine certificate autoenrollment and the
+      Remote Desktop certificate template policy for domain Windows machines.
+    rdp_gpo_scope_mode: "domain_computers"
+    rdp_gpo_link_target: ""
+    rdp_gpo_manage_autoenrollment: true
+    rdp_gpo_autoenrollment_policy: 7
+    rdp_gpo_manage_certificate_template: true
+    rdp_gpo_template_name: "Machine"
+    rdp_gpo_manage_security_layer: true
+    rdp_gpo_security_layer: ssl
+    rdp_gpo_manage_nla: true
+    rdp_gpo_require_nla: true
+    rdp_gpo_target_computers_extra: []
+    rdp_gpo_force_gpupdate: true
+    rdp_gpo_force_cert_pulse: true
+    rdp_gpo_clear_explicit_listener_binding: false
+    rdp_gpo_restart_termservice_after_cutover: true
+
+  pre_tasks:
+    - name: Validate RDP GPO variables
+      ansible.builtin.assert:
+        that:
+          - rdp_gpo_name is string
+          - rdp_gpo_comment is string
+          - rdp_gpo_scope_mode is string
+          - (rdp_gpo_scope_mode | lower) in ['domain_computers', 'targeted']
+          - rdp_gpo_link_target is string
+          - rdp_gpo_manage_autoenrollment is boolean
+          - (rdp_gpo_autoenrollment_policy | int) >= 0
+          - rdp_gpo_manage_certificate_template is boolean
+          - rdp_gpo_template_name is string
+          - (not (rdp_gpo_manage_certificate_template | bool)) or ((rdp_gpo_template_name | length) > 0)
+          - rdp_gpo_manage_security_layer is boolean
+          - (rdp_gpo_security_layer | lower) in ['rdp', 'negotiate', 'ssl']
+          - rdp_gpo_manage_nla is boolean
+          - rdp_gpo_require_nla is boolean
+          - rdp_gpo_target_computers_extra is sequence
+          - rdp_gpo_target_computers_extra is not string
+          - rdp_gpo_force_gpupdate is boolean
+          - rdp_gpo_force_cert_pulse is boolean
+          - rdp_gpo_clear_explicit_listener_binding is boolean
+          - rdp_gpo_restart_termservice_after_cutover is boolean
+        fail_msg: >-
+          Keep the RDP GPO variables strongly typed. The template/link values
+          must be strings, target extras must be a list, and the policy toggles
+          must be booleans.
+
+    - name: Build the targeted computer list from the RDP inventory group
+      ansible.builtin.set_fact:
+        rdp_gpo_target_computers: >-
+          {{
+            ((groups['rdp_servers_windows'] | default([])) + rdp_gpo_target_computers_extra)
+            | map('regex_replace', '\\..*$', '')
+            | map('lower')
+            | unique
+            | list
+          }}
+        rdp_gpo_security_layer_value: >-
+          {{
+            {
+              'rdp': 0,
+              'negotiate': 1,
+              'ssl': 2
+            }[rdp_gpo_security_layer | lower]
+          }}
+        rdp_gpo_nla_value: "{{ 1 if (rdp_gpo_require_nla | bool) else 0 }}"
+
+    - name: Ensure the targeted computer list is not empty
+      when: (rdp_gpo_scope_mode | lower) == 'targeted'
+      ansible.builtin.assert:
+        that:
+          - (rdp_gpo_target_computers | length) > 0
+        fail_msg: >-
+          The deploy_windows_rdp_certificate_gpo playbook requires at least one
+          host in rdp_servers_windows or rdp_gpo_target_computers_extra.
+
+  tasks:
+    - name: Create or update the targeted RDP certificate GPO
+      run_once: true
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+
+          Import-Module GroupPolicy -ErrorAction Stop
+          Import-Module ActiveDirectory -ErrorAction Stop
+
+          $gpoName = {{ rdp_gpo_name | to_json }}
+          $gpoComment = {{ rdp_gpo_comment | to_json }}
+          $scopeMode = {{ (rdp_gpo_scope_mode | lower) | to_json }}
+          $linkTarget = {{ rdp_gpo_link_target | to_json }}
+          $targetComputers = @({{ rdp_gpo_target_computers | map('to_json') | join(', ') }})
+          $manageAutoEnrollment = {{ '$true' if (rdp_gpo_manage_autoenrollment | bool) else '$false' }}
+          $autoEnrollmentPolicy = {{ rdp_gpo_autoenrollment_policy | int }}
+          $manageTemplate = {{ '$true' if (rdp_gpo_manage_certificate_template | bool) else '$false' }}
+          $templateName = {{ rdp_gpo_template_name | to_json }}
+          $manageSecurityLayer = {{ '$true' if (rdp_gpo_manage_security_layer | bool) else '$false' }}
+          $securityLayerValue = {{ rdp_gpo_security_layer_value | int }}
+          $manageNla = {{ '$true' if (rdp_gpo_manage_nla | bool) else '$false' }}
+          $nlaValue = {{ rdp_gpo_nla_value | int }}
+
+          $script:Changed = $false
+          $script:ManagedSettings = New-Object System.Collections.Generic.List[string]
+          $script:ManagedPermissions = New-Object System.Collections.Generic.List[string]
+
+          function Get-PolicyValue {
+            param(
+              [string] $GpoName,
+              [string] $Key,
+              [string] $ValueName
+            )
+
+            try {
+              $setting = Get-GPRegistryValue -Name $GpoName -Key $Key -ValueName $ValueName -ErrorAction Stop
+              return $setting.Value
+            }
+            catch {
+              return $null
+            }
+          }
+
+          function Ensure-PolicyValue {
+            param(
+              [string] $GpoName,
+              [string] $Key,
+              [string] $ValueName,
+              [string] $Type,
+              $DesiredValue
+            )
+
+            $currentValue = Get-PolicyValue -GpoName $GpoName -Key $Key -ValueName $ValueName
+            $needsUpdate = $true
+
+            if ($null -ne $currentValue) {
+              if ($Type -eq 'String') {
+                $needsUpdate = ([string] $currentValue) -ne ([string] $DesiredValue)
+              }
+              else {
+                $needsUpdate = ([int] $currentValue) -ne ([int] $DesiredValue)
+              }
+            }
+
+            if ($needsUpdate) {
+              Set-GPRegistryValue -Name $GpoName -Key $Key -ValueName $ValueName -Type $Type -Value $DesiredValue | Out-Null
+              $script:Changed = $true
+              [void] $script:ManagedSettings.Add($ValueName)
+            }
+          }
+
+          function Get-ResolvedComputerName {
+            param([string] $InventoryName)
+
+            $shortName = $InventoryName
+            if ($shortName.Contains('.')) {
+              $shortName = $shortName.Split('.')[0]
+            }
+
+            $computer = Get-ADComputer -LDAPFilter "(|(name=$shortName)(dNSHostName=$InventoryName))" -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+
+            if (-not $computer) {
+              throw "Unable to resolve AD computer account for '$InventoryName'."
+            }
+
+            return $computer.Name
+          }
+
+          function Get-CurrentPermission {
+            param(
+              [string] $GpoName,
+              [string] $TargetName,
+              [string] $TargetType
+            )
+
+            try {
+              $permission = Get-GPPermission -Name $GpoName -TargetName $TargetName -TargetType $TargetType -ErrorAction Stop
+              return [string] $permission.Permission
+            }
+            catch {
+              return ''
+            }
+          }
+
+          function Ensure-GpoPermission {
+            param(
+              [string] $GpoName,
+              [string] $TargetName,
+              [string] $TargetType,
+              [string] $PermissionLevel
+            )
+
+            $currentPermission = Get-CurrentPermission -GpoName $GpoName -TargetName $TargetName -TargetType $TargetType
+            if ($currentPermission -ne $PermissionLevel) {
+              Set-GPPermission -Name $GpoName -TargetName $TargetName -TargetType $TargetType -PermissionLevel $PermissionLevel -Replace -Confirm:$false | Out-Null
+              $script:Changed = $true
+              [void] $script:ManagedPermissions.Add("$TargetType:$TargetName=$PermissionLevel")
+            }
+          }
+
+          $domain = Get-ADDomain
+          if ([string]::IsNullOrWhiteSpace($linkTarget)) {
+            $linkTarget = $domain.DistinguishedName
+          }
+
+          $gpo = Get-GPO -Name $gpoName -ErrorAction SilentlyContinue
+          if (-not $gpo) {
+            $gpo = New-GPO -Name $gpoName -Comment $gpoComment
+            $script:Changed = $true
+          }
+
+          $existingLink = (Get-GPInheritance -Target $linkTarget).GpoLinks |
+            Where-Object { $_.DisplayName -eq $gpoName } |
+            Select-Object -First 1
+
+          if (-not $existingLink) {
+            New-GPLink -Name $gpoName -Target $linkTarget -LinkEnabled Yes | Out-Null
+            $script:Changed = $true
+          }
+          elseif (-not $existingLink.Enabled) {
+            Set-GPLink -Name $gpoName -Target $linkTarget -LinkEnabled Yes | Out-Null
+            $script:Changed = $true
+          }
+
+          $autoEnrollKey = 'HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment'
+          $terminalServicesKey = 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+
+          if ($manageAutoEnrollment) {
+            Ensure-PolicyValue -GpoName $gpoName -Key $autoEnrollKey -ValueName 'AEPolicy' -Type 'DWord' -DesiredValue $autoEnrollmentPolicy
+          }
+
+          if ($manageTemplate) {
+            Ensure-PolicyValue -GpoName $gpoName -Key $terminalServicesKey -ValueName 'CertTemplateName' -Type 'String' -DesiredValue $templateName
+          }
+
+          if ($manageSecurityLayer) {
+            Ensure-PolicyValue -GpoName $gpoName -Key $terminalServicesKey -ValueName 'SecurityLayer' -Type 'DWord' -DesiredValue $securityLayerValue
+          }
+
+          if ($manageNla) {
+            Ensure-PolicyValue -GpoName $gpoName -Key $terminalServicesKey -ValueName 'UserAuthentication' -Type 'DWord' -DesiredValue $nlaValue
+          }
+
+          $authenticatedUsers = (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-11')).Translate([System.Security.Principal.NTAccount]).Value
+          if ($authenticatedUsers -match '\\') {
+            $authenticatedUsers = $authenticatedUsers.Split('\')[-1]
+          }
+
+          Ensure-GpoPermission -GpoName $gpoName -TargetName $authenticatedUsers -TargetType 'Group' -PermissionLevel 'GpoRead'
+
+          $managedTargets = New-Object System.Collections.Generic.List[string]
+          if ($scopeMode -eq 'domain_computers') {
+            Ensure-GpoPermission -GpoName $gpoName -TargetName 'Domain Computers' -TargetType 'Group' -PermissionLevel 'GpoApply'
+            [void] $managedTargets.Add('Group:Domain Computers')
+          }
+          else {
+            $resolvedComputerNames = New-Object System.Collections.Generic.List[string]
+            foreach ($targetComputer in $targetComputers) {
+              $resolvedComputerName = Get-ResolvedComputerName -InventoryName $targetComputer
+              if (-not $resolvedComputerNames.Contains($resolvedComputerName)) {
+                $resolvedComputerNames.Add($resolvedComputerName)
+              }
+            }
+
+            foreach ($resolvedComputerName in $resolvedComputerNames) {
+              Ensure-GpoPermission -GpoName $gpoName -TargetName $resolvedComputerName -TargetType 'Computer' -PermissionLevel 'GpoApply'
+              [void] $managedTargets.Add("Computer:$resolvedComputerName")
+            }
+          }
+
+          $result = [ordered]@{
+            changed             = $script:Changed
+            gpo_name            = $gpoName
+            scope_mode          = $scopeMode
+            link_target         = $linkTarget
+            target_computers    = $managedTargets.ToArray()
+            managed_settings    = $script:ManagedSettings.ToArray()
+            managed_permissions = $script:ManagedPermissions.ToArray()
+          }
+
+          $result | ConvertTo-Json -Compress -Depth 6
+      register: rdp_gpo_deployment
+      changed_when: >-
+        {{
+          ((rdp_gpo_deployment.output | join('') | from_json).changed | default(false))
+          | bool
+        }}
+
+    - name: Store GPO deployment facts
+      run_once: true
+      ansible.builtin.set_fact:
+        rdp_gpo_state: "{{ rdp_gpo_deployment.output | join('') | from_json }}"
+
+- name: Refresh the targeted Windows servers after the RDP certificate GPO rollout
+  hosts: rdp_servers_windows
+  gather_facts: false
+
+  vars:
+    rdp_gpo_force_gpupdate: true
+    rdp_gpo_force_cert_pulse: true
+    rdp_gpo_clear_explicit_listener_binding: false
+    rdp_gpo_restart_termservice_after_cutover: true
+
+  tasks:
+    - name: Refresh computer group policy
+      when: rdp_gpo_force_gpupdate | bool
+      ansible.windows.win_command: gpupdate /target:computer /force
+      changed_when: true
+
+    - name: Kick machine certificate autoenrollment
+      when: rdp_gpo_force_cert_pulse | bool
+      ansible.windows.win_command: certutil -pulse
+      changed_when: true
+
+    - name: Clear an explicit RDP listener certificate binding so the template policy can take over
+      when: rdp_gpo_clear_explicit_listener_binding | bool
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+
+          $rdpSettings = Get-WmiObject -Namespace 'root\cimv2\TerminalServices' -Class 'Win32_TSGeneralSetting' -Filter "TerminalName='RDP-tcp'"
+          if (-not $rdpSettings) {
+            throw 'Unable to resolve the RDP-Tcp listener settings.'
+          }
+
+          $currentThumbprint = ''
+          if ($rdpSettings.SSLCertificateSHA1Hash) {
+            $currentThumbprint = ([string] $rdpSettings.SSLCertificateSHA1Hash).Replace(' ', '').Trim().ToUpperInvariant()
+          }
+
+          $changed = $false
+          if ($currentThumbprint.Length -gt 0) {
+            $rdpSettings.SSLCertificateSHA1Hash = ''
+            [void] $rdpSettings.Put()
+            $changed = $true
+          }
+
+          [ordered]@{
+            changed             = $changed
+            previous_thumbprint = $currentThumbprint
+          } | ConvertTo-Json -Compress
+      register: rdp_listener_cutover
+      changed_when: >-
+        {{
+          ((rdp_listener_cutover.output | join('') | from_json).changed | default(false))
+          | bool
+        }}
+      notify: Restart TermService
+
+    - name: Report the effective local RDP certificate policy values
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+
+          $autoEnrollPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment'
+          $terminalServicesPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+
+          [ordered]@{
+            auto_enrollment_policy = Get-ItemPropertyValue -Path $autoEnrollPath -Name 'AEPolicy' -ErrorAction SilentlyContinue
+            cert_template_name     = Get-ItemPropertyValue -Path $terminalServicesPath -Name 'CertTemplateName' -ErrorAction SilentlyContinue
+            security_layer         = Get-ItemPropertyValue -Path $terminalServicesPath -Name 'SecurityLayer' -ErrorAction SilentlyContinue
+            user_authentication    = Get-ItemPropertyValue -Path $terminalServicesPath -Name 'UserAuthentication' -ErrorAction SilentlyContinue
+          } | ConvertTo-Json -Compress
+      changed_when: false
+
+  handlers:
+    - name: Restart TermService
+      when: rdp_gpo_restart_termservice_after_cutover | bool
+      ansible.windows.win_service:
+        name: TermService
+        state: restarted
