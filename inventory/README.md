@@ -106,6 +106,11 @@ Common groups used in this repository:
 | `proxmox_cert_nodes` | Static cert rollout targets for Proxmox API certificates |
 | `proxmox_cert_nodes_cl0` | Cluster-specific Proxmox cert targets with a `cl0` SAN |
 | `proxmox_cert_nodes_cl1` | Cluster-specific Proxmox cert targets with a `cl1` SAN |
+| `domain_controllers_windows` | Windows AD domain controllers managed over WinRM |
+| `dhcp_primary_windows` | Primary Windows DHCP server for HA configuration |
+| `dhcp_partner_windows` | Partner Windows DHCP server for HA configuration |
+| `dhcp_servers_windows` | Combined Windows DHCP HA target group |
+| `rdp_servers_windows` | Windows servers whose RDP certificate posture is managed either by listener binding or by the targeted RDP certificate GPO |
 | `synology_nas` | Synology NAS hosts |
 
 ## Host and group variables

@@ -27,6 +27,41 @@ pve01.example.com
 pve02.example.com
 pve03.example.com
 
+[synology_snapshot_replication_nas]
+synology-a.example.com ansible_host=192.0.2.10 synology_replication_partner_host=192.0.2.11
+synology-b.example.com ansible_host=192.0.2.11 synology_replication_partner_host=192.0.2.10
+
+[synology_snapshot_replication_nas:vars]
+ansible_user=admin
+ansible_port=5022
+synology_replication_dsm_port=443
+synology_replication_data_port=5566
+
+[domain_controllers_windows]
+dc01.example.com
+
+[dhcp_primary_windows]
+dhcp01.example.com
+
+[dhcp_partner_windows]
+dhcp02.example.com
+
+[dhcp_servers_windows:children]
+dhcp_primary_windows
+dhcp_partner_windows
+
+[rdp_servers_windows:children]
+domain_controllers_windows
+dhcp_servers_windows
+
+[rdp_servers_windows:vars]
+ansible_connection=winrm
+ansible_port=5985
+ansible_winrm_scheme=http
+ansible_winrm_transport=ntlm
+ansible_winrm_server_cert_validation=ignore
+ansible_user=ldap@myrobertson.net
+
 [all:vars]
 # Connection settings
 ansible_user=admin

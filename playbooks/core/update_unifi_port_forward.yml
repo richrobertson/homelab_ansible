@@ -33,7 +33,12 @@
     unifi_rule_name: "{{ lookup('env', 'UNIFI_PORT_FORWARD_RULE_NAME') | default('plex', true) }}"
     unifi_external_port: "{{ lookup('env', 'UNIFI_PORT_FORWARD_EXTERNAL_PORT') | default('32400', true) | int }}"
     unifi_forward_ip: "{{ lookup('env', 'UNIFI_PORT_FORWARD_TARGET_IP') | default('', true) }}"
-    unifi_forward_ip_fallback: "{{ lookup('env', 'UNIFI_PORT_FORWARD_TARGET_IP_FALLBACK') | default('10.31.0.69', true) }}"
+    # Plex's direct remote-access port forward should target the dedicated PMS
+    # LoadBalancer service, not the shared HTTP(S) gateway.
+    # On 2026-04-24, the shared gateway listener for plex.myrobertson.com could
+    # stall while the direct plex-lan service on 10.31.0.67:32400 still worked,
+    # so keep the fallback pinned to the dedicated PMS endpoint.
+    unifi_forward_ip_fallback: "{{ lookup('env', 'UNIFI_PORT_FORWARD_TARGET_IP_FALLBACK') | default('10.31.0.67', true) }}"
     unifi_forward_port: "{{ lookup('env', 'UNIFI_PORT_FORWARD_TARGET_PORT') | default(unifi_external_port, true) | int }}"
     unifi_port_forward_updates: "{{ [] }}"
     unifi_validate_certs: "{{ lookup('env', 'UNIFI_VALIDATE_CERTS') | default('true', true) | bool }}"

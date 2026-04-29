@@ -74,6 +74,7 @@ ansible-playbook playbooks/core/site.yml --skip-tags certs
 ## Proxmox certificate automation
 
 `provision_certificates.yml` manages Proxmox API certificates with Vault Agent and applies nodes one at a time with `serial: 1`.
+It also installs a `proxmox-api-cert-renew.timer` safety net that checks the active `pveproxy` certificate every 12 hours and explicitly requests a replacement when it is missing, unreadable, expired, or within seven days of expiry.
 
 Required node-side prerequisites:
 
@@ -93,6 +94,8 @@ TLS trust behavior:
 - If the cluster has never been bootstrapped before, do a single-node canary first so later runs have CA material to reuse.
 
 The certificate apply helper writes into `/etc/pve/local` with `cp` instead of `install`. That is intentional: `/etc/pve` is backed by `pmxcfs`, and metadata-setting `install(1)` writes can fail there with `Operation not permitted`.
+
+The proactive renewal helper writes its temporary bundle under `/var/lib/vault-agent/proxmox-pveproxy`, then reuses the same apply helper so Vault Agent renders and timer-driven renewals converge through one install path.
 
 ## Proxmox CPU thermal policy
 

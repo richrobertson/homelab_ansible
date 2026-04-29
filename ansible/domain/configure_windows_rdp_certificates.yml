@@ -1,0 +1,703 @@
+---
+- name: Configure trusted certificates for Windows RDP listeners
+  hosts: rdp_servers_windows
+  gather_facts: false
+
+  vars:
+    rdp_cert_template_name: ""
+    rdp_cert_enrollment_url: "ldap:"
+    rdp_cert_min_valid_days: 0
+    rdp_cert_dns_names_extra: []
+    rdp_cert_restart_service: true
+
+    # Preferred path in this environment: issue host certificates from Vault PKI,
+    # import them into LocalMachine\My, then bind the matching thumbprint to RDP-Tcp.
+    rdp_cert_vault_enabled: true
+    rdp_cert_vault_manage_role: true
+    rdp_cert_vault_mount: pki_int
+    rdp_cert_vault_role_name: rdp-short-hosts
+    rdp_cert_vault_ttl: 720h
+    rdp_cert_vault_primary_domain: myrobertson.net
+    rdp_cert_root_ca_vault_path: secret/windows/domain/root_ca_cert
+    rdp_cert_root_ca_vault_field: cert_pem
+    rdp_cert_remote_temp_dir: 'C:\Windows\Temp'
+
+  pre_tasks:
+    - name: Validate RDP certificate variables
+      ansible.builtin.assert:
+        that:
+          - rdp_cert_dns_names_extra is sequence
+          - rdp_cert_dns_names_extra is not string
+          - rdp_cert_template_name is string
+          - rdp_cert_enrollment_url is string
+          - (rdp_cert_min_valid_days | int) >= 0
+          - rdp_cert_vault_enabled is boolean
+          - rdp_cert_vault_manage_role is boolean
+          - rdp_cert_vault_mount is string
+          - rdp_cert_vault_role_name is string
+          - rdp_cert_vault_ttl is string
+          - rdp_cert_vault_primary_domain is string
+          - rdp_cert_root_ca_vault_path is string
+          - rdp_cert_root_ca_vault_field is string
+          - rdp_cert_remote_temp_dir is string
+        fail_msg: >-
+          Keep the RDP certificate variables strongly typed. DNS extras must be
+          a list, the TTL/path values must be strings, and the validity window
+          must be a non-negative integer.
+
+    - name: Ensure required controller binaries are available for Vault-backed issuance
+      when: rdp_cert_vault_enabled | bool
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      loop:
+        - openssl
+        - vault
+      loop_control:
+        label: "{{ item }}"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/env
+          - bash
+          - -lc
+          - "command -v {{ item }}"
+
+    - name: Build the Vault PKI short-name allow list for RDP certificates
+      when: rdp_cert_vault_enabled | bool
+      run_once: true
+      ansible.builtin.set_fact:
+        rdp_cert_vault_allowed_short_names: >-
+          {{
+            ansible_play_hosts_all
+            | map('regex_replace', '\\..*$', '')
+            | map('lower')
+            | unique
+            | list
+          }}
+
+    - name: Ensure the Vault PKI role allows both FQDN and short RDP hostnames
+      when:
+        - rdp_cert_vault_enabled | bool
+        - rdp_cert_vault_manage_role | bool
+      run_once: true
+      delegate_to: localhost
+      become: false
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - vault
+          - write
+          - "{{ rdp_cert_vault_mount }}/roles/{{ rdp_cert_vault_role_name }}"
+          - "allowed_domains={{ ([rdp_cert_vault_primary_domain] + rdp_cert_vault_allowed_short_names) | unique | join(',') }}"
+          - "allow_bare_domains=true"
+          - "allow_subdomains=true"
+          - "allow_glob_domains=false"
+          - "allow_any_name=false"
+          - "allow_ip_sans=false"
+          - "allow_localhost=false"
+          - "allow_wildcard_certificates=false"
+          - "server_flag=true"
+          - "client_flag=true"
+          - "enforce_hostnames=true"
+          - "use_csr_common_name=true"
+          - "use_csr_sans=true"
+          - "key_usage=DigitalSignature,KeyAgreement,KeyEncipherment"
+          - "max_ttl={{ rdp_cert_vault_ttl }}"
+      changed_when: false
+
+  tasks:
+    - name: Inspect matching RDP certificate candidates
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+
+          $inventoryNames = @({{ ([inventory_hostname] + ([ansible_host] if ansible_host is defined else []) + rdp_cert_dns_names_extra) | map('to_json') | join(', ') }})
+          $minValidDays = {{ rdp_cert_min_valid_days | int }}
+
+          function Get-NormalizedDnsNames {
+            param([string[]] $Names)
+
+            $normalized = New-Object System.Collections.Generic.List[string]
+            foreach ($name in $Names) {
+              if ([string]::IsNullOrWhiteSpace($name)) {
+                continue
+              }
+
+              $trimmed = $name.Trim().ToLowerInvariant()
+              if ($trimmed -match '^\d{1,3}(\.\d{1,3}){3}$') {
+                continue
+              }
+
+              if ($trimmed -match ':') {
+                continue
+              }
+
+              if (-not $normalized.Contains($trimmed)) {
+                $normalized.Add($trimmed)
+              }
+            }
+
+            return $normalized.ToArray()
+          }
+
+          function Test-ServerAuthenticationEku {
+            param([System.Security.Cryptography.X509Certificates.X509Certificate2] $Certificate)
+
+            foreach ($eku in $Certificate.EnhancedKeyUsageList) {
+              if ($eku.ObjectId -eq '1.3.6.1.5.5.7.3.1') {
+                return $true
+              }
+            }
+
+            return $false
+          }
+
+          function Get-CertificateNames {
+            param([System.Security.Cryptography.X509Certificates.X509Certificate2] $Certificate)
+
+            $names = New-Object System.Collections.Generic.List[string]
+            if ($Certificate.PSObject.Properties.Name -contains 'DnsNameList') {
+              foreach ($dnsName in $Certificate.DnsNameList) {
+                if ($dnsName.Unicode) {
+                  $names.Add($dnsName.Unicode)
+                }
+              }
+            }
+
+            if ($Certificate.Subject -match '(?i)CN=([^,]+)') {
+              $names.Add($Matches[1])
+            }
+
+            return Get-NormalizedDnsNames -Names $names.ToArray()
+          }
+
+          function Get-BestMatchingCertificate {
+            param(
+              [string[]] $DesiredNames,
+              [datetime] $NotAfterCutoff
+            )
+
+            $candidates = Get-ChildItem Cert:\LocalMachine\My |
+              Where-Object {
+                $_.HasPrivateKey -and
+                $_.NotAfter -gt $NotAfterCutoff -and
+                (Test-ServerAuthenticationEku -Certificate $_)
+              } |
+              Sort-Object NotAfter -Descending
+
+            foreach ($candidate in $candidates) {
+              $candidateNames = Get-CertificateNames -Certificate $candidate
+              $coversAllNames = $true
+              foreach ($desiredName in $DesiredNames) {
+                if ($candidateNames -notcontains $desiredName) {
+                  $coversAllNames = $false
+                  break
+                }
+              }
+
+              if ($coversAllNames) {
+                return $candidate
+              }
+            }
+
+            return $null
+          }
+
+          $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem
+          $localNames = @($env:COMPUTERNAME)
+          $computerFqdn = ''
+          if ($computerSystem.PartOfDomain -and -not [string]::IsNullOrWhiteSpace($computerSystem.Domain)) {
+            $computerFqdn = "$($env:COMPUTERNAME).$($computerSystem.Domain)"
+            $localNames += $computerFqdn
+          }
+
+          $desiredNames = Get-NormalizedDnsNames -Names ($localNames + $inventoryNames)
+          if ($desiredNames.Count -eq 0) {
+            throw 'No DNS names were available to match against LocalMachine\My certificates.'
+          }
+
+          $cutoff = (Get-Date).AddDays($minValidDays)
+          $matchingCert = Get-BestMatchingCertificate -DesiredNames $desiredNames -NotAfterCutoff $cutoff
+          $rdpSettings = Get-WmiObject -Namespace 'root\cimv2\TerminalServices' -Class 'Win32_TSGeneralSetting' -Filter "TerminalName='RDP-tcp'"
+
+          $currentThumbprint = ''
+          if ($rdpSettings -and $rdpSettings.SSLCertificateSHA1Hash) {
+            $currentThumbprint = ([string] $rdpSettings.SSLCertificateSHA1Hash).Replace(' ', '').Trim().ToUpperInvariant()
+          }
+
+          $result = [ordered]@{
+            computer_name       = $env:COMPUTERNAME
+            computer_domain     = [string] $computerSystem.Domain
+            computer_fqdn       = $computerFqdn.ToLowerInvariant()
+            desired_names       = $desiredNames
+            current_thumbprint  = $currentThumbprint
+            matching_thumbprint = ''
+            matching_subject    = ''
+          }
+
+          if ($matchingCert) {
+            $result.matching_thumbprint = $matchingCert.Thumbprint.Replace(' ', '').Trim().ToUpperInvariant()
+            $result.matching_subject = $matchingCert.Subject
+          }
+
+          $result | ConvertTo-Json -Compress -Depth 4
+      register: rdp_certificate_inspection
+      changed_when: false
+
+    - name: Store certificate inspection facts
+      ansible.builtin.set_fact:
+        rdp_cert_state: "{{ rdp_certificate_inspection.output | join('') | from_json }}"
+        rdp_cert_primary_dns_name: >-
+          {{
+            (rdp_certificate_inspection.output | join('') | from_json).computer_fqdn
+            if (((rdp_certificate_inspection.output | join('') | from_json).computer_fqdn | length) > 0)
+            else (rdp_certificate_inspection.output | join('') | from_json).desired_names[0]
+          }}
+
+    - name: Issue and import an RDP certificate from Vault PKI when no matching certificate exists
+      when:
+        - (rdp_cert_state.matching_thumbprint | default('') | length) == 0
+        - rdp_cert_vault_enabled | bool
+        - (rdp_cert_vault_role_name | length) > 0
+      block:
+        - name: Create a temporary local workspace for Vault-issued RDP material
+          delegate_to: localhost
+          become: false
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: "rdp-cert-{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}-"
+          register: rdp_cert_local_workspace
+
+        - name: Generate a temporary PFX password
+          ansible.builtin.set_fact:
+            rdp_cert_pfx_password: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+          no_log: true
+
+        - name: Write an OpenSSL CSR config for the RDP certificate
+          delegate_to: localhost
+          become: false
+          ansible.builtin.copy:
+            dest: "{{ rdp_cert_local_workspace.path }}/csr.cnf"
+            mode: '0600'
+            content: |
+              [req]
+              distinguished_name = req_distinguished_name
+              prompt = no
+              req_extensions = v3_req
+
+              [req_distinguished_name]
+              CN = {{ rdp_cert_primary_dns_name }}
+
+              [v3_req]
+              subjectAltName = {{ rdp_cert_state.desired_names | map('regex_replace', '^(.*)$', 'DNS:\\1') | join(',') }}
+
+        - name: Generate a private key for the Vault-issued RDP certificate
+          delegate_to: localhost
+          become: false
+          ansible.builtin.command:
+            argv:
+              - openssl
+              - genrsa
+              - -out
+              - "{{ rdp_cert_local_workspace.path }}/host.key"
+              - '2048'
+
+        - name: Generate a CSR for the Vault-issued RDP certificate
+          delegate_to: localhost
+          become: false
+          ansible.builtin.command:
+            argv:
+              - openssl
+              - req
+              - -new
+              - -key
+              - "{{ rdp_cert_local_workspace.path }}/host.key"
+              - -out
+              - "{{ rdp_cert_local_workspace.path }}/host.csr"
+              - -config
+              - "{{ rdp_cert_local_workspace.path }}/csr.cnf"
+
+        - name: Sign the CSR with Vault PKI
+          delegate_to: localhost
+          become: false
+          no_log: true
+          ansible.builtin.command:
+            argv:
+              - vault
+              - write
+              - -format=json
+              - "{{ rdp_cert_vault_mount }}/sign/{{ rdp_cert_vault_role_name }}"
+              - "csr=@{{ rdp_cert_local_workspace.path }}/host.csr"
+              - "ttl={{ rdp_cert_vault_ttl }}"
+          register: rdp_cert_vault_sign
+
+        - name: Read the Vault intermediate CA certificate
+          delegate_to: localhost
+          become: false
+          no_log: true
+          ansible.builtin.command:
+            argv:
+              - vault
+              - read
+              - "-field=certificate"
+              - "{{ rdp_cert_vault_mount }}/cert/ca"
+          register: rdp_cert_vault_intermediate_ca
+
+        - name: Read the Windows domain root CA certificate from Vault
+          delegate_to: localhost
+          become: false
+          no_log: true
+          ansible.builtin.command:
+            argv:
+              - vault
+              - kv
+              - get
+              - "-field={{ rdp_cert_root_ca_vault_field }}"
+              - "{{ rdp_cert_root_ca_vault_path }}"
+          register: rdp_cert_root_ca
+
+        - name: Store the Vault-issued leaf certificate
+          delegate_to: localhost
+          become: false
+          no_log: true
+          ansible.builtin.copy:
+            dest: "{{ rdp_cert_local_workspace.path }}/host.crt"
+            mode: '0600'
+            content: "{{ (rdp_cert_vault_sign.stdout | from_json).data.certificate }}"
+
+        - name: Store the Vault intermediate CA certificate
+          delegate_to: localhost
+          become: false
+          no_log: true
+          ansible.builtin.copy:
+            dest: "{{ rdp_cert_local_workspace.path }}/intermediate-ca.crt"
+            mode: '0600'
+            content: "{{ rdp_cert_vault_intermediate_ca.stdout }}"
+
+        - name: Store the Windows domain root CA certificate
+          delegate_to: localhost
+          become: false
+          no_log: true
+          ansible.builtin.copy:
+            dest: "{{ rdp_cert_local_workspace.path }}/root-ca.crt"
+            mode: '0600'
+            content: "{{ rdp_cert_root_ca.stdout }}"
+
+        - name: Build a PFX bundle for Windows import
+          delegate_to: localhost
+          become: false
+          no_log: true
+          ansible.builtin.command:
+            argv:
+              - openssl
+              - pkcs12
+              - -export
+              - -out
+              - "{{ rdp_cert_local_workspace.path }}/rdp-cert.pfx"
+              - -inkey
+              - "{{ rdp_cert_local_workspace.path }}/host.key"
+              - -in
+              - "{{ rdp_cert_local_workspace.path }}/host.crt"
+              - -certfile
+              - "{{ rdp_cert_local_workspace.path }}/intermediate-ca.crt"
+              - "-passout"
+              - "pass:{{ rdp_cert_pfx_password }}"
+
+        - name: Copy the Vault-issued PFX bundle to the Windows host
+          no_log: true
+          ansible.windows.win_copy:
+            src: "{{ rdp_cert_local_workspace.path }}/rdp-cert.pfx"
+            dest: "{{ rdp_cert_remote_temp_dir }}\\rdp-cert-{{ inventory_hostname }}.pfx"
+
+        - name: Copy the Vault intermediate CA certificate to the Windows host
+          no_log: true
+          ansible.windows.win_copy:
+            src: "{{ rdp_cert_local_workspace.path }}/intermediate-ca.crt"
+            dest: "{{ rdp_cert_remote_temp_dir }}\\rdp-int-ca-{{ inventory_hostname }}.crt"
+
+        - name: Copy the Windows domain root CA certificate to the Windows host
+          no_log: true
+          ansible.windows.win_copy:
+            src: "{{ rdp_cert_local_workspace.path }}/root-ca.crt"
+            dest: "{{ rdp_cert_remote_temp_dir }}\\rdp-root-ca-{{ inventory_hostname }}.crt"
+
+        - name: Import the Vault-issued certificate bundle into Windows
+          no_log: true
+          ansible.windows.win_powershell:
+            script: |
+              $ErrorActionPreference = 'Stop'
+
+              $pfxPath = {{ (rdp_cert_remote_temp_dir ~ '\\rdp-cert-' ~ inventory_hostname ~ '.pfx') | to_json }}
+              $intCaPath = {{ (rdp_cert_remote_temp_dir ~ '\\rdp-int-ca-' ~ inventory_hostname ~ '.crt') | to_json }}
+              $rootCaPath = {{ (rdp_cert_remote_temp_dir ~ '\\rdp-root-ca-' ~ inventory_hostname ~ '.crt') | to_json }}
+              $password = ConvertTo-SecureString {{ rdp_cert_pfx_password | to_json }} -AsPlainText -Force
+
+              $changed = $false
+
+              function Ensure-CertificatePresent {
+                param(
+                  [string] $Path,
+                  [string] $StorePath
+                )
+
+                $fileCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($Path)
+                $thumbprint = $fileCert.Thumbprint.Replace(' ', '').Trim().ToUpperInvariant()
+                $storeCert = Get-ChildItem $StorePath | Where-Object {
+                  $_.Thumbprint.Replace(' ', '').Trim().ToUpperInvariant() -eq $thumbprint
+                }
+
+                if (-not $storeCert) {
+                  Import-Certificate -FilePath $Path -CertStoreLocation $StorePath | Out-Null
+                  $script:changed = $true
+                }
+
+                return $thumbprint
+              }
+
+              $null = Ensure-CertificatePresent -Path $intCaPath -StorePath 'Cert:\LocalMachine\CA'
+              $null = Ensure-CertificatePresent -Path $rootCaPath -StorePath 'Cert:\LocalMachine\Root'
+
+              $pfxData = Get-PfxData -FilePath $pfxPath -Password $password
+              $leafThumbprint = $pfxData.EndEntityCertificates[0].Thumbprint.Replace(' ', '').Trim().ToUpperInvariant()
+              $existingLeaf = Get-ChildItem Cert:\LocalMachine\My | Where-Object {
+                $_.Thumbprint.Replace(' ', '').Trim().ToUpperInvariant() -eq $leafThumbprint
+              }
+
+              if (-not $existingLeaf) {
+                Import-PfxCertificate -FilePath $pfxPath -Password $password -CertStoreLocation 'Cert:\LocalMachine\My' -Exportable | Out-Null
+                $changed = $true
+              }
+
+              Remove-Item $pfxPath, $intCaPath, $rootCaPath -Force -ErrorAction SilentlyContinue
+
+              [ordered]@{
+                changed    = $changed
+                thumbprint = $leafThumbprint
+              } | ConvertTo-Json -Compress -Depth 3
+          register: rdp_certificate_import
+          changed_when: >-
+            (rdp_certificate_import.output | join('')) is search('"changed":true')
+
+      always:
+        - name: Remove temporary local Vault-issued certificate material
+          when: rdp_cert_local_workspace is defined
+          delegate_to: localhost
+          become: false
+          no_log: true
+          ansible.builtin.file:
+            path: "{{ rdp_cert_local_workspace.path }}"
+            state: absent
+
+    - name: Attempt AD CS enrollment when Vault issuance is disabled
+      when:
+        - (rdp_cert_state.matching_thumbprint | default('') | length) == 0
+        - not (rdp_cert_vault_enabled | bool)
+        - (rdp_cert_template_name | length) > 0
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+
+          $templateName = {{ rdp_cert_template_name | to_json }}
+          $enrollmentUrl = {{ rdp_cert_enrollment_url | to_json }}
+          $null = Get-Certificate -Template $templateName -Url $enrollmentUrl -CertStoreLocation 'Cert:\LocalMachine\My'
+
+          [ordered]@{
+            changed  = $true
+            enrolled = $true
+          } | ConvertTo-Json -Compress -Depth 3
+      register: rdp_certificate_adcs_enrollment
+      changed_when: >-
+        (rdp_certificate_adcs_enrollment.output | join('')) is search('"changed":true')
+
+    - name: Refresh certificate inspection after acquisition attempts
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+
+          $inventoryNames = @({{ ([inventory_hostname] + ([ansible_host] if ansible_host is defined else []) + rdp_cert_dns_names_extra) | map('to_json') | join(', ') }})
+          $minValidDays = {{ rdp_cert_min_valid_days | int }}
+
+          function Get-NormalizedDnsNames {
+            param([string[]] $Names)
+
+            $normalized = New-Object System.Collections.Generic.List[string]
+            foreach ($name in $Names) {
+              if ([string]::IsNullOrWhiteSpace($name)) {
+                continue
+              }
+
+              $trimmed = $name.Trim().ToLowerInvariant()
+              if ($trimmed -match '^\d{1,3}(\.\d{1,3}){3}$') {
+                continue
+              }
+
+              if ($trimmed -match ':') {
+                continue
+              }
+
+              if (-not $normalized.Contains($trimmed)) {
+                $normalized.Add($trimmed)
+              }
+            }
+
+            return $normalized.ToArray()
+          }
+
+          function Test-ServerAuthenticationEku {
+            param([System.Security.Cryptography.X509Certificates.X509Certificate2] $Certificate)
+
+            foreach ($eku in $Certificate.EnhancedKeyUsageList) {
+              if ($eku.ObjectId -eq '1.3.6.1.5.5.7.3.1') {
+                return $true
+              }
+            }
+
+            return $false
+          }
+
+          function Get-CertificateNames {
+            param([System.Security.Cryptography.X509Certificates.X509Certificate2] $Certificate)
+
+            $names = New-Object System.Collections.Generic.List[string]
+            if ($Certificate.PSObject.Properties.Name -contains 'DnsNameList') {
+              foreach ($dnsName in $Certificate.DnsNameList) {
+                if ($dnsName.Unicode) {
+                  $names.Add($dnsName.Unicode)
+                }
+              }
+            }
+
+            if ($Certificate.Subject -match '(?i)CN=([^,]+)') {
+              $names.Add($Matches[1])
+            }
+
+            return Get-NormalizedDnsNames -Names $names.ToArray()
+          }
+
+          function Get-BestMatchingCertificate {
+            param(
+              [string[]] $DesiredNames,
+              [datetime] $NotAfterCutoff
+            )
+
+            $candidates = Get-ChildItem Cert:\LocalMachine\My |
+              Where-Object {
+                $_.HasPrivateKey -and
+                $_.NotAfter -gt $NotAfterCutoff -and
+                (Test-ServerAuthenticationEku -Certificate $_)
+              } |
+              Sort-Object NotAfter -Descending
+
+            foreach ($candidate in $candidates) {
+              $candidateNames = Get-CertificateNames -Certificate $candidate
+              $coversAllNames = $true
+              foreach ($desiredName in $DesiredNames) {
+                if ($candidateNames -notcontains $desiredName) {
+                  $coversAllNames = $false
+                  break
+                }
+              }
+
+              if ($coversAllNames) {
+                return $candidate
+              }
+            }
+
+            return $null
+          }
+
+          $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem
+          $localNames = @($env:COMPUTERNAME)
+          $computerFqdn = ''
+          if ($computerSystem.PartOfDomain -and -not [string]::IsNullOrWhiteSpace($computerSystem.Domain)) {
+            $computerFqdn = "$($env:COMPUTERNAME).$($computerSystem.Domain)"
+            $localNames += $computerFqdn
+          }
+
+          $desiredNames = Get-NormalizedDnsNames -Names ($localNames + $inventoryNames)
+          $cutoff = (Get-Date).AddDays($minValidDays)
+          $matchingCert = Get-BestMatchingCertificate -DesiredNames $desiredNames -NotAfterCutoff $cutoff
+          $rdpSettings = Get-WmiObject -Namespace 'root\cimv2\TerminalServices' -Class 'Win32_TSGeneralSetting' -Filter "TerminalName='RDP-tcp'"
+
+          $currentThumbprint = ''
+          if ($rdpSettings -and $rdpSettings.SSLCertificateSHA1Hash) {
+            $currentThumbprint = ([string] $rdpSettings.SSLCertificateSHA1Hash).Replace(' ', '').Trim().ToUpperInvariant()
+          }
+
+          $result = [ordered]@{
+            computer_name       = $env:COMPUTERNAME
+            computer_domain     = [string] $computerSystem.Domain
+            computer_fqdn       = $computerFqdn.ToLowerInvariant()
+            desired_names       = $desiredNames
+            current_thumbprint  = $currentThumbprint
+            matching_thumbprint = ''
+            matching_subject    = ''
+          }
+
+          if ($matchingCert) {
+            $result.matching_thumbprint = $matchingCert.Thumbprint.Replace(' ', '').Trim().ToUpperInvariant()
+            $result.matching_subject = $matchingCert.Subject
+          }
+
+          $result | ConvertTo-Json -Compress -Depth 4
+      register: rdp_certificate_post_acquisition
+      changed_when: false
+
+    - name: Store refreshed certificate inspection facts
+      ansible.builtin.set_fact:
+        rdp_cert_state: "{{ rdp_certificate_post_acquisition.output | join('') | from_json }}"
+
+    - name: Ensure a matching RDP certificate is available
+      ansible.builtin.assert:
+        that:
+          - (rdp_cert_state.matching_thumbprint | default('') | length) > 0
+        fail_msg: >-
+          No matching Server Authentication certificate was available for
+          {{ inventory_hostname }} after the configured acquisition path.
+          Verify Vault PKI access or disable Vault issuance and provide a
+          reachable AD CS template.
+
+    - name: Bind the matching certificate to the RDP-Tcp listener
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+
+          $desiredThumbprint = {{ rdp_cert_state.matching_thumbprint | to_json }}
+          $rdpSettings = Get-WmiObject -Namespace 'root\cimv2\TerminalServices' -Class 'Win32_TSGeneralSetting' -Filter "TerminalName='RDP-tcp'"
+          if (-not $rdpSettings) {
+            throw 'Unable to locate the RDP-Tcp listener settings in WMI.'
+          }
+
+          $currentThumbprint = [string] $rdpSettings.SSLCertificateSHA1Hash
+          if ($currentThumbprint) {
+            $currentThumbprint = $currentThumbprint.Replace(' ', '').Trim().ToUpperInvariant()
+          }
+
+          $changed = $false
+          if ($currentThumbprint -ne $desiredThumbprint) {
+            $rdpSettings.SSLCertificateSHA1Hash = $desiredThumbprint
+            $null = $rdpSettings.Put()
+            $changed = $true
+          }
+
+          [ordered]@{
+            changed            = $changed
+            previous_thumbprint = $currentThumbprint
+            thumbprint         = $desiredThumbprint
+            subject            = {{ rdp_cert_state.matching_subject | to_json }}
+          } | ConvertTo-Json -Compress -Depth 4
+      register: rdp_certificate_binding
+      changed_when: >-
+        (rdp_certificate_binding.output | join('')) is search('"changed":true')
+      notify: Restart Remote Desktop Services
+
+    - name: Show the active RDP certificate binding
+      ansible.builtin.debug:
+        msg: "{{ (rdp_certificate_binding.output | join('') | from_json).subject }} -> {{ (rdp_certificate_binding.output | join('') | from_json).thumbprint }}"
+
+  handlers:
+    - name: Restart Remote Desktop Services
+      when: rdp_cert_restart_service | bool
+      ansible.windows.win_service:
+        name: TermService
+        state: restarted
