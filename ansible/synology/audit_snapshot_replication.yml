@@ -81,6 +81,33 @@
       changed_when: false
       register: synology_retention_policies
 
+    - name: List required share snapshots
+      ansible.builtin.raw: >-
+        /usr/syno/sbin/synosharesnapshot list {{ item | quote }} 2>/dev/null || true
+      changed_when: false
+      register: synology_required_share_snapshot_lists
+      loop: "{{ synology_required_snapshot_shares }}"
+
+    - name: Build required share snapshot count map
+      ansible.builtin.set_fact:
+        synology_required_share_snapshot_counts: >-
+          {{
+            (synology_required_share_snapshot_counts | default({}))
+            | combine(
+                {
+                  item.item:
+                    (
+                      item.stdout
+                      | regex_findall('^GMT-', multiline=True)
+                      | length
+                    )
+                }
+              )
+          }}
+      loop: "{{ synology_required_share_snapshot_lists.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+
     - name: Read DSM notification mail settings before optional configuration
       ansible.builtin.raw: >-
         /usr/syno/bin/synowebapi --exec
@@ -180,6 +207,9 @@
                 ),
                 'has_snapshot_schedule': (
                   item in synology_snapshot_sched_list.stdout
+                ),
+                'snapshot_count': (
+                  synology_required_share_snapshot_counts[item] | default(0)
                 )
               }
             ]
@@ -205,6 +235,7 @@
           {{ item.share }}:
           local_snapshot={{ item.has_local_snapshot_config }},
           retention={{ item.has_retention_policy }},
+          snapshots={{ item.snapshot_count }},
           replication={{ item.has_replication_config }},
           schedule={{ item.has_snapshot_schedule }}
       loop: "{{ synology_required_share_snapshot_audit }}"
