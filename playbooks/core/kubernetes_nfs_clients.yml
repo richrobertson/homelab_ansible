@@ -1,0 +1,6 @@
+---
+- name: Prepare Kubernetes worker nodes for Synology NFS PersistentVolumes
+  hosts: kubernetes_workers
+  gather_facts: true
+  roles:
+    - role: kubernetes_nfs_client

@@ -1,0 +1,2 @@
+---
+- import_playbook: playbooks/core/kubernetes_nfs_clients.yml

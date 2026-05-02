@@ -1,0 +1,36 @@
+---
+- name: Install NFS client packages on Debian family nodes
+  ansible.builtin.apt:
+    name: nfs-common
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  when: ansible_os_family == "Debian"
+
+- name: Install NFS client packages on RHEL family nodes
+  ansible.builtin.dnf:
+    name: nfs-utils
+    state: present
+  become: true
+  when: ansible_os_family == "RedHat"
+
+- name: Create optional Synology NFS diagnostic mount path
+  ansible.builtin.file:
+    path: "{{ synology_nfs_test_mount_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  when: synology_nfs_test_mount_enabled | bool
+
+- name: Optionally mount Synology NFS export for diagnostics
+  ansible.posix.mount:
+    path: "{{ synology_nfs_test_mount_path }}"
+    src: "{{ synology_nfs_server }}:{{ synology_nfs_export_path }}"
+    fstype: nfs
+    opts: "{{ synology_nfs_mount_options }}"
+    state: mounted
+  become: true
+  when: synology_nfs_test_mount_enabled | bool
