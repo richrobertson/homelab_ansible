@@ -119,7 +119,11 @@
         - "staging.myrobertson.net.=192.168.7.201:53;"
         - "prod.myrobertson.net.=192.168.7.201:53;"
         - "dev.myrobertson.net.=192.168.7.201:53;"
-        - "myrobertson.net.=192.168.1.244;192.168.1.245;192.168.1.2;"
+        # Forward the internal AD zone to the reachable AD DNS service.
+        # 192.168.1.244 and 192.168.1.2 timed out from the recursor path,
+        # which can make local-only hosts such as scooter.myrobertson.net
+        # intermittently fail depending on forwarder selection.
+        - "myrobertson.net.=192.168.1.245:53;"
       auth-zones:
         - "plex.myrobertson.com={{ pdns_rec_split_dns_zone_file }}"
 
