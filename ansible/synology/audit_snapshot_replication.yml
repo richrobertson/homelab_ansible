@@ -19,6 +19,9 @@
       - rich@myrobertson.com
       - roy@myrobertson.com
     synology_notification_send_welcome_mail: true
+    synology_required_snapshot_shares:
+      - nextcloud-data-stage
+      - nextcloud-data-prod
 
   tasks:
     - name: Check Snapshot Replication package status
@@ -156,6 +159,57 @@
       changed_when: false
       register: synology_notification_conf_after
       failed_when: "'\"success\" : true' not in synology_notification_conf_after.stdout"
+
+    - name: Build required share snapshot audit summary
+      ansible.builtin.set_fact:
+        synology_required_share_snapshot_audit: >-
+          {{
+            (synology_required_share_snapshot_audit | default([]))
+            + [
+              {
+                'share': item,
+                'has_local_snapshot_config': (
+                  ('[' ~ item ~ ']') in synology_sharesnap_config.stdout
+                ),
+                'has_retention_policy': (
+                  ('POLICY ' ~ item ~ ' |') in synology_retention_policies.stdout
+                ),
+                'has_replication_config': (
+                  item in synology_share_replica_list.stdout
+                  or item in synology_btrfs_replica_list.stdout
+                ),
+                'has_snapshot_schedule': (
+                  item in synology_snapshot_sched_list.stdout
+                )
+              }
+            ]
+          }}
+      loop: "{{ synology_required_snapshot_shares }}"
+
+    - name: Assert required shares have local snapshot and retention coverage
+      ansible.builtin.assert:
+        that:
+          - item.has_local_snapshot_config | bool
+          - item.has_retention_policy | bool
+        fail_msg: >-
+          Required Synology share {{ item.share }} is missing local snapshot
+          config or retention policy. Configure Snapshot Replication before
+          relying on this share for Nextcloud data.
+      loop: "{{ synology_required_share_snapshot_audit }}"
+      loop_control:
+        label: "{{ item.share }}"
+
+    - name: Summarize required share snapshot coverage
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.share }}:
+          local_snapshot={{ item.has_local_snapshot_config }},
+          retention={{ item.has_retention_policy }},
+          replication={{ item.has_replication_config }},
+          schedule={{ item.has_snapshot_schedule }}
+      loop: "{{ synology_required_share_snapshot_audit }}"
+      loop_control:
+        label: "{{ item.share }}"
 
     - name: Summarize audit output
       ansible.builtin.debug:
