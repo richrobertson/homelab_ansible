@@ -1,5 +1,5 @@
 ---
-synology_nfs_server: "192.168.50.10"
+synology_nfs_server: "scooter.myrobertson.net"
 synology_nfs_export_path: "/volume1/nextcloud-data"
 synology_nfs_test_mount_path: "/mnt/synology-nextcloud-data-test"
 synology_nfs_mount_options: "nfsvers=4.1,hard,noatime,rsize=1048576,wsize=1048576,timeo=600,retrans=2"
