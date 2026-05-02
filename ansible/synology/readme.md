@@ -8,6 +8,7 @@ The playbooks target the inventory group `synology_nas` and use host vars from `
 - `preflight_nas_connectivity.yml`: Verifies SSH reachability, API auth, and LUN endpoint shape.
 - `audit_snapshot_replication.yml`: Audits Snapshot Replication package status, configured replica count, schedules, local share snapshot config, retention policy coverage, and DSM notification email settings. It can also apply the desired DSM notification email settings when explicitly enabled.
 - `configure_authelia_sso.yml`: Seeds per-NAS Authelia OIDC client secrets in Vault and configures DSM OIDC SSO for scooter and kermit.
+- `provision_nextcloud_nfs_share.yml`: Creates separate `nextcloud-data-stage` and `nextcloud-data-prod` Btrfs shared folders, keeps recycle bin disabled, verifies data checksumming is not disabled, and applies Kubernetes-worker-only NFS privileges.
 - `discover_orphaned_luns.yml`: Lists likely orphaned LUN UUIDs using mapping heuristics.
 - `cleanup_orphaned_luns.yml`: Deletes explicitly provided orphan LUN UUIDs.
 - `discover_and_cleanup_orphaned_luns.yml`: One-shot flow for discovery + optional cleanup.
@@ -63,6 +64,26 @@ SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local
 ```
 
 By default the playbook keeps DSM local login as the default and enables Authelia as an available OIDC sign-in path. The OIDC user claim is `preferred_username`, and local DSM users are allowed so the existing break-glass admin account remains usable.
+
+## Nextcloud NFS shares
+
+Provision the staging and production backend-only Nextcloud data shares on Scooter:
+
+```bash
+source ~/.bash_profile
+SYNO_USER="$(vault kv get -field=username -mount=secret synology/dsm-admin/local-ssh-account)"
+SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local-ssh-account)"
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 .venv/bin/ansible-playbook \
+  ansible/synology/provision_nextcloud_nfs_share.yml \
+  -i inventory/environments/production.ini \
+  --limit scooter.myrobertson.net \
+  -e "ansible_user=${SYNO_USER}" \
+  -e "ansible_password=${SYNO_PASS}" \
+  -e "ansible_become_password=${SYNO_PASS}"
+```
+
+The shares are intended for Kubernetes PV mounts only. Do not grant normal SMB
+user access, and do not use the Synology recycle bin for Nextcloud data.
 
 ## 1) Preflight (always run first)
 

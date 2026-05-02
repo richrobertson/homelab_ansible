@@ -1,0 +1,184 @@
+---
+- name: Check whether {{ nextcloud_synology_share_name }} share exists
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ ("sudo -S /usr/syno/sbin/synoshare --get " ~ (nextcloud_synology_share_name | quote) ~ " 2>&1") | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: nextcloud_synology_share_get_before
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Create {{ nextcloud_synology_share_name }} shared folder with Btrfs data checksums
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/sbin/synoshare --add "
+      ~ (nextcloud_synology_share_name | quote) ~ " "
+      ~ (nextcloud_synology_share_description | quote) ~ " "
+      ~ (nextcloud_synology_share_path | quote) ~ " "
+      ~ "'' '' '' 0 0 "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: nextcloud_synology_share_create
+  changed_when: true
+  failed_when: nextcloud_synology_share_create.rc != 0
+  when: nextcloud_synology_share_get_before.rc != 0
+  no_log: true
+
+- name: Read {{ nextcloud_synology_share_name }} share settings
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ ("sudo -S /usr/syno/sbin/synoshare --get " ~ (nextcloud_synology_share_name | quote) ~ " 2>&1") | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: nextcloud_synology_share_get
+  changed_when: false
+  no_log: true
+
+- name: Hide {{ nextcloud_synology_share_name }} share from SMB browsing
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ ("sudo -S /usr/syno/sbin/synoshare --setbrowse " ~ (nextcloud_synology_share_name | quote) ~ " 0") | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: nextcloud_synology_share_hide
+  changed_when: true
+  when: nextcloud_synology_share_get.stdout is search('fBrowseable \\[yes\\]')
+  no_log: true
+
+- name: Read {{ nextcloud_synology_share_name }} share settings after browse update
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ ("sudo -S /usr/syno/sbin/synoshare --get " ~ (nextcloud_synology_share_name | quote) ~ " 2>&1") | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: nextcloud_synology_share_get_after_browse
+  changed_when: false
+  no_log: true
+
+- name: Assert recycle bin is disabled for {{ nextcloud_synology_share_name }}
+  ansible.builtin.assert:
+    that:
+      - nextcloud_synology_share_get_after_browse.stdout is search('RecycleBin\\.+\\[no\\]')
+    fail_msg: >-
+      The {{ nextcloud_synology_share_name }} share has the Synology recycle bin
+      enabled. Disable it in DSM before using this share for Nextcloud.
+
+- name: Read Btrfs copy-on-write attribute for {{ nextcloud_synology_share_name }}
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ ("sudo -S lsattr -d " ~ (nextcloud_synology_share_path | quote) ~ " 2>&1") | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: nextcloud_synology_share_lsattr
+  changed_when: false
+  no_log: true
+
+- name: Assert Btrfs data checksums are enabled for {{ nextcloud_synology_share_name }}
+  ansible.builtin.assert:
+    that:
+      - nextcloud_synology_share_lsattr.stdout is not search('(?m)^[A-Za-z-]*C[A-Za-z-]*\\s')
+    fail_msg: >-
+      The {{ nextcloud_synology_share_name }} share has the Btrfs NOCOW
+      attribute set, which disables normal Btrfs data checksumming. Recreate
+      the share before using it for Nextcloud.
+
+- name: Assert {{ nextcloud_synology_share_name }} share is a Btrfs subvolume
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ ("sudo -S btrfs subvolume show " ~ (nextcloud_synology_share_path | quote) ~ " >/dev/null && printf 'btrfs-subvolume-ok'") | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: nextcloud_synology_btrfs_subvolume
+  changed_when: false
+  failed_when: "'btrfs-subvolume-ok' not in nextcloud_synology_btrfs_subvolume.stdout"
+  no_log: true
+
+- name: Set {{ nextcloud_synology_share_name }} ownership and mode
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S sh -c "
+      ~ ("changed=0; "
+      ~ "current=\"$(stat -c %u:%g:%a " ~ (nextcloud_synology_share_path | quote) ~ ")\"; "
+      ~ "desired=\"" ~ nextcloud_synology_share_owner_uid ~ ":" ~ nextcloud_synology_share_owner_gid ~ ":" ~ nextcloud_synology_share_mode ~ "\"; "
+      ~ "if [ \"${current}\" != \"${desired}\" ]; then "
+      ~ "chown " ~ nextcloud_synology_share_owner_uid ~ ":" ~ nextcloud_synology_share_owner_gid ~ " " ~ (nextcloud_synology_share_path | quote) ~ "; "
+      ~ "chmod " ~ nextcloud_synology_share_mode ~ " " ~ (nextcloud_synology_share_path | quote) ~ "; "
+      ~ "changed=1; "
+      ~ "fi; "
+      ~ "printf \"changed=%s\\n\" \"${changed}\"") | quote
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: nextcloud_synology_share_permissions
+  changed_when: "'changed=1' in nextcloud_synology_share_permissions.stdout"
+  no_log: true
+
+- name: Load current NFS share privilege rules for {{ nextcloud_synology_share_name }}
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/bin/synowebapi --exec "
+      ~ "api=SYNO.Core.FileServ.NFS.SharePrivilege "
+      ~ "method=load "
+      ~ "version=1 "
+      ~ "share_name=" ~ (nextcloud_synology_share_name | quote) ~ " "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: nextcloud_synology_nfs_load
+  changed_when: false
+  no_log: true
+
+- name: Parse current NFS share privilege rules for {{ nextcloud_synology_share_name }}
+  ansible.builtin.set_fact:
+    nextcloud_synology_nfs_payload: >-
+      {{
+        nextcloud_synology_nfs_load.stdout
+        | regex_search('(?ms)^\{\s*"data".*?"success"\s*:\s*(?:true|false)\s*\}')
+        | from_json
+      }}
+
+- name: Save desired NFS share privilege rules for {{ nextcloud_synology_share_name }}
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/bin/synowebapi --exec "
+      ~ "api=SYNO.Core.FileServ.NFS.SharePrivilege "
+      ~ "method=save "
+      ~ "version=1 "
+      ~ "share_name=" ~ (nextcloud_synology_share_name | quote) ~ " "
+      ~ "rule=" ~ (nextcloud_synology_nfs_rules | to_json | quote) ~ " "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: nextcloud_synology_nfs_save
+  changed_when: true
+  failed_when: "'\"success\" : true' not in nextcloud_synology_nfs_save.stdout"
+  when: (nextcloud_synology_nfs_payload.data.rule | default([])) != nextcloud_synology_nfs_rules
+  no_log: true
+
+- name: Show {{ nextcloud_synology_share_name }} provisioning summary
+  ansible.builtin.debug:
+    msg:
+      - "Share: {{ nextcloud_synology_share_name }} at {{ nextcloud_synology_share_path }}"
+      - "Recycle bin: disabled"
+      - "Btrfs data checksums: enabled"
+      - "NFS clients: {{ nextcloud_synology_nfs_rules | map(attribute='client') | join(', ') }}"

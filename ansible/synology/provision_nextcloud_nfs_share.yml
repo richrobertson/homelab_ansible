@@ -1,0 +1,76 @@
+---
+- name: Provision Synology NFS shares for Nextcloud data
+  hosts: "{{ synology_nextcloud_nas_group | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+
+  vars:
+    synology_ssh_host: "{{ ansible_host | default(inventory_hostname) }}"
+    synology_ssh_port: "{{ ansible_port | default(22) }}"
+    synology_ssh_command: >-
+      sshpass -e ssh
+      -q
+      -p {{ synology_ssh_port | quote }}
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      {{ ansible_user | quote }}@{{ synology_ssh_host | quote }}
+    synology_sshpass_environment:
+      SSHPASS: "{{ ansible_password }}"
+
+    synology_nextcloud_share_volume_path: /volume1
+    synology_nextcloud_share_owner_uid: 33
+    synology_nextcloud_share_owner_gid: 33
+    synology_nextcloud_share_mode: "770"
+
+    synology_nextcloud_nfs_rule_defaults: &nextcloud_nfs_rule_defaults
+      privilege: rw
+      root_squash: root
+      async: true
+      insecure: true
+      crossmnt: false
+      security_flavor:
+        sys: true
+        kerberos: false
+        kerberos_integrity: false
+        kerberos_privacy: false
+
+    synology_nextcloud_stage_nfs_rules:
+      - <<: *nextcloud_nfs_rule_defaults
+        client: 10.21.0.2
+      - <<: *nextcloud_nfs_rule_defaults
+        client: 10.21.1.2
+      - <<: *nextcloud_nfs_rule_defaults
+        client: 10.21.2.2
+
+    synology_nextcloud_prod_nfs_rules:
+      - <<: *nextcloud_nfs_rule_defaults
+        client: 10.31.0.2
+      - <<: *nextcloud_nfs_rule_defaults
+        client: 10.31.1.2
+      - <<: *nextcloud_nfs_rule_defaults
+        client: 10.31.2.2
+
+    synology_nextcloud_shares:
+      - name: nextcloud-data-stage
+        description: Nextcloud staging filesystem data target
+        path: /volume1/nextcloud-data-stage
+        nfs_rules: "{{ synology_nextcloud_stage_nfs_rules }}"
+      - name: nextcloud-data-prod
+        description: Nextcloud production filesystem data target
+        path: /volume1/nextcloud-data-prod
+        nfs_rules: "{{ synology_nextcloud_prod_nfs_rules }}"
+
+  tasks:
+    - name: Provision each Nextcloud Synology share
+      ansible.builtin.include_tasks: tasks/provision_nextcloud_nfs_share_one.yml
+      loop: "{{ synology_nextcloud_shares }}"
+      loop_control:
+        loop_var: synology_nextcloud_share
+        label: "{{ synology_nextcloud_share.name }}"
+      vars:
+        nextcloud_synology_share_name: "{{ synology_nextcloud_share.name }}"
+        nextcloud_synology_share_description: "{{ synology_nextcloud_share.description }}"
+        nextcloud_synology_share_path: "{{ synology_nextcloud_share.path }}"
+        nextcloud_synology_share_owner_uid: "{{ synology_nextcloud_share.owner_uid | default(synology_nextcloud_share_owner_uid) }}"
+        nextcloud_synology_share_owner_gid: "{{ synology_nextcloud_share.owner_gid | default(synology_nextcloud_share_owner_gid) }}"
+        nextcloud_synology_share_mode: "{{ synology_nextcloud_share.mode | default(synology_nextcloud_share_mode) }}"
+        nextcloud_synology_nfs_rules: "{{ synology_nextcloud_share.nfs_rules }}"
