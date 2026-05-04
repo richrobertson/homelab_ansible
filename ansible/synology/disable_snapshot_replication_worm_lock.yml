@@ -1,0 +1,144 @@
+---
+- name: Disable WORM lock for selected Synology Snapshot Replication plans
+  hosts: "{{ synology_worm_lock_nas_group | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+
+  vars:
+    synology_ssh_host: "{{ ansible_host | default(inventory_hostname) }}"
+    synology_ssh_port: "{{ ansible_port | default(22) }}"
+    synology_ssh_command: >-
+      sshpass -e ssh
+      -q
+      -p {{ synology_ssh_port | quote }}
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      {{ ansible_user | quote }}@{{ synology_ssh_host | quote }}
+    synology_sshpass_environment:
+      SSHPASS: "{{ ansible_password }}"
+
+    synology_worm_lock_targets:
+      kermit.myrobertson.net:
+        - share: Time Machine Folder
+          plan_id: dfe24423-e42b-464e-a7fa-8d2eafd3df94
+          sync_local_snapshots: false
+        - share: ActiveBackupforBusiness
+          plan_id: 5c2711af-59cf-49d1-8d4f-3e01bf6ca153
+          sync_local_snapshots: true
+        - share: NetBackup
+          plan_id: a70c1256-eb7b-4382-b5bc-f02bcd25c6fd
+          sync_local_snapshots: false
+        - share: ActiveBackup_PC
+          plan_id: 2d9888ac-8085-409a-a2f4-c5565fd1c2d5
+          sync_local_snapshots: true
+        - share: photo
+          plan_id: 373f0a9d-257d-42ef-b181-f894038b1119
+          sync_local_snapshots: true
+
+    synology_worm_lock_schedule_hour: 0
+    synology_worm_lock_schedule_minute: 0
+    synology_worm_lock_schedule_week_name: "0,1,2,3,4,5,6"
+    synology_worm_lock_notify_time_in_min: 720
+
+  pre_tasks:
+    - name: Validate required Synology login variables
+      ansible.builtin.assert:
+        that:
+          - ansible_user is defined
+          - ansible_user | length > 0
+          - ansible_password is defined
+          - ansible_password | length > 0
+        fail_msg: >-
+          Provide the Vault-backed Synology SSH account with ansible_user and
+          ansible_password before running this playbook.
+
+    - name: Skip hosts without selected Snapshot Replication plans
+      ansible.builtin.meta: end_host
+      when: inventory_hostname not in synology_worm_lock_targets
+
+  tasks:
+    - name: Disable WORM lock on selected Snapshot Replication plan
+      ansible.builtin.shell: |
+        set -euo pipefail
+        tmp="/tmp/disable-dr-worm-lock-{{ item.plan_id }}.sh"
+        {{ synology_ssh_command }} "cat > ${tmp}" <<'REMOTE_SCRIPT'
+        pid={{ item.plan_id | quote }}
+        policy={{ {
+          "enabled": true,
+          "is_app_aware": false,
+          "is_send_encrypted": false,
+          "is_sync_local_snapshots": item.sync_local_snapshots | bool,
+          "mode": 2,
+          "notify_time_in_min": synology_worm_lock_notify_time_in_min | int,
+          "schedule": {
+            "date_type": 0,
+            "hour": synology_worm_lock_schedule_hour | int,
+            "last_work_hour": synology_worm_lock_schedule_hour | int,
+            "min": synology_worm_lock_schedule_minute | int,
+            "repeat_hour": 0,
+            "repeat_min": 0,
+            "week_name": synology_worm_lock_schedule_week_name
+          },
+          "sync_window": {
+            "enabled": false,
+            "window": [16777215, 16777215, 16777215, 16777215, 16777215, 16777215, 16777215]
+          },
+          "worm_lock_day": 7,
+          "worm_lock_enable": false,
+          "worm_lock_notify_time": 0
+        } | to_json | quote }}
+        /usr/syno/bin/synowebapi --exec \
+          api=SYNO.DR.Plan.MainSite \
+          method=edit \
+          version=1 \
+          plan_id="\"${pid}\"" \
+          sync_policy="${policy}" \
+          2>&1
+        REMOTE_SCRIPT
+        {{ synology_ssh_command }} "sudo -S sh ${tmp}; rc=\$?; rm -f ${tmp}; exit \${rc}" <<< "$SSHPASS"
+      args:
+        executable: /bin/bash
+      delegate_to: localhost
+      environment: "{{ synology_sshpass_environment }}"
+      register: synology_worm_lock_policy_set
+      changed_when: true
+      failed_when: >-
+        synology_worm_lock_policy_set.rc != 0
+        or (
+          '"success" : true' not in synology_worm_lock_policy_set.stdout
+          and '"success":true' not in synology_worm_lock_policy_set.stdout
+        )
+      loop: "{{ synology_worm_lock_targets[inventory_hostname] }}"
+      loop_control:
+        label: "{{ item.share }}"
+
+    - name: Trigger selected Snapshot Replication plan sync
+      ansible.builtin.shell: |
+        set -euo pipefail
+        tmp="/tmp/sync-dr-plan-{{ item.plan_id }}.sh"
+        {{ synology_ssh_command }} "cat > ${tmp}" <<'REMOTE_SCRIPT'
+        pid={{ item.plan_id | quote }}
+        /usr/syno/bin/synowebapi --exec \
+          api=SYNO.DR.Plan \
+          method=sync \
+          version=1 \
+          plan_id="\"${pid}\"" \
+          nowait=true \
+          auto_remove=true \
+          2>&1
+        REMOTE_SCRIPT
+        {{ synology_ssh_command }} "sudo -S sh ${tmp}; rc=\$?; rm -f ${tmp}; exit \${rc}" <<< "$SSHPASS"
+      args:
+        executable: /bin/bash
+      delegate_to: localhost
+      environment: "{{ synology_sshpass_environment }}"
+      register: synology_worm_lock_sync_start
+      changed_when: true
+      failed_when: >-
+        synology_worm_lock_sync_start.rc != 0
+        or (
+          '"success" : true' not in synology_worm_lock_sync_start.stdout
+          and '"success":true' not in synology_worm_lock_sync_start.stdout
+        )
+      loop: "{{ synology_worm_lock_targets[inventory_hostname] }}"
+      loop_control:
+        label: "{{ item.share }}"

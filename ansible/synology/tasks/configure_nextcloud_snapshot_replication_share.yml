@@ -1,0 +1,228 @@
+---
+- name: Read Snapshot Replication plan for {{ synology_nextcloud_replication_share }}
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /var/packages/SnapshotReplication/target/sbin/synodr "
+      ~ "plan get_by_name share "
+      ~ (synology_nextcloud_replication_share | quote)
+      ~ " 2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_nextcloud_replication_plan_before
+  changed_when: false
+  failed_when: false
+
+- name: Determine whether {{ synology_nextcloud_replication_share }} already has a replication plan
+  ansible.builtin.set_fact:
+    synology_nextcloud_replication_plan_exists: >-
+      {{ ('target: [' ~ synology_nextcloud_replication_share ~ ']') in synology_nextcloud_replication_plan_before.stdout }}
+
+- name: Ensure snapshot retention policy for {{ synology_nextcloud_replication_share }}
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/bin/synoretentionconf --set-policy "
+      ~ ("Share#" | quote) ~ " "
+      ~ (synology_nextcloud_replication_share | quote) ~ " "
+      ~ (synology_nextcloud_snapshot_policy_name | quote) ~ " "
+      ~ (synology_nextcloud_snapshot_adv_hourly | string | quote) ~ " "
+      ~ (synology_nextcloud_snapshot_adv_daily | string | quote) ~ " "
+      ~ (synology_nextcloud_snapshot_adv_weekly | string | quote) ~ " "
+      ~ (synology_nextcloud_snapshot_adv_monthly | string | quote) ~ " "
+      ~ (synology_nextcloud_snapshot_adv_yearly | string | quote) ~ " "
+      ~ (synology_nextcloud_snapshot_adv_retain_day | string | quote) ~ " "
+      ~ (synology_nextcloud_snapshot_adv_minimum | string | quote) ~ " "
+      ~ (synology_nextcloud_snapshot_trigger_hour | string | quote) ~ " "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_nextcloud_snapshot_retention_set
+  changed_when: false
+  failed_when: synology_nextcloud_snapshot_retention_set.rc != 0
+
+- name: Create Snapshot Replication plan for {{ synology_nextcloud_replication_share }}
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /var/packages/SnapshotReplication/target/sbin/synodr "
+      ~ "plan create_v3 "
+      ~ "share "
+      ~ (synology_nextcloud_replication_share | quote) ~ " "
+      ~ (synology_nextcloud_replication_remote_volume | quote) ~ " "
+      ~ (synology_nextcloud_replication_remote_addr | quote) ~ " "
+      ~ (synology_nextcloud_replication_remote_port | string | quote) ~ " "
+      ~ (synology_nextcloud_replication_remote_protocol | quote) ~ " "
+      ~ (synology_nextcloud_replication_remote_user | quote) ~ " "
+      ~ (synology_nextcloud_replication_remote_password | quote) ~ " "
+      ~ "'' "
+      ~ (synology_nextcloud_replication_force | ternary('true', 'false') | quote) ~ " "
+      ~ (synology_nextcloud_replication_local_user | quote) ~ " "
+      ~ (synology_nextcloud_replication_solution_type | quote) ~ " "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_nextcloud_replication_plan_create
+  changed_when: true
+  failed_when: synology_nextcloud_replication_plan_create.rc != 0
+  when: not synology_nextcloud_replication_plan_exists | bool
+  no_log: true
+
+- name: Read Snapshot Replication plan after ensure for {{ synology_nextcloud_replication_share }}
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /var/packages/SnapshotReplication/target/sbin/synodr "
+      ~ "plan get_by_name share "
+      ~ (synology_nextcloud_replication_share | quote)
+      ~ " 2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_nextcloud_replication_plan_after
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Assert Snapshot Replication plan exists for {{ synology_nextcloud_replication_share }}
+  ansible.builtin.assert:
+    that:
+      - "('target: [' ~ synology_nextcloud_replication_share ~ ']') in synology_nextcloud_replication_plan_after.stdout"
+      - "synology_nextcloud_replication_remote_addr in synology_nextcloud_replication_plan_after.stdout"
+    fail_msg: >-
+      Snapshot Replication plan for {{ synology_nextcloud_replication_share }}
+      was not found after configuration, or it does not reference
+      {{ synology_nextcloud_replication_remote_addr }}.
+
+- name: Capture Snapshot Replication plan id for {{ synology_nextcloud_replication_share }}
+  ansible.builtin.set_fact:
+    synology_nextcloud_replication_plan_id: >-
+      {{
+        synology_nextcloud_replication_plan_after.stdout
+        | split('planId: [')
+        | last
+        | split(']')
+        | first
+      }}
+
+- name: Build Snapshot Replication sync policy JSON for {{ synology_nextcloud_replication_share }}
+  ansible.builtin.set_fact:
+    synology_nextcloud_replication_sync_policy_json: >-
+      {{
+        {
+          "enabled": synology_nextcloud_replication_schedule_enabled | bool,
+          "is_app_aware": synology_nextcloud_replication_app_aware | bool,
+          "is_send_encrypted": synology_nextcloud_replication_send_encrypted | bool,
+          "is_sync_local_snapshots": synology_nextcloud_replication_sync_local_snapshots | bool,
+          "mode": 2,
+          "notify_time_in_min": synology_nextcloud_replication_notify_time_in_min | int,
+          "schedule": {
+            "date_type": 0,
+            "hour": synology_nextcloud_replication_schedule_hour | int,
+            "last_work_hour": synology_nextcloud_replication_schedule_hour | int,
+            "min": synology_nextcloud_replication_schedule_minute | int,
+            "repeat_hour": 0,
+            "repeat_min": 0,
+            "week_name": synology_nextcloud_replication_schedule_week_name
+          },
+          "sync_window": {
+            "enabled": false,
+            "window": [16777215, 16777215, 16777215, 16777215, 16777215, 16777215, 16777215]
+          },
+          "worm_lock_day": synology_nextcloud_replication_worm_lock_day | int,
+          "worm_lock_enable": synology_nextcloud_replication_worm_lock_enabled | bool,
+          "worm_lock_notify_time": 0
+        }
+        | to_json
+        | regex_replace(', ', ',')
+        | regex_replace(': ', ':')
+      }}
+
+- name: Enable Snapshot Replication schedule for {{ synology_nextcloud_replication_share }}
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp="/tmp/nextcloud-dr-policy-{{ synology_nextcloud_replication_share }}.sh"
+    {{ synology_ssh_command }} "cat > ${tmp}" <<'REMOTE_SCRIPT'
+    pid={{ synology_nextcloud_replication_plan_id | quote }}
+    policy={{ synology_nextcloud_replication_sync_policy_json | quote }}
+    /usr/syno/bin/synowebapi --exec \
+      api=SYNO.DR.Plan.MainSite \
+      method=edit \
+      version=1 \
+      plan_id="\"${pid}\"" \
+      sync_policy="${policy}" \
+      2>&1
+    REMOTE_SCRIPT
+    {{ synology_ssh_command }} "sudo -S sh ${tmp}; rc=\$?; rm -f ${tmp}; exit \${rc}" <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_nextcloud_replication_policy_set
+  changed_when: >-
+    synology_nextcloud_replication_plan_after.stdout is not search('"enabled"\\s*:\\s*true')
+    or synology_nextcloud_replication_plan_after.stdout is not search('"repeat_min"\\s*:\\s*0')
+  failed_when: >-
+    synology_nextcloud_replication_policy_set.rc != 0
+    or (
+      '"success" : true' not in synology_nextcloud_replication_policy_set.stdout
+      and '"success":true' not in synology_nextcloud_replication_policy_set.stdout
+    )
+
+- name: Read Snapshot Replication plan after schedule ensure for {{ synology_nextcloud_replication_share }}
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /var/packages/SnapshotReplication/target/sbin/synodr "
+      ~ "plan get_by_name share "
+      ~ (synology_nextcloud_replication_share | quote)
+      ~ " 2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_nextcloud_replication_plan_scheduled
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Assert Snapshot Replication schedule is enabled for {{ synology_nextcloud_replication_share }}
+  ansible.builtin.assert:
+    that:
+      - "synology_nextcloud_replication_plan_scheduled.stdout is search('\"enabled\"\\s*:\\s*true')"
+      - "synology_nextcloud_replication_plan_scheduled.stdout is search('\"repeat_min\"\\s*:\\s*0')"
+      - "synology_nextcloud_replication_plan_scheduled.stdout is search('\"hour\"\\s*:\\s*' ~ (synology_nextcloud_replication_schedule_hour | string))"
+    fail_msg: >-
+      Snapshot Replication plan for {{ synology_nextcloud_replication_share }}
+      exists, but its scheduled sync policy is not enabled as expected.
+
+- name: Read retention policy after ensure for {{ synology_nextcloud_replication_share }}
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/bin/synoretentionconf --get "
+      ~ ("Share#" | quote) ~ " "
+      ~ (synology_nextcloud_replication_share | quote)
+      ~ " 2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_nextcloud_snapshot_retention_after
+  changed_when: false
+  no_log: true
+
+- name: Summarize Snapshot Replication for {{ synology_nextcloud_replication_share }}
+  ansible.builtin.debug:
+    msg:
+      - "Share: {{ synology_nextcloud_replication_share }}"
+      - "Replication plan: {{ 'existing' if synology_nextcloud_replication_plan_exists else 'created' }}"
+      - "Destination: {{ synology_nextcloud_replication_remote_addr }}:{{ synology_nextcloud_replication_remote_port }}"
+      - "Retention: hourly={{ synology_nextcloud_snapshot_adv_hourly }}, daily={{ synology_nextcloud_snapshot_adv_daily }}, weekly={{ synology_nextcloud_snapshot_adv_weekly }}, monthly={{ synology_nextcloud_snapshot_adv_monthly }}"

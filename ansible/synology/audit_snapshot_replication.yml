@@ -51,6 +51,14 @@
       changed_when: false
       register: synology_snapshot_sched_list
 
+    - name: List Snapshot Replication plans
+      ansible.builtin.raw: >-
+        {{ synology_snapshot_replication_bin_dir }}/synodr plan listw
+        main_site_info,dr_site_info,remote_conns,sync_policy
+        2>/dev/null || true
+      changed_when: false
+      register: synology_snapshot_plan_list
+
     - name: Read local share snapshot config
       ansible.builtin.raw: >-
         cat /usr/syno/etc/sharesnap/sharesnap.conf 2>/dev/null || true
@@ -204,9 +212,14 @@
                 'has_replication_config': (
                   item in synology_share_replica_list.stdout
                   or item in synology_btrfs_replica_list.stdout
+                  or item in synology_snapshot_plan_list.stdout
                 ),
                 'has_snapshot_schedule': (
                   item in synology_snapshot_sched_list.stdout
+                  or (
+                    item in synology_snapshot_plan_list.stdout
+                    and '"enabled" : true' in synology_snapshot_plan_list.stdout
+                  )
                 ),
                 'snapshot_count': (
                   synology_required_share_snapshot_counts[item] | default(0)
@@ -247,6 +260,7 @@
         msg:
           - "Package status: {{ synology_snapshot_pkg_status.stdout | regex_search('\"status\"\\s*:\\s*\"[^\"]+\"') | default('unknown') }}"
           - "Replica config count: {{ synology_share_replica_list.stdout | regex_findall('\"replica_id\"') | length }}"
+          - "DR plan nextcloud refs: {{ synology_snapshot_plan_list.stdout | regex_findall('nextcloud-data-(prod|stage)') | length }}"
           - "Schedule count: {{ synology_snapshot_sched_list.stdout | regex_findall('\"snap_sched_target_id\"') | length }}"
           - "Local snapshot config sections: {{ synology_sharesnap_config.stdout | regex_findall('^\\[[^\\]]+\\]', multiline=True) | length }}"
           - "Retention policy count: {{ synology_retention_policies.stdout | regex_findall('^POLICY ', multiline=True) | length }}"

@@ -1,0 +1,452 @@
+---
+- name: Build desired Hyper Backup retention profile
+  ansible.builtin.set_fact:
+    synology_nextcloud_hyperbackup_desired_rotate_params: >-
+      {{
+        {
+          "enable_rotate": synology_nextcloud_hyperbackup_rotation_enabled | bool,
+          "rotate_action": synology_nextcloud_hyperbackup_rotation_rules,
+          "rotate_condition": [1, synology_nextcloud_hyperbackup_rotation_max_versions | int],
+          "rotate_customized_rules": synology_nextcloud_hyperbackup_rotation_rules,
+          "rotate_option": synology_nextcloud_hyperbackup_rotation_option
+        }
+      }}
+
+- name: List Hyper Backup tasks
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/bin/synowebapi --exec "
+      ~ "api=SYNO.Backup.Task "
+      ~ "method=list "
+      ~ "version=1 "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_hyperbackup_task_list
+  changed_when: false
+  no_log: true
+
+- name: Parse Hyper Backup task list
+  ansible.builtin.set_fact:
+    synology_hyperbackup_task_list_payload: >-
+      {{
+        synology_hyperbackup_task_list.stdout
+        | regex_search('(?ms)^\{\s*"data".*?"success"\s*:\s*(?:true|false)\s*\}')
+        | from_json
+      }}
+
+- name: Detect named Hyper Backup tasks
+  ansible.builtin.set_fact:
+    synology_nextcloud_hyperbackup_named_tasks: >-
+      {{
+        synology_hyperbackup_task_list_payload.data.task_list | default([])
+        | selectattr('name', 'equalto', synology_nextcloud_hyperbackup_task_name)
+        | list
+      }}
+
+- name: Require exactly one matching Hyper Backup task
+  ansible.builtin.assert:
+    that:
+      - synology_nextcloud_hyperbackup_named_tasks | length == 1
+    fail_msg: >-
+      Expected exactly one DSM Hyper Backup task named
+      {{ synology_nextcloud_hyperbackup_task_name }}, but found
+      {{ synology_nextcloud_hyperbackup_named_tasks | length }}. Create or
+      rename the Backblaze task in DSM before allowing Ansible to manage it.
+
+- name: Select Nextcloud Hyper Backup task id
+  ansible.builtin.set_fact:
+    synology_nextcloud_hyperbackup_task_id: "{{ synology_nextcloud_hyperbackup_named_tasks[0].task_id | int }}"
+
+- name: Load Nextcloud Hyper Backup task details
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/bin/synowebapi --exec "
+      ~ "api=SYNO.Backup.Task "
+      ~ "method=get "
+      ~ "version=1 "
+      ~ "task_id=" ~ (synology_nextcloud_hyperbackup_task_id | string | quote) ~ " "
+      ~ "additional=" ~ ('["backup_params","rotate_params","schedule","incheck_schedule","repository","source"]' | quote) ~ " "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_hyperbackup_task_detail
+  changed_when: false
+  no_log: true
+
+- name: Parse Nextcloud Hyper Backup task details
+  ansible.builtin.set_fact:
+    synology_hyperbackup_task_detail_payload: >-
+      {{
+        synology_hyperbackup_task_detail.stdout
+        | regex_search('(?ms)^\{\s*"data".*?"success"\s*:\s*(?:true|false)\s*\}')
+        | from_json
+      }}
+    synology_nextcloud_hyperbackup_task: >-
+      {{
+        (
+          synology_hyperbackup_task_detail.stdout
+          | regex_search('(?ms)^\{\s*"data".*?"success"\s*:\s*(?:true|false)\s*\}')
+          | from_json
+        ).data
+      }}
+
+- name: Validate Nextcloud Hyper Backup source and Backblaze target
+  ansible.builtin.assert:
+    that:
+      - synology_hyperbackup_task_detail_payload.success | bool
+      - synology_nextcloud_hyperbackup_task.name == synology_nextcloud_hyperbackup_task_name
+      - synology_nextcloud_hyperbackup_task.source.folder_list | default([]) | selectattr('folderPath', 'equalto', synology_nextcloud_hyperbackup_source_folder) | list | length == 1
+      - synology_nextcloud_hyperbackup_task.source.folder_list | default([]) | selectattr('fullPath', 'equalto', synology_nextcloud_hyperbackup_source_full_path) | list | length == 1
+      - synology_nextcloud_hyperbackup_task.repository.bucket == synology_nextcloud_hyperbackup_expected_bucket
+      - synology_nextcloud_hyperbackup_task.repository.remote_url == synology_nextcloud_hyperbackup_expected_remote_url
+      - synology_nextcloud_hyperbackup_task.target_id == synology_nextcloud_hyperbackup_expected_target_id
+      - synology_nextcloud_hyperbackup_task.target_type == 'cloud_image'
+      - synology_nextcloud_hyperbackup_task.transfer_type == 'aws_s3'
+      - synology_nextcloud_hyperbackup_task.backup_params.trans_encrypt | bool
+      - not synology_nextcloud_hyperbackup_task.backup_params.enable_data_encrypt | bool
+    fail_msg: >-
+      Hyper Backup task {{ synology_nextcloud_hyperbackup_task_name }} exists,
+      but it is not the expected Backblaze backup for
+      {{ synology_nextcloud_hyperbackup_source_folder }}.
+
+- name: Detect Hyper Backup retention drift
+  ansible.builtin.set_fact:
+    synology_nextcloud_hyperbackup_retention_drift: >-
+      {{
+        (synology_nextcloud_hyperbackup_task.rotate_params.enable_rotate | bool)
+        != (synology_nextcloud_hyperbackup_desired_rotate_params.enable_rotate | bool)
+        or synology_nextcloud_hyperbackup_task.rotate_params.rotate_option
+        != synology_nextcloud_hyperbackup_desired_rotate_params.rotate_option
+        or (synology_nextcloud_hyperbackup_task.rotate_params.rotate_condition | map('int') | list)
+        != (synology_nextcloud_hyperbackup_desired_rotate_params.rotate_condition | map('int') | list)
+        or synology_nextcloud_hyperbackup_task.rotate_params.rotate_action
+        != synology_nextcloud_hyperbackup_desired_rotate_params.rotate_action
+        or synology_nextcloud_hyperbackup_task.rotate_params.rotate_customized_rules
+        != synology_nextcloud_hyperbackup_desired_rotate_params.rotate_customized_rules
+      }}
+
+- name: Reconcile Hyper Backup retention profile
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/bin/synowebapi --exec "
+      ~ "api=SYNO.Backup.Task "
+      ~ "method=set "
+      ~ "version=1 "
+      ~ "task_id=" ~ (synology_nextcloud_hyperbackup_task_id | string | quote) ~ " "
+      ~ "rotate_params=" ~ (synology_nextcloud_hyperbackup_desired_rotate_params | to_json | quote) ~ " "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_nextcloud_hyperbackup_retention_set
+  changed_when: synology_nextcloud_hyperbackup_retention_drift | bool
+  failed_when: >-
+    synology_nextcloud_hyperbackup_retention_set.rc != 0
+    or (
+      '"success" : true' not in synology_nextcloud_hyperbackup_retention_set.stdout
+      and '"success":true' not in synology_nextcloud_hyperbackup_retention_set.stdout
+    )
+  when: synology_nextcloud_hyperbackup_retention_drift | bool
+  no_log: true
+
+- name: List DSM scheduler tasks
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/bin/synowebapi --exec "
+      ~ "api=SYNO.Core.TaskScheduler "
+      ~ "method=list "
+      ~ "version=1 "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_scheduler_task_list
+  changed_when: false
+  no_log: true
+
+- name: Parse DSM scheduler task list
+  ansible.builtin.set_fact:
+    synology_scheduler_task_list_payload: >-
+      {{
+        synology_scheduler_task_list.stdout
+        | regex_search('(?ms)^\{\s*"data".*?"success"\s*:\s*(?:true|false)\s*\}')
+        | from_json
+      }}
+
+- name: Detect Hyper Backup scheduler tasks
+  ansible.builtin.set_fact:
+    synology_nextcloud_hyperbackup_backup_schedulers: >-
+      {{
+        synology_scheduler_task_list_payload.data.tasks | default([])
+        | selectattr('name', 'equalto', synology_nextcloud_hyperbackup_task_name)
+        | selectattr('app_name', 'equalto', 'Hyper Backup')
+        | selectattr('action', 'equalto', 'Back up data to a public cloud service')
+        | list
+      }}
+    synology_nextcloud_hyperbackup_integrity_schedulers: >-
+      {{
+        synology_scheduler_task_list_payload.data.tasks | default([])
+        | selectattr('name', 'equalto', synology_nextcloud_hyperbackup_task_name)
+        | selectattr('app_name', 'equalto', 'Hyper Backup')
+        | selectattr('action', 'equalto', 'Backup Integrity Check')
+        | list
+      }}
+
+- name: Require Hyper Backup scheduler tasks
+  ansible.builtin.assert:
+    that:
+      - synology_nextcloud_hyperbackup_backup_schedulers | length == 1
+      - synology_nextcloud_hyperbackup_integrity_schedulers | length == 1
+    fail_msg: >-
+      Expected one backup scheduler and one integrity-check scheduler for
+      {{ synology_nextcloud_hyperbackup_task_name }}. Open the Hyper Backup
+      task once in DSM if DSM has not created its scheduler entries yet.
+
+- name: Select Hyper Backup scheduler ids
+  ansible.builtin.set_fact:
+    synology_nextcloud_hyperbackup_backup_scheduler_id: "{{ synology_nextcloud_hyperbackup_backup_schedulers[0].id | int }}"
+    synology_nextcloud_hyperbackup_integrity_scheduler_id: "{{ synology_nextcloud_hyperbackup_integrity_schedulers[0].id | int }}"
+
+- name: Load Hyper Backup backup scheduler
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/bin/synowebapi --exec "
+      ~ "api=SYNO.Core.TaskScheduler "
+      ~ "method=get "
+      ~ "version=4 "
+      ~ "id=" ~ (synology_nextcloud_hyperbackup_backup_scheduler_id | string | quote) ~ " "
+      ~ "real_owner=root "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_nextcloud_hyperbackup_backup_scheduler_get
+  changed_when: false
+  no_log: true
+
+- name: Load Hyper Backup integrity scheduler
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/bin/synowebapi --exec "
+      ~ "api=SYNO.Core.TaskScheduler "
+      ~ "method=get "
+      ~ "version=4 "
+      ~ "id=" ~ (synology_nextcloud_hyperbackup_integrity_scheduler_id | string | quote) ~ " "
+      ~ "real_owner=root "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_nextcloud_hyperbackup_integrity_scheduler_get
+  changed_when: false
+  no_log: true
+
+- name: Parse Hyper Backup scheduler details
+  ansible.builtin.set_fact:
+    synology_nextcloud_hyperbackup_backup_scheduler_payload: >-
+      {{
+        synology_nextcloud_hyperbackup_backup_scheduler_get.stdout
+        | regex_search('(?ms)^\{\s*"data".*?"success"\s*:\s*(?:true|false)\s*\}')
+        | from_json
+      }}
+    synology_nextcloud_hyperbackup_integrity_scheduler_payload: >-
+      {{
+        synology_nextcloud_hyperbackup_integrity_scheduler_get.stdout
+        | regex_search('(?ms)^\{\s*"data".*?"success"\s*:\s*(?:true|false)\s*\}')
+        | from_json
+      }}
+
+- name: Build desired Hyper Backup scheduler payloads
+  ansible.builtin.set_fact:
+    synology_nextcloud_hyperbackup_backup_schedule: >-
+      {{
+        {
+          "date": synology_nextcloud_hyperbackup_backup_scheduler_payload.data.schedule.date,
+          "date_type": 0,
+          "hour": synology_nextcloud_hyperbackup_schedule_hour | int,
+          "last_work_hour": synology_nextcloud_hyperbackup_schedule_hour | int,
+          "minute": synology_nextcloud_hyperbackup_schedule_minute | int,
+          "monthly_week": [],
+          "repeat_date": synology_nextcloud_hyperbackup_schedule_repeat_date | int,
+          "repeat_hour": 0,
+          "repeat_hour_store_config": None,
+          "repeat_min": 0,
+          "repeat_min_store_config": None,
+          "week_day": synology_nextcloud_hyperbackup_schedule_week_day
+        }
+      }}
+    synology_nextcloud_hyperbackup_integrity_schedule: >-
+      {{
+        {
+          "date": synology_nextcloud_hyperbackup_integrity_scheduler_payload.data.schedule.date,
+          "date_type": 0,
+          "hour": synology_nextcloud_hyperbackup_integrity_check_hour | int,
+          "last_work_hour": synology_nextcloud_hyperbackup_integrity_check_hour | int,
+          "minute": synology_nextcloud_hyperbackup_integrity_check_minute | int,
+          "monthly_week": [],
+          "repeat_date": synology_nextcloud_hyperbackup_integrity_check_repeat_date | int,
+          "repeat_hour": 0,
+          "repeat_hour_store_config": None,
+          "repeat_min": 0,
+          "repeat_min_store_config": None,
+          "week_day": synology_nextcloud_hyperbackup_integrity_check_week_day
+        }
+      }}
+
+- name: Detect Hyper Backup scheduler drift
+  ansible.builtin.set_fact:
+    synology_nextcloud_hyperbackup_backup_scheduler_drift: >-
+      {{
+        (synology_nextcloud_hyperbackup_backup_scheduler_payload.data.enable | bool)
+        != (synology_nextcloud_hyperbackup_schedule_enabled | bool)
+        or (synology_nextcloud_hyperbackup_backup_scheduler_payload.data.schedule.hour | int)
+        != (synology_nextcloud_hyperbackup_schedule_hour | int)
+        or (synology_nextcloud_hyperbackup_backup_scheduler_payload.data.schedule.minute | int)
+        != (synology_nextcloud_hyperbackup_schedule_minute | int)
+        or (synology_nextcloud_hyperbackup_backup_scheduler_payload.data.schedule.repeat_date | int)
+        != (synology_nextcloud_hyperbackup_schedule_repeat_date | int)
+        or synology_nextcloud_hyperbackup_backup_scheduler_payload.data.schedule.week_day
+        != synology_nextcloud_hyperbackup_schedule_week_day
+      }}
+    synology_nextcloud_hyperbackup_integrity_scheduler_drift: >-
+      {{
+        (synology_nextcloud_hyperbackup_integrity_scheduler_payload.data.enable | bool)
+        != (synology_nextcloud_hyperbackup_integrity_check_enabled | bool)
+        or (synology_nextcloud_hyperbackup_integrity_scheduler_payload.data.schedule.hour | int)
+        != (synology_nextcloud_hyperbackup_integrity_check_hour | int)
+        or (synology_nextcloud_hyperbackup_integrity_scheduler_payload.data.schedule.minute | int)
+        != (synology_nextcloud_hyperbackup_integrity_check_minute | int)
+        or (synology_nextcloud_hyperbackup_integrity_scheduler_payload.data.schedule.repeat_date | int)
+        != (synology_nextcloud_hyperbackup_integrity_check_repeat_date | int)
+        or synology_nextcloud_hyperbackup_integrity_scheduler_payload.data.schedule.week_day
+        != synology_nextcloud_hyperbackup_integrity_check_week_day
+      }}
+
+- name: Reconcile Hyper Backup backup scheduler
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/bin/synowebapi --exec "
+      ~ "api=SYNO.Core.TaskScheduler "
+      ~ "method=set "
+      ~ "version=4 "
+      ~ "id=" ~ (synology_nextcloud_hyperbackup_backup_scheduler_id | string | quote) ~ " "
+      ~ "real_owner=root "
+      ~ "owner=root "
+      ~ "name=" ~ (synology_nextcloud_hyperbackup_task_name | quote) ~ " "
+      ~ "enable=" ~ (synology_nextcloud_hyperbackup_schedule_enabled | ternary('true', 'false')) ~ " "
+      ~ "type=custom "
+      ~ "schedule=" ~ (synology_nextcloud_hyperbackup_backup_schedule | to_json | quote) ~ " "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_nextcloud_hyperbackup_backup_scheduler_set
+  changed_when: synology_nextcloud_hyperbackup_backup_scheduler_drift | bool
+  failed_when: >-
+    synology_nextcloud_hyperbackup_backup_scheduler_set.rc != 0
+    or (
+      '"success" : true' not in synology_nextcloud_hyperbackup_backup_scheduler_set.stdout
+      and '"success":true' not in synology_nextcloud_hyperbackup_backup_scheduler_set.stdout
+    )
+  when: synology_nextcloud_hyperbackup_backup_scheduler_drift | bool
+  no_log: true
+
+- name: Reconcile Hyper Backup integrity scheduler
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/bin/synowebapi --exec "
+      ~ "api=SYNO.Core.TaskScheduler "
+      ~ "method=set "
+      ~ "version=4 "
+      ~ "id=" ~ (synology_nextcloud_hyperbackup_integrity_scheduler_id | string | quote) ~ " "
+      ~ "real_owner=root "
+      ~ "owner=root "
+      ~ "name=" ~ (synology_nextcloud_hyperbackup_task_name | quote) ~ " "
+      ~ "enable=" ~ (synology_nextcloud_hyperbackup_integrity_check_enabled | ternary('true', 'false')) ~ " "
+      ~ "type=custom "
+      ~ "schedule=" ~ (synology_nextcloud_hyperbackup_integrity_schedule | to_json | quote) ~ " "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_nextcloud_hyperbackup_integrity_scheduler_set
+  changed_when: synology_nextcloud_hyperbackup_integrity_scheduler_drift | bool
+  failed_when: >-
+    synology_nextcloud_hyperbackup_integrity_scheduler_set.rc != 0
+    or (
+      '"success" : true' not in synology_nextcloud_hyperbackup_integrity_scheduler_set.stdout
+      and '"success":true' not in synology_nextcloud_hyperbackup_integrity_scheduler_set.stdout
+    )
+  when: synology_nextcloud_hyperbackup_integrity_scheduler_drift | bool
+  no_log: true
+
+- name: Reload Nextcloud Hyper Backup task details after reconciliation
+  ansible.builtin.shell: |
+    {{ synology_ssh_command }} {{ (
+      "sudo -S /usr/syno/bin/synowebapi --exec "
+      ~ "api=SYNO.Backup.Task "
+      ~ "method=get "
+      ~ "version=1 "
+      ~ "task_id=" ~ (synology_nextcloud_hyperbackup_task_id | string | quote) ~ " "
+      ~ "additional=" ~ ('["backup_params","rotate_params","schedule","incheck_schedule","repository","source"]' | quote) ~ " "
+      ~ "2>&1"
+    ) | quote }} <<< "$SSHPASS"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  environment: "{{ synology_sshpass_environment }}"
+  register: synology_hyperbackup_task_detail_after
+  changed_when: false
+  no_log: true
+
+- name: Parse Nextcloud Hyper Backup task details after reconciliation
+  ansible.builtin.set_fact:
+    synology_nextcloud_hyperbackup_task_after: >-
+      {{
+        (
+          synology_hyperbackup_task_detail_after.stdout
+          | regex_search('(?ms)^\{\s*"data".*?"success"\s*:\s*(?:true|false)\s*\}')
+          | from_json
+        ).data
+      }}
+
+- name: Assert Hyper Backup retention profile is managed
+  ansible.builtin.assert:
+    that:
+      - synology_nextcloud_hyperbackup_task_after.rotate_params.enable_rotate | bool == synology_nextcloud_hyperbackup_rotation_enabled | bool
+      - synology_nextcloud_hyperbackup_task_after.rotate_params.rotate_option == synology_nextcloud_hyperbackup_rotation_option
+      - (synology_nextcloud_hyperbackup_task_after.rotate_params.rotate_condition | map('int') | list) == ([1, synology_nextcloud_hyperbackup_rotation_max_versions | int])
+      - synology_nextcloud_hyperbackup_task_after.rotate_params.rotate_action == synology_nextcloud_hyperbackup_rotation_rules
+      - synology_nextcloud_hyperbackup_task_after.rotate_params.rotate_customized_rules == synology_nextcloud_hyperbackup_rotation_rules
+    fail_msg: >-
+      Hyper Backup retention for {{ synology_nextcloud_hyperbackup_task_name }}
+      does not match the Ansible-managed retention profile.
+
+- name: Summarize Hyper Backup management
+  ansible.builtin.debug:
+    msg:
+      - "Task: {{ synology_nextcloud_hyperbackup_task_name }} (id {{ synology_nextcloud_hyperbackup_task_id }})"
+      - "Source: {{ synology_nextcloud_hyperbackup_source_folder }}"
+      - "Target: {{ synology_nextcloud_hyperbackup_expected_remote_url }}/{{ synology_nextcloud_hyperbackup_expected_bucket }}"
+      - "Backup schedule: {{ synology_nextcloud_hyperbackup_schedule_hour }}:{{ '%02d' | format(synology_nextcloud_hyperbackup_schedule_minute | int) }} daily"
+      - "Integrity check: {{ synology_nextcloud_hyperbackup_integrity_check_hour }}:{{ '%02d' | format(synology_nextcloud_hyperbackup_integrity_check_minute | int) }} week_day={{ synology_nextcloud_hyperbackup_integrity_check_week_day }}"
+      - "Retention: {{ synology_nextcloud_hyperbackup_rotation_option }}, max_versions={{ synology_nextcloud_hyperbackup_rotation_max_versions }}"

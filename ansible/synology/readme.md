@@ -9,6 +9,8 @@ The playbooks target the inventory group `synology_nas` and use host vars from `
 - `audit_snapshot_replication.yml`: Audits Snapshot Replication package status, configured replica count, schedules, local share snapshot config, retention policy coverage, required Nextcloud share snapshot counts, and DSM notification email settings. It can also apply the desired DSM notification email settings when explicitly enabled.
 - `configure_authelia_sso.yml`: Seeds per-NAS Authelia OIDC client secrets in Vault and configures DSM OIDC SSO for scooter and kermit.
 - `provision_nextcloud_nfs_share.yml`: Creates separate `nextcloud-data-stage` and `nextcloud-data-prod` Btrfs shared folders, keeps recycle bin disabled, verifies data checksumming is not disabled, and applies Kubernetes-worker-only NFS privileges.
+- `configure_nextcloud_data_protection.yml`: Configures Scooter Snapshot Replication plans for `nextcloud-data-prod` and `nextcloud-data-stage` to Kermit, enforces snapshot retention, and manages the existing Hyper Backup schedule and retention for backing up `nextcloud-data-prod` to Backblaze B2.
+- `disable_snapshot_replication_worm_lock.yml`: Repair playbook for selected legacy Snapshot Replication jobs that fail with permission errors when DSM attempts WORM/locked-snapshot replication. It preserves the daily schedule and disables only the replication policy's WORM lock flag before triggering a fresh sync.
 - `discover_orphaned_luns.yml`: Lists likely orphaned LUN UUIDs using mapping heuristics.
 - `cleanup_orphaned_luns.yml`: Deletes explicitly provided orphan LUN UUIDs.
 - `discover_and_cleanup_orphaned_luns.yml`: One-shot flow for discovery + optional cleanup.
@@ -87,9 +89,86 @@ user access, and do not use the Synology recycle bin for Nextcloud data.
 
 The Snapshot Replication audit checks that `nextcloud-data-stage` and
 `nextcloud-data-prod` have local snapshot configuration, retention policy
-coverage, and at least reports the current snapshot count. Snapshot schedules
-and replication jobs are reported separately because DSM does not expose a
-clean CLI path for creating those safely from this playbook.
+coverage, and at least reports the current snapshot count.
+
+Configure data protection for the Nextcloud shares on Scooter:
+
+```bash
+source ~/.bash_profile
+SYNO_USER="$(vault kv get -field=username -mount=secret synology/dsm-admin/local-ssh-account)"
+SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local-ssh-account)"
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 .venv/bin/ansible-playbook \
+  ansible/synology/configure_nextcloud_data_protection.yml \
+  -i inventory/environments/production.ini \
+  -e "ansible_user=${SYNO_USER}" \
+  -e "ansible_password=${SYNO_PASS}" \
+  -e "ansible_become_password=${SYNO_PASS}"
+```
+
+The playbook creates Snapshot Replication plans from Scooter to Kermit for both
+`nextcloud-data-prod` and `nextcloud-data-stage` when those plans are missing.
+It also enforces the current Nextcloud retention profile: 24 hourly, 7 daily,
+2 weekly, 1 monthly, 0 yearly, retain all snapshots for 1 day, and keep a
+minimum of 5 snapshots.
+
+The Hyper Backup task is expected to be created in DSM first, because the
+Backblaze credential exchange belongs on Scooter/DSM and should not be stored in
+Git. After the task exists, Ansible manages the backup schedule, integrity-check
+schedule, and retention policy for the task named
+`NextCloud Prod Backup Backblaze`.
+
+The managed Hyper Backup target is:
+
+- Source shared folder: `nextcloud-data-prod`
+- S3 server: `s3.us-west-002.backblazeb2.com`
+- Bucket: `nextcloud-data-prod`
+- Directory/target id: `scooter.hbk`
+- Backup schedule: daily at `22:30`
+- Integrity check: Saturdays at `00:30`
+- Retention: custom retention with a maximum of 256 versions
+
+To reconcile only the Hyper Backup task without touching Snapshot Replication:
+
+```bash
+source ~/.bash_profile
+SYNO_USER="$(vault kv get -field=username -mount=secret synology/dsm-admin/local-ssh-account)"
+SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local-ssh-account)"
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 .venv/bin/ansible-playbook \
+  ansible/synology/configure_nextcloud_data_protection.yml \
+  -i inventory/environments/production.ini \
+  --limit scooter.myrobertson.net \
+  --tags hyperbackup \
+  -e "ansible_user=${SYNO_USER}" \
+  -e "ansible_password=${SYNO_PASS}" \
+  -e "ansible_become_password=${SYNO_PASS}"
+```
+
+Backblaze credentials belong on Scooter/DSM and in Vault only. They must not be
+made available to the Nextcloud pod or committed to Git. The playbook validates
+that the managed task points at the expected Backblaze bucket and Nextcloud prod
+share before it changes schedule or retention settings.
+
+## Snapshot Replication WORM lock repair
+
+Some legacy Snapshot Replication plans can fail with DSM permission errors when
+their sync policy tries to replicate WORM/locked snapshots. The repair playbook
+targets only the explicitly listed plans, disables `worm_lock_enable`, preserves
+the existing daily midnight schedule, and starts a fresh sync.
+
+```bash
+source ~/.bash_profile
+SYNO_USER="$(vault kv get -field=username -mount=secret synology/dsm-admin/local-ssh-account)"
+SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local-ssh-account)"
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 .venv/bin/ansible-playbook \
+  ansible/synology/disable_snapshot_replication_worm_lock.yml \
+  -i inventory/environments/production.ini \
+  -e "ansible_user=${SYNO_USER}" \
+  -e "ansible_password=${SYNO_PASS}" \
+  -e "ansible_become_password=${SYNO_PASS}"
+```
+
+This is a replication-policy repair, not a deletion workflow. It does not delete
+snapshots or shared folders.
 
 ## 1) Preflight (always run first)
 

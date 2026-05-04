@@ -1,0 +1,117 @@
+---
+- name: Configure Synology data protection for Nextcloud shares
+  hosts: "{{ synology_nextcloud_protection_nas_group | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+
+  vars:
+    synology_ssh_host: "{{ ansible_host | default(inventory_hostname) }}"
+    synology_ssh_port: "{{ ansible_port | default(22) }}"
+    synology_ssh_command: >-
+      sshpass -e ssh
+      -q
+      -p {{ synology_ssh_port | quote }}
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      {{ ansible_user | quote }}@{{ synology_ssh_host | quote }}
+    synology_sshpass_environment:
+      SSHPASS: "{{ ansible_password }}"
+
+    synology_nextcloud_protection_source_host: scooter.myrobertson.net
+    synology_nextcloud_replication_destination_host: kermit.myrobertson.net
+    synology_nextcloud_replication_remote_addr: 192.168.1.141
+    synology_nextcloud_replication_remote_port: 5010
+    synology_nextcloud_replication_remote_protocol: http
+    synology_nextcloud_replication_remote_volume: /volume1
+    synology_nextcloud_replication_remote_user: "{{ ansible_user }}"
+    synology_nextcloud_replication_remote_password: "{{ ansible_password }}"
+    synology_nextcloud_replication_local_user: "{{ ansible_user }}"
+    synology_nextcloud_replication_force: false
+    synology_nextcloud_replication_solution_type: synodr
+    synology_nextcloud_replication_shares:
+      - nextcloud-data-prod
+      - nextcloud-data-stage
+
+    synology_nextcloud_snapshot_policy_name: retain_by_adv
+    synology_nextcloud_snapshot_adv_hourly: 24
+    synology_nextcloud_snapshot_adv_daily: 7
+    synology_nextcloud_snapshot_adv_weekly: 2
+    synology_nextcloud_snapshot_adv_monthly: 1
+    synology_nextcloud_snapshot_adv_yearly: 0
+    synology_nextcloud_snapshot_adv_retain_day: 1
+    synology_nextcloud_snapshot_adv_minimum: 5
+    synology_nextcloud_snapshot_trigger_hour: 0
+    synology_nextcloud_replication_schedule_enabled: true
+    synology_nextcloud_replication_schedule_hour: 0
+    synology_nextcloud_replication_schedule_minute: 0
+    synology_nextcloud_replication_schedule_week_name: "0,1,2,3,4,5,6"
+    synology_nextcloud_replication_notify_time_in_min: 720
+    synology_nextcloud_replication_send_encrypted: false
+    synology_nextcloud_replication_sync_local_snapshots: false
+    synology_nextcloud_replication_app_aware: false
+    synology_nextcloud_replication_worm_lock_enabled: false
+    synology_nextcloud_replication_worm_lock_day: 7
+
+    synology_nextcloud_hyperbackup_task_name: NextCloud Prod Backup Backblaze
+    synology_nextcloud_hyperbackup_source_folder: /nextcloud-data-prod
+    synology_nextcloud_hyperbackup_source_full_path: /volume1/nextcloud-data-prod
+    synology_nextcloud_hyperbackup_expected_bucket: nextcloud-data-prod
+    synology_nextcloud_hyperbackup_expected_remote_url: s3.us-west-002.backblazeb2.com
+    synology_nextcloud_hyperbackup_expected_target_id: scooter.hbk
+    synology_nextcloud_hyperbackup_schedule_enabled: true
+    synology_nextcloud_hyperbackup_schedule_hour: 22
+    synology_nextcloud_hyperbackup_schedule_minute: 30
+    synology_nextcloud_hyperbackup_schedule_week_day: "0,1,2,3,4,5,6"
+    synology_nextcloud_hyperbackup_schedule_repeat_date: 1001
+    synology_nextcloud_hyperbackup_integrity_check_enabled: true
+    synology_nextcloud_hyperbackup_integrity_check_hour: 0
+    synology_nextcloud_hyperbackup_integrity_check_minute: 30
+    synology_nextcloud_hyperbackup_integrity_check_week_day: "6"
+    synology_nextcloud_hyperbackup_integrity_check_repeat_date: 1002
+    synology_nextcloud_hyperbackup_rotation_enabled: true
+    synology_nextcloud_hyperbackup_rotation_option: rotate_customize_retention
+    synology_nextcloud_hyperbackup_rotation_max_versions: 256
+    synology_nextcloud_hyperbackup_rotation_rules:
+      - [0, 604800, 1]
+      - [2419200, 86400, 1]
+      - [86400, 3600, 1]
+
+  pre_tasks:
+    - name: Restrict data protection configuration to Scooter
+      ansible.builtin.meta: end_host
+      when: inventory_hostname != synology_nextcloud_protection_source_host
+
+    - name: Validate required Synology login variables
+      ansible.builtin.assert:
+        that:
+          - ansible_user is defined
+          - ansible_user | length > 0
+          - ansible_password is defined
+          - ansible_password | length > 0
+        fail_msg: >-
+          Provide the Vault-backed Synology SSH account with ansible_user and
+          ansible_password before running this playbook.
+
+  tasks:
+    - name: Configure Snapshot Replication for each Nextcloud share
+      ansible.builtin.include_tasks: tasks/configure_nextcloud_snapshot_replication_share.yml
+      loop: "{{ synology_nextcloud_replication_shares }}"
+      loop_control:
+        loop_var: synology_nextcloud_replication_share
+        label: "{{ synology_nextcloud_replication_share }}"
+
+    - name: Configure Hyper Backup task for Nextcloud prod Backblaze backup
+      ansible.builtin.include_tasks:
+        file: tasks/configure_nextcloud_hyperbackup_task.yml
+        apply:
+          tags:
+            - hyperbackup
+      tags:
+        - hyperbackup
+
+    - name: Summarize Nextcloud data protection
+      ansible.builtin.debug:
+        msg:
+          - "Snapshot replication source: {{ synology_nextcloud_protection_source_host }}"
+          - "Snapshot replication destination: {{ synology_nextcloud_replication_destination_host }} at {{ synology_nextcloud_replication_remote_addr }}"
+          - "Replicated shares: {{ synology_nextcloud_replication_shares | join(', ') }}"
+          - "Hyper Backup task managed: {{ synology_nextcloud_hyperbackup_task_name }}"
