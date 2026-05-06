@@ -265,7 +265,7 @@
       changed_when: true
       failed_when: "'\"success\" : true' not in synology_sso_profile_set.stdout"
 
-    - name: Keep DSM local login as the default
+    - name: Set DSM SSO default login preference
       ansible.builtin.raw: >-
         /usr/syno/bin/synowebapi --exec
         api=SYNO.Core.Directory.SSO.Setting

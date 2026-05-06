@@ -62,12 +62,13 @@ SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local
   -i inventory/environments/production.ini \
   -e synology_sso_provider_name=Keycloak \
   -e synology_sso_issuer_url=https://sso.myrobertson.com/realms/homelab \
+  -e synology_sso_enable_default_login=true \
   -e "ansible_user=${SYNO_USER}" \
   -e "ansible_password=${SYNO_PASS}" \
   -e "ansible_become_password=${SYNO_PASS}"
 ```
 
-By default the playbook keeps DSM local login as the default and enables Keycloak as an available OIDC sign-in path. The OIDC user claim is `preferred_username`, local DSM users are allowed so the existing break-glass admin account remains usable, and MFA is enforced by the Keycloak `homelab` browser flow before DSM receives an OIDC token.
+The production command selects Keycloak as the default DSM login path while still allowing local DSM users so the existing break-glass admin account remains usable. The OIDC user claim is `preferred_username`, and MFA is enforced by the Keycloak `homelab` browser flow before DSM receives an OIDC token.
 
 ## Nextcloud NFS shares
 
