@@ -50,9 +50,9 @@ SMTP_PASS="$(vault kv get -field=password -mount=secret mailu/prod/accounts/nas-
 
 The notification sender account is `nas-notifications@myrobertson.net`, with its password stored at `secret/mailu/prod/accounts/nas-notifications`. The playbook defaults the SMTP endpoint to `mail.myrobertson.net:587` with DSM's SSL/TLS flag enabled and preserves the current notification recipients, `rich@myrobertson.com` and `roy@myrobertson.com`.
 
-## Synology Authelia SSO
+## Synology OIDC SSO
 
-The Synology SSO playbook provisions per-NAS OIDC client secrets, stores the Authelia-compatible PBKDF2 hashes in `secret/authelia/prod`, and configures DSM to use `https://auth.myrobertson.com/.well-known/openid-configuration`.
+The Synology SSO playbook provisions per-NAS OIDC client secrets, stores the Authelia-compatible PBKDF2 hashes in `secret/authelia/prod` for rollback, and configures DSM OIDC. Production should use Keycloak at `https://sso.myrobertson.com/realms/homelab/.well-known/openid-configuration`.
 
 ```bash
 source ~/.bash_profile
@@ -60,12 +60,14 @@ SYNO_USER="$(vault kv get -field=username -mount=secret synology/dsm-admin/local
 SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local-ssh-account)"
 .venv/bin/ansible-playbook ansible/synology/configure_authelia_sso.yml \
   -i inventory/environments/production.ini \
+  -e synology_sso_provider_name=Keycloak \
+  -e synology_sso_issuer_url=https://sso.myrobertson.com/realms/homelab \
   -e "ansible_user=${SYNO_USER}" \
   -e "ansible_password=${SYNO_PASS}" \
   -e "ansible_become_password=${SYNO_PASS}"
 ```
 
-By default the playbook keeps DSM local login as the default and enables Authelia as an available OIDC sign-in path. The OIDC user claim is `preferred_username`, and local DSM users are allowed so the existing break-glass admin account remains usable.
+By default the playbook keeps DSM local login as the default and enables Keycloak as an available OIDC sign-in path. The OIDC user claim is `preferred_username`, local DSM users are allowed so the existing break-glass admin account remains usable, and MFA is enforced by the Keycloak `homelab` browser flow before DSM receives an OIDC token.
 
 ## Nextcloud NFS shares
 

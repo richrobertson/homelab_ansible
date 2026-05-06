@@ -10,6 +10,9 @@
     synology_sso_vault_mount: secret
     synology_sso_vault_prefix: synology/prod/sso/authelia
     synology_sso_authelia_vault_path: authelia/prod
+    synology_sso_provider_name: Authelia
+    synology_sso_issuer_url: https://auth.myrobertson.com
+    synology_sso_wellknown_url: "{{ synology_sso_issuer_url }}/.well-known/openid-configuration"
     synology_sso_rotate_secret: false
     synology_sso_regenerate_authelia_hash: false
     synology_sso_clients: "{{ groups[synology_sso_nas_group] | default([]) }}"
@@ -143,8 +146,8 @@
           client_id: "{{ item.client_id }}"
           client_secret: "{{ item.client_secret }}"
           client_name: "{{ item.client_name }}"
-          issuer_url: https://auth.myrobertson.com
-          wellknown_url: https://auth.myrobertson.com/.well-known/openid-configuration
+          issuer_url: "{{ synology_sso_issuer_url }}"
+          wellknown_url: "{{ synology_sso_wellknown_url }}"
           redirect_uri: "https://{{ item.hostname }}:5001/webman/ssoclient/token_relay.html"
       loop: "{{ synology_sso_secret_records }}"
       loop_control:
@@ -175,7 +178,9 @@
     synology_sso_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
     synology_sso_vault_mount: secret
     synology_sso_vault_prefix: synology/prod/sso/authelia
-    synology_sso_wellknown_url: https://auth.myrobertson.com/.well-known/openid-configuration
+    synology_sso_provider_name: Authelia
+    synology_sso_issuer_url: https://auth.myrobertson.com
+    synology_sso_wellknown_url: "{{ synology_sso_issuer_url }}/.well-known/openid-configuration"
     synology_sso_scope: "openid profile email groups"
     synology_sso_user_claim: preferred_username
     synology_sso_allow_local_user: true
@@ -226,14 +231,14 @@
       register: synology_sso_oidc_before
       failed_when: "'\"success\" : true' not in synology_sso_oidc_before.stdout"
 
-    - name: Configure DSM OIDC profile for Authelia
+    - name: Configure DSM OIDC profile
       ansible.builtin.raw: >-
         /usr/syno/bin/synowebapi --exec
         api=SYNO.Core.Directory.OIDC.SSO
         method=set
         version=1
         profile=oidc
-        oidc_name=Authelia
+        oidc_name={{ synology_sso_provider_name | quote }}
         oidc_wellknown={{ synology_sso_wellknown_url | quote }}
         oidc_client_id={{ synology_sso_vault_secret.secret.client_id | quote }}
         oidc_client_secret={{ synology_sso_vault_secret.secret.client_secret | quote }}
@@ -307,9 +312,11 @@
       register: synology_sso_profile_after
       failed_when: "'\"success\" : true' not in synology_sso_profile_after.stdout"
 
-    - name: Summarize Synology Authelia SSO configuration
+    - name: Summarize Synology OIDC SSO configuration
       ansible.builtin.debug:
         msg:
+          - "OIDC provider: {{ synology_sso_provider_name }}"
+          - "OIDC discovery: {{ synology_sso_wellknown_url }}"
           - "OIDC client: {{ synology_sso_vault_secret.secret.client_id }}"
           - "OIDC redirects: {{ synology_sso_redirect_uris | join(', ') }}"
           - "OIDC profile: {{ synology_sso_profile_after.stdout | regex_search('\"sso_profile\"\\s*:\\s*\"[^\"]+\"') | default('unknown') }}"
