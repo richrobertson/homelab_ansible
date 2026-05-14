@@ -88,8 +88,16 @@
     pdns_recursor_webserver_allow_from: "0.0.0.0/0"
     # Must match the LAN-reachable LoadBalancer IP used by the shared myrobertson-com gateway.
     pdns_rec_split_dns_gateway_ip: "10.31.0.69"
+    # Kermit Synology NAS, used directly by Synology Drive Client on the LAN.
+    pdns_rec_synology_drive_ip: "192.168.1.141"
     pdns_rec_split_dns_zone_dir: "/etc/powerdns/recursor/zones"
-    pdns_rec_split_dns_zone_file: "{{ pdns_rec_split_dns_zone_dir }}/plex.myrobertson.com.zone"
+    pdns_rec_split_dns_zones:
+      plex.myrobertson.com:
+        address: "{{ pdns_rec_split_dns_gateway_ip }}"
+        serial: 2026042001
+      drive.myrobertson.com:
+        address: "{{ pdns_rec_synology_drive_ip }}"
+        serial: 2026051401
     pdns_rec_config:
 
       # Listen Address
@@ -125,7 +133,8 @@
         # intermittently fail depending on forwarder selection.
         - "myrobertson.net.=192.168.1.245:53;"
       auth-zones:
-        - "plex.myrobertson.com={{ pdns_rec_split_dns_zone_file }}"
+        - "plex.myrobertson.com={{ pdns_rec_split_dns_zone_dir }}/plex.myrobertson.com.zone"
+        - "drive.myrobertson.com={{ pdns_rec_split_dns_zone_dir }}/drive.myrobertson.com.zone"
 
       forward-zones-recurse:
         - ".=1.1.1.1;8.8.8.8;"
@@ -141,19 +150,22 @@
         group: root
         mode: "0755"
 
-    - name: Install plex.myrobertson.com split-DNS auth zone
+    - name: Install myrobertson.com split-DNS auth zones
       ansible.builtin.copy:
-        dest: "{{ pdns_rec_split_dns_zone_file }}"
+        dest: "{{ pdns_rec_split_dns_zone_dir }}/{{ item.key }}.zone"
         owner: root
         group: root
         mode: "0644"
         content: |
-          $ORIGIN plex.myrobertson.com.
+          $ORIGIN {{ item.key }}.
           $TTL 60
-          @ IN SOA localhost. hostmaster.plex.myrobertson.com. 2026042001 300 300 300 60
+          @ IN SOA localhost. hostmaster.{{ item.key }}. {{ item.value.serial }} 300 300 300 60
           @ IN NS localhost.
-          @ IN A {{ pdns_rec_split_dns_gateway_ip }}
-      register: pdns_rec_split_dns_zone
+          @ IN A {{ item.value.address }}
+      loop: "{{ pdns_rec_split_dns_zones | dict2items }}"
+      loop_control:
+        label: "{{ item.key }} -> {{ item.value.address }}"
+      register: pdns_rec_split_dns_zone_results
 
   roles:
     - { role: powerdns.pdns_recursor }
@@ -163,4 +175,4 @@
       ansible.builtin.service:
         name: pdns-recursor
         state: restarted
-      when: pdns_rec_split_dns_zone is changed
+      when: pdns_rec_split_dns_zone_results is changed

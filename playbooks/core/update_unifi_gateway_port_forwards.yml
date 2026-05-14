@@ -12,4 +12,13 @@
         forward_ip: 10.31.0.69
         forward_port: 80
 
+- import_playbook: update_unifi_port_forward.yml
+  vars:
+    unifi_allow_missing_console_credentials: true
+    unifi_forward_ip: 192.168.1.141
+    unifi_port_forward_updates:
+      - rule_name: synology-drive
+        external_port: 6690
+        forward_port: 6690
+
 - import_playbook: repair_unifi_gateway_port_forward_firewall.yml

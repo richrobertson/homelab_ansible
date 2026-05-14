@@ -7,7 +7,7 @@
     unifi_ssh_vault_secret_path: >-
       {{
         lookup('env', 'UNIFI_SSH_VAULT_SECRET_PATH')
-        | default('secret/unifi/ssh', true)
+        | default('secret/data/unifi/ssh', true)
       }}
     _unifi_ssh_secrets: >-
       {{

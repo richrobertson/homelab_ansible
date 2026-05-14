@@ -1,0 +1,183 @@
+---
+- name: Sync Synology Drive certificate from cert-manager
+  hosts: "{{ synology_drive_certificate_hosts | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+  vars:
+    synology_drive_certificate_secret_namespace: default
+    synology_drive_certificate_secret_name: drive-myrobertson-com-cert
+    synology_drive_certificate_archive_id: Driv26
+    synology_drive_certificate_description: Managed by homelab_ansible for drive.myrobertson.com
+    synology_drive_certificate_install_paths:
+      - /usr/syno/etc/certificate/_archive/{{ synology_drive_certificate_archive_id }}
+      - /usr/syno/etc/certificate/system/default
+      - /usr/local/etc/certificate/SynologyDrive/SynologyDrive
+    synology_drive_certificate_nginx_cert_confs:
+      - /usr/syno/etc/www/certificate/system_default/cert.conf
+    synology_drive_certificate_service_selectors:
+      - subscriber: system
+        service: default
+      - subscriber: SynologyDrive
+        service: SynologyDrive
+
+  tasks:
+    - name: Read cert-manager TLS secret for Synology Drive
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - secret
+          - "{{ synology_drive_certificate_secret_name }}"
+          - -n
+          - "{{ synology_drive_certificate_secret_namespace }}"
+          - -o
+          - json
+      delegate_to: localhost
+      connection: local
+      become: false
+      changed_when: false
+      register: synology_drive_certificate_secret_raw
+
+    - name: Parse cert-manager TLS secret
+      ansible.builtin.set_fact:
+        synology_drive_certificate_secret: "{{ synology_drive_certificate_secret_raw.stdout | from_json }}"
+      no_log: true
+
+    - name: Build Synology certificate payload
+      ansible.builtin.set_fact:
+        synology_drive_certificate_fullchain_pem: "{{ synology_drive_certificate_secret.data['tls.crt'] | b64decode }}"
+        synology_drive_certificate_privkey_pem: "{{ synology_drive_certificate_secret.data['tls.key'] | b64decode }}"
+      no_log: true
+
+    - name: Split Synology certificate chain
+      ansible.builtin.set_fact:
+        synology_drive_certificate_leaf_pem: "{{ synology_drive_certificate_chain_parts[0] }}"
+        synology_drive_certificate_chain_pem: "{{ synology_drive_certificate_chain_parts[1:] | join('\n') }}"
+      vars:
+        synology_drive_certificate_chain_parts: >-
+          {{
+            synology_drive_certificate_fullchain_pem
+            | regex_findall('(?s)-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----')
+          }}
+      no_log: true
+
+    - name: Install certificate into DSM certificate store
+      ansible.builtin.raw: |
+        set -eu
+        python3 - <<'PY'
+        import base64
+        import json
+        import os
+        import shutil
+        import time
+
+        archive_id = {{ synology_drive_certificate_archive_id | to_json }}
+        description = {{ synology_drive_certificate_description | to_json }}
+        install_paths = {{ synology_drive_certificate_install_paths | to_json }}
+        nginx_cert_confs = {{ synology_drive_certificate_nginx_cert_confs | to_json }}
+        selectors = {{ synology_drive_certificate_service_selectors | to_json }}
+        leaf_pem = base64.b64decode({{ (synology_drive_certificate_leaf_pem | b64encode) | to_json }})
+        chain_pem = base64.b64decode({{ (synology_drive_certificate_chain_pem | b64encode) | to_json }})
+        fullchain_pem = base64.b64decode({{ (synology_drive_certificate_fullchain_pem | b64encode) | to_json }})
+        privkey_pem = base64.b64decode({{ (synology_drive_certificate_privkey_pem | b64encode) | to_json }})
+
+        timestamp = time.strftime("%Y%m%d%H%M%S")
+        for path in install_paths:
+          os.makedirs(path, mode=0o700, exist_ok=True)
+          for filename, content, mode in (
+            ("cert.pem", leaf_pem, 0o600),
+            ("chain.pem", chain_pem, 0o600),
+            ("fullchain.pem", fullchain_pem, 0o600),
+            ("privkey.pem", privkey_pem, 0o600),
+          ):
+            dest = os.path.join(path, filename)
+            if os.path.exists(dest):
+              shutil.copy2(dest, f"{dest}.bak-{timestamp}")
+            with open(dest, "wb") as handle:
+              handle.write(content)
+              if not content.endswith(b"\n"):
+                handle.write(b"\n")
+            os.chmod(dest, mode)
+
+        for cert_conf in nginx_cert_confs:
+          if not os.path.exists(cert_conf):
+            continue
+          shutil.copy2(cert_conf, f"{cert_conf}.bak-{timestamp}")
+          with open(cert_conf, "r", encoding="utf-8") as handle:
+            for line in handle:
+              parts = line.strip().rstrip(";").split()
+              if len(parts) < 2:
+                continue
+              if parts[0] == "ssl_certificate":
+                dest = parts[1]
+                if os.path.exists(dest):
+                  shutil.copy2(dest, f"{dest}.bak-{timestamp}")
+                with open(dest, "wb") as cert_handle:
+                  cert_handle.write(fullchain_pem)
+                  if not fullchain_pem.endswith(b"\n"):
+                    cert_handle.write(b"\n")
+                os.chmod(dest, 0o600)
+              elif parts[0] == "ssl_certificate_key":
+                dest = parts[1]
+                if os.path.exists(dest):
+                  shutil.copy2(dest, f"{dest}.bak-{timestamp}")
+                with open(dest, "wb") as key_handle:
+                  key_handle.write(privkey_pem)
+                  if not privkey_pem.endswith(b"\n"):
+                    key_handle.write(b"\n")
+                os.chmod(dest, 0o600)
+
+        info_paths = [
+          "/usr/syno/etc/certificate/system/default/info",
+          "/usr/local/etc/certificate/SynologyDrive/SynologyDrive/info",
+        ]
+        for info_path in info_paths:
+          if os.path.exists(info_path):
+            shutil.copy2(info_path, f"{info_path}.bak-{timestamp}")
+
+        archive_info_path = "/usr/syno/etc/certificate/_archive/INFO"
+        with open(archive_info_path, "r", encoding="utf-8") as handle:
+          info = json.load(handle)
+        shutil.copy2(archive_info_path, f"{archive_info_path}.bak-{timestamp}")
+
+        selected_services = []
+        for cert_id, cert_info in list(info.items()):
+          kept_services = []
+          for service in cert_info.get("services", []):
+            if any(
+              service.get("subscriber") == selector["subscriber"]
+              and service.get("service") == selector["service"]
+              for selector in selectors
+            ):
+              selected_services.append(service)
+            else:
+              kept_services.append(service)
+          cert_info["services"] = kept_services
+
+        existing = info.get(archive_id, {})
+        info[archive_id] = {
+          "desc": description,
+          "services": selected_services or existing.get("services", []),
+          "user_deletable": True,
+        }
+
+        with open(archive_info_path, "w", encoding="utf-8") as handle:
+          json.dump(info, handle, indent=3, sort_keys=True)
+          handle.write("\n")
+        PY
+        /usr/syno/bin/synopkg restart SynologyDrive >/dev/null 2>&1 || synopkg restart SynologyDrive >/dev/null 2>&1 || true
+        /usr/syno/bin/synosystemctl restart nginx >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1 || true
+      become: true
+      no_log: true
+
+    - name: Verify installed Synology Drive certificate
+      ansible.builtin.raw: |
+        openssl x509 \
+          -in /usr/local/etc/certificate/SynologyDrive/SynologyDrive/cert.pem \
+          -noout -subject -issuer -dates -ext subjectAltName
+      become: true
+      changed_when: false
+      register: synology_drive_certificate_verify
+
+    - name: Report installed Synology Drive certificate
+      ansible.builtin.debug:
+        msg: "{{ synology_drive_certificate_verify.stdout_lines }}"

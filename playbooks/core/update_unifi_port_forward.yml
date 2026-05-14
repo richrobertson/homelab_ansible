@@ -11,23 +11,34 @@
           'community.hashi_vault.hashi_vault',
           unifi_vault_secret_path,
           token=lookup('env', 'VAULT_TOKEN'),
-          url=lookup('env', 'VAULT_ADDR')
+          url=lookup('env', 'VAULT_ADDR'),
+          errors='ignore'
         )
+        | default({}, true)
       }}
     unifi_console_url: >-
       {{
-        lookup('env', 'UNIFI_CONSOLE_URL')
-        | default(_unifi_secrets.get('console_url', (_unifi_secrets.get('data', {})).get('console_url')), true)
+        (
+          lookup('env', 'UNIFI_CONSOLE_URL')
+          | default(_unifi_secrets.get('console_url', (_unifi_secrets.get('data', {})).get('console_url')), true)
+        )
+        | default('', true)
       }}
     unifi_username: >-
       {{
-        lookup('env', 'UNIFI_USERNAME')
-        | default(_unifi_secrets.get('username', (_unifi_secrets.get('data', {})).get('username')), true)
+        (
+          lookup('env', 'UNIFI_USERNAME')
+          | default(_unifi_secrets.get('username', (_unifi_secrets.get('data', {})).get('username')), true)
+        )
+        | default('', true)
       }}
     unifi_password: >-
       {{
-        lookup('env', 'UNIFI_PASSWORD')
-        | default(_unifi_secrets.get('password', (_unifi_secrets.get('data', {})).get('password')), true)
+        (
+          lookup('env', 'UNIFI_PASSWORD')
+          | default(_unifi_secrets.get('password', (_unifi_secrets.get('data', {})).get('password')), true)
+        )
+        | default('', true)
       }}
     unifi_site: "{{ lookup('env', 'UNIFI_SITE') | default('default', true) }}"
     unifi_rule_name: "{{ lookup('env', 'UNIFI_PORT_FORWARD_RULE_NAME') | default('plex', true) }}"
@@ -237,6 +248,7 @@
               )
           }}
       when:
+        - unifi_console_credentials_present
         - unifi_rule_matches | length == 1
         - unifi_rule_current.fwd != item.forward_ip
           or (unifi_rule_current.fwd_port | int) != (item.forward_port | default(item.external_port) | int)
@@ -250,7 +262,6 @@
           }}:{{ item.forward_port | default(item.external_port) | int }}
       register: unifi_rule_update_results
       no_log: true
-      when: unifi_console_credentials_present
 
     - name: Assert each UniFi port-forward rule resolved to exactly one match
       ansible.builtin.assert:

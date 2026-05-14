@@ -8,6 +8,7 @@ The playbooks target the inventory group `synology_nas` and use host vars from `
 - `preflight_nas_connectivity.yml`: Verifies SSH reachability, API auth, and LUN endpoint shape.
 - `audit_snapshot_replication.yml`: Audits Snapshot Replication package status, configured replica count, schedules, local share snapshot config, retention policy coverage, required Nextcloud share snapshot counts, and DSM notification email settings. It can also apply the desired DSM notification email settings when explicitly enabled.
 - `configure_authelia_sso.yml`: Seeds per-NAS Authelia OIDC client secrets in Vault and configures DSM OIDC SSO for scooter and kermit.
+- `sync_drive_certificate.yml`: Syncs the cert-manager managed `drive.myrobertson.com` certificate to Kermit, assigns it to DSM Desktop Service and Synology Drive Server, and restarts the affected services.
 - `provision_nextcloud_nfs_share.yml`: Creates separate `nextcloud-data-stage` and `nextcloud-data-prod` Btrfs shared folders, keeps recycle bin disabled, verifies data checksumming is not disabled, and applies Kubernetes-worker-only NFS privileges.
 - `configure_nextcloud_data_protection.yml`: Configures Scooter Snapshot Replication plans for `nextcloud-data-prod` and `nextcloud-data-stage` to Kermit, enforces snapshot retention, and manages the existing Hyper Backup schedule and retention for backing up `nextcloud-data-prod` to Backblaze B2.
 - `disable_snapshot_replication_worm_lock.yml`: Repair playbook for selected legacy Snapshot Replication jobs that fail with permission errors when DSM attempts WORM/locked-snapshot replication. It preserves the daily schedule and disables only the replication policy's WORM lock flag before triggering a fresh sync.
@@ -69,6 +70,24 @@ SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local
 ```
 
 The production command selects Keycloak as the default DSM login path while still allowing local DSM users so the existing break-glass admin account remains usable. The OIDC user claim is `preferred_username`, and MFA is enforced by the Keycloak `homelab` browser flow before DSM receives an OIDC token.
+
+## Synology Drive certificate
+
+Sync the Kubernetes cert-manager certificate for `drive.myrobertson.com` into
+Kermit and assign it to Synology Drive Server:
+
+```bash
+source ~/.bash_profile
+SYNO_USER="$(vault kv get -field=username -mount=secret synology/dsm-admin/local-ssh-account)"
+SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local-ssh-account)"
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 .venv/bin/ansible-playbook \
+  ansible/synology/sync_drive_certificate.yml \
+  -i inventory/environments/production.ini \
+  --limit kermit.myrobertson.net \
+  -e "ansible_user=${SYNO_USER}" \
+  -e "ansible_password=${SYNO_PASS}" \
+  -e "ansible_become_password=${SYNO_PASS}"
+```
 
 ## Nextcloud NFS shares
 
