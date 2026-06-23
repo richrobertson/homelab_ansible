@@ -14,7 +14,14 @@ Use this runbook when abuse reports, DSNs, or provider complaints indicate that 
 
 ## Immediate containment
 
-Run these from the Mailu host. Adjust the compose path if the stack lives elsewhere.
+If Ansible can reach the Mailu host, use the automated containment playbook first; it captures evidence, holds the queue, and stops the SMTP container with safe defaults:
+
+```bash
+ansible-playbook -i inventory/environments/production.ini ansible/mailu/smtp_abuse_containment.yml \
+  -e mailu_log_since=2026-06-23T15:45:00Z
+```
+
+Run the remaining commands manually from the Mailu host if Ansible is unavailable. Adjust the compose path if the stack lives elsewhere.
 
 ```bash
 cd /opt/mailu

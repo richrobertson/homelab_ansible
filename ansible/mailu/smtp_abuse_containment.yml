@@ -1,0 +1,114 @@
+---
+- name: Contain suspected Mailu SMTP abuse
+  hosts: mailu
+  become: true
+  gather_facts: false
+  vars:
+    mailu_compose_dir: /opt/mailu
+    mailu_compose_command: docker compose
+    mailu_log_since: "24h"
+    mailu_evidence_dir: "/var/tmp/mailu-smtp-abuse-{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+    mailu_stop_smtp: true
+    mailu_hold_queue: true
+    mailu_delete_queue: false
+    mailu_log_filter: "sasl|auth|login|client=|from=|sender|reject|queue|status=sent|message-id|removed"
+
+  tasks:
+    - name: Validate destructive queue cleanup flag
+      ansible.builtin.assert:
+        that:
+          - not (mailu_delete_queue | bool) or (mailu_hold_queue | bool)
+        fail_msg: >-
+          mailu_delete_queue=true requires mailu_hold_queue=true so queue evidence is captured
+          before deletion.
+
+    - name: Ensure abuse evidence directory exists
+      ansible.builtin.file:
+        path: "{{ mailu_evidence_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Capture Mailu container status
+      ansible.builtin.command:
+        cmd: "{{ mailu_compose_command }} ps"
+        chdir: "{{ mailu_compose_dir }}"
+      register: mailu_container_status
+      changed_when: false
+
+    - name: Write Mailu container status evidence
+      ansible.builtin.copy:
+        dest: "{{ mailu_evidence_dir }}/docker-compose-ps.txt"
+        content: "{{ mailu_container_status.stdout }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Capture filtered SMTP/auth logs
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          {{ mailu_compose_command }} logs --since {{ mailu_log_since | quote }} smtp front admin
+          | egrep -i {{ mailu_log_filter | quote }} || true
+        executable: /bin/bash
+        chdir: "{{ mailu_compose_dir }}"
+      register: mailu_filtered_logs
+      changed_when: false
+
+    - name: Write filtered SMTP/auth log evidence
+      ansible.builtin.copy:
+        dest: "{{ mailu_evidence_dir }}/smtp-auth-filtered.log"
+        content: "{{ mailu_filtered_logs.stdout }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Capture current Postfix queue
+      ansible.builtin.command:
+        cmd: "{{ mailu_compose_command }} exec -T smtp postqueue -p"
+        chdir: "{{ mailu_compose_dir }}"
+      register: mailu_postqueue
+      changed_when: false
+      failed_when: false
+
+    - name: Write Postfix queue evidence
+      ansible.builtin.copy:
+        dest: "{{ mailu_evidence_dir }}/postqueue-before-action.txt"
+        content: "{{ mailu_postqueue.stdout }}\n{{ mailu_postqueue.stderr }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Hold all queued SMTP messages after evidence capture
+      ansible.builtin.command:
+        cmd: "{{ mailu_compose_command }} exec -T smtp postsuper -h ALL"
+        chdir: "{{ mailu_compose_dir }}"
+      register: mailu_hold_result
+      changed_when: "'Placed on hold' in mailu_hold_result.stdout or 'placed on hold' in mailu_hold_result.stdout"
+      when: mailu_hold_queue | bool
+
+    - name: Delete all queued SMTP messages when explicitly requested
+      ansible.builtin.command:
+        cmd: "{{ mailu_compose_command }} exec -T smtp postsuper -d ALL"
+        chdir: "{{ mailu_compose_dir }}"
+      register: mailu_delete_result
+      changed_when: "'Deleted' in mailu_delete_result.stdout or 'deleted' in mailu_delete_result.stdout"
+      when: mailu_delete_queue | bool
+
+    - name: Stop Mailu SMTP service to halt outbound abuse
+      ansible.builtin.command:
+        cmd: "{{ mailu_compose_command }} stop smtp"
+        chdir: "{{ mailu_compose_dir }}"
+      register: mailu_stop_result
+      changed_when: "'Stopping' in mailu_stop_result.stdout or 'Stopped' in mailu_stop_result.stdout or 'smtp' in mailu_stop_result.stdout"
+      when: mailu_stop_smtp | bool
+
+    - name: Report containment evidence and actions
+      ansible.builtin.debug:
+        msg:
+          - "Evidence directory: {{ mailu_evidence_dir }}"
+          - "SMTP stopped: {{ mailu_stop_smtp | bool }}"
+          - "Queue held: {{ mailu_hold_queue | bool }}"
+          - "Queue deleted: {{ mailu_delete_queue | bool }}"
+          - "Next: identify the authenticated user from smtp-auth-filtered.log, rotate/disable that account, then restart smtp."
