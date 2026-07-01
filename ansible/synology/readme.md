@@ -69,7 +69,7 @@ SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local
   -e "ansible_become_password=${SYNO_PASS}"
 ```
 
-The production command selects Keycloak as the default DSM login path while still allowing local DSM users so the existing break-glass admin account remains usable. The OIDC user claim is `preferred_username`, and MFA is enforced by the Keycloak `homelab` browser flow before DSM receives an OIDC token.
+The production command selects Keycloak as the default DSM login path. Kermit disables OIDC local-user matching so `preferred_username=rich` maps to the domain account `MYROBERTSON\rich` instead of the local DSM account named `rich`; the normal DSM login tab remains available for break-glass local administrator access. The OIDC user claim is `preferred_username`, and MFA is enforced by the Keycloak `homelab` browser flow before DSM receives an OIDC token.
 
 ## Synology Drive certificate
 

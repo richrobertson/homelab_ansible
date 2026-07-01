@@ -184,6 +184,8 @@
     synology_sso_scope: "openid profile email groups"
     synology_sso_user_claim: preferred_username
     synology_sso_allow_local_user: true
+    synology_sso_allow_local_user_by_host:
+      kermit.myrobertson.net: false
     synology_sso_enable_default_login: false
     synology_sso_disable_legacy_synology_sso: true
     synology_sso_redirect_uris_by_host:
@@ -245,7 +247,7 @@
         oidc_redirect_uri={{ synology_sso_redirect_uris | join(',') | quote }}
         oidc_scope={{ synology_sso_scope | quote }}
         oidc_user_claim={{ synology_sso_user_claim | quote }}
-        oidc_allow_local_user={{ synology_sso_allow_local_user | lower }}
+        oidc_allow_local_user={{ (synology_sso_allow_local_user_by_host[inventory_hostname] | default(synology_sso_allow_local_user)) | lower }}
         2>&1
       register: synology_sso_oidc_set
       changed_when: true
