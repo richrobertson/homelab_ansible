@@ -35,6 +35,8 @@
     unifi_gateway_ports:
       - 80
       - 443
+    unifi_forbidden_wan_ports:
+      - 8200
   tasks:
     - name: Discover current gateway LoadBalancer IP from Kubernetes
       ansible.builtin.command:
@@ -69,9 +71,30 @@
         sshpass -e ssh -o StrictHostKeyChecking=no {{ unifi_ssh_username }}@{{ unifi_ssh_host }} <<'EOF'
         set -euo pipefail
         gateway_ip="{{ unifi_gateway_service_ip_lookup.stdout }}"
+        has_dport_rule() {
+          chain="$1"
+          action="$2"
+          proto="$3"
+          port="$4"
+          destination_match="${5:-}"
+          chain_rules="$(iptables-save | grep -F -- "-A ${chain} " || true)"
+          if [ -n "${destination_match}" ]; then
+            printf '%s\n' "${chain_rules}" \
+              | grep -F -- "-d ${destination_match}/32" \
+              | grep -F -- "-p ${proto}" \
+              | grep -F -- "--dport ${port}" \
+              | grep -F -- "-j ${action}" >/dev/null
+          else
+            printf '%s\n' "${chain_rules}" \
+              | grep -F -- "-p ${proto}" \
+              | grep -F -- "--dport ${port}" \
+              | grep -F -- "-j ${action}" >/dev/null
+          fi
+        }
+
         for port in {{ unifi_gateway_ports | join(' ') }}; do
           for proto in tcp udp; do
-            if iptables -C UBIOS_WAN_IN_USER -d "${gateway_ip}/32" -p "${proto}" --dport "${port}" -j RETURN 2>/dev/null; then
+            if has_dport_rule UBIOS_WAN_IN_USER RETURN "${proto}" "${port}" "${gateway_ip}"; then
               echo "keep UBIOS_WAN_IN_USER ${proto}/${port} ${gateway_ip}"
             else
               insert_at="$(iptables -L UBIOS_WAN_IN_USER --line-numbers -n | tail -n 1 | awk '{print $1}')"
@@ -79,7 +102,7 @@
               echo "insert UBIOS_WAN_IN_USER ${proto}/${port} ${gateway_ip}"
             fi
 
-            if iptables -C UBIOS_WAN_PF_IN_USER -d "${gateway_ip}/32" -p "${proto}" --dport "${port}" -j RETURN 2>/dev/null; then
+            if has_dport_rule UBIOS_WAN_PF_IN_USER RETURN "${proto}" "${port}" "${gateway_ip}"; then
               echo "keep UBIOS_WAN_PF_IN_USER ${proto}/${port} ${gateway_ip}"
             else
               iptables -A UBIOS_WAN_PF_IN_USER -d "${gateway_ip}/32" -p "${proto}" --dport "${port}" -j RETURN
@@ -87,9 +110,29 @@
             fi
           done
         done
+
+        for port in {{ unifi_forbidden_wan_ports | join(' ') }}; do
+          for proto in tcp udp; do
+            if has_dport_rule UBIOS_WAN_IN_USER DROP "${proto}" "${port}"; then
+              echo "keep UBIOS_WAN_IN_USER drop ${proto}/${port}"
+            else
+              iptables -I UBIOS_WAN_IN_USER 1 -p "${proto}" --dport "${port}" -j DROP
+              echo "insert UBIOS_WAN_IN_USER drop ${proto}/${port}"
+            fi
+
+            if has_dport_rule UBIOS_WAN_PF_IN_USER DROP "${proto}" "${port}"; then
+              echo "keep UBIOS_WAN_PF_IN_USER drop ${proto}/${port}"
+            else
+              iptables -I UBIOS_WAN_PF_IN_USER 1 -p "${proto}" --dport "${port}" -j DROP
+              echo "insert UBIOS_WAN_PF_IN_USER drop ${proto}/${port}"
+            fi
+          done
+        done
         iptables -S UBIOS_WAN_IN_USER | grep "${gateway_ip}" || true
+        iptables -S UBIOS_WAN_IN_USER | grep -- "--dport 8200" || true
         echo ---
         iptables -S UBIOS_WAN_PF_IN_USER | grep "${gateway_ip}" || true
+        iptables -S UBIOS_WAN_PF_IN_USER | grep -- "--dport 8200" || true
         EOF
       args:
         executable: /bin/bash
