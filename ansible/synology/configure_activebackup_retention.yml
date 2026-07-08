@@ -1,0 +1,148 @@
+---
+- name: Configure Active Backup retention on Kermit
+  hosts: "{{ synology_activebackup_retention_hosts | default('kermit.myrobertson.net') }}"
+  gather_facts: false
+  become: true
+
+  vars:
+    synology_activebackup_config_db: /volume1/@ActiveBackup/config.db
+    synology_activebackup_agent_db: /volume1/@ActiveBackup/agent/system-db.sqlite
+    synology_activebackup_retention_active_policy: >-
+      {"gfs_days":7,"gfs_months":12,"gfs_weeks":4,"gfs_years":1,"keep_all":false,"keep_days":1,"keep_versions":10}
+    synology_activebackup_retention_stale_policy: >-
+      {"gfs_days":7,"gfs_months":3,"gfs_weeks":4,"gfs_years":0,"keep_all":false,"keep_days":1,"keep_versions":3}
+    synology_activebackup_retention_active_task_ids:
+      - 7    # rich-macos
+      - 12   # JANICE
+      - 14   # RHONDA current rich task
+    synology_activebackup_retention_stale_task_ids:
+      - 1    # Animal_Shares_
+      - 5    # BOBO backup
+      - 11   # RHONDA old backup-account task
+    synology_activebackup_retention_template_ids:
+      - 1    # default PC template
+
+  tasks:
+    - name: Ensure no Active Backup agent tasks are currently running
+      ansible.builtin.raw: >-
+        test "$(sqlite3 {{ synology_activebackup_agent_db | quote }}
+        'select count(*) from running_task_table;' 2>/dev/null)" = "0"
+      changed_when: false
+
+    - name: Detect Active Backup retention drift
+      ansible.builtin.raw: |
+        set -eu
+
+        active_policy='{{ synology_activebackup_retention_active_policy }}'
+        stale_policy='{{ synology_activebackup_retention_stale_policy }}'
+        active_ids='{{ synology_activebackup_retention_active_task_ids | join(" ") }}'
+        stale_ids='{{ synology_activebackup_retention_stale_task_ids | join(" ") }}'
+        template_ids='{{ synology_activebackup_retention_template_ids | join(" ") }}'
+        drift=0
+
+        for id in ${active_ids}; do
+          current="$(sqlite3 {{ synology_activebackup_config_db | quote }} "select retention_policy from task_table where task_id=${id};")"
+          [ "${current}" = "${active_policy}" ] || drift=1
+        done
+
+        for id in ${stale_ids}; do
+          current="$(sqlite3 {{ synology_activebackup_config_db | quote }} "select retention_policy from task_table where task_id=${id};")"
+          [ "${current}" = "${stale_policy}" ] || drift=1
+        done
+
+        for id in ${template_ids}; do
+          current="$(sqlite3 {{ synology_activebackup_agent_db | quote }} "select retention_policy from task_template_table where id=${id};")"
+          [ "${current}" = "${active_policy}" ] || drift=1
+        done
+
+        printf 'drift=%s\n' "${drift}"
+      changed_when: false
+      register: synology_activebackup_retention_drift
+
+    - name: Configure Active Backup retention policies
+      ansible.builtin.raw: |
+        set -eu
+
+        stamp="$(date +%Y%m%d-%H%M%S)"
+        backup_dir="/volume1/@ActiveBackup/codex-retention-backup-${stamp}"
+        active_policy='{{ synology_activebackup_retention_active_policy }}'
+        stale_policy='{{ synology_activebackup_retention_stale_policy }}'
+        active_ids='{{ synology_activebackup_retention_active_task_ids | join(",") }}'
+        stale_ids='{{ synology_activebackup_retention_stale_task_ids | join(",") }}'
+        template_ids='{{ synology_activebackup_retention_template_ids | join(",") }}'
+
+        mkdir -p "${backup_dir}"
+        cp -a {{ synology_activebackup_config_db | quote }} "${backup_dir}/config.db"
+        cp -a {{ synology_activebackup_agent_db | quote }} "${backup_dir}/system-db.sqlite"
+
+        started=0
+        cleanup() {
+          if [ "${started}" -eq 0 ]; then
+            /usr/syno/bin/synopkg start ActiveBackup >/dev/null 2>&1 || true
+          fi
+        }
+        trap cleanup EXIT
+
+        /usr/syno/bin/synopkg stop ActiveBackup >/dev/null
+
+        sqlite3 {{ synology_activebackup_config_db | quote }} <<SQL
+        BEGIN IMMEDIATE;
+        UPDATE task_table
+           SET retention_policy = '${active_policy}'
+         WHERE task_id IN (${active_ids});
+        UPDATE task_table
+           SET retention_policy = '${stale_policy}'
+         WHERE task_id IN (${stale_ids});
+        COMMIT;
+        SQL
+
+        sqlite3 {{ synology_activebackup_agent_db | quote }} <<SQL
+        BEGIN IMMEDIATE;
+        UPDATE task_template_table
+           SET retention_policy = '${active_policy}'
+         WHERE id IN (${template_ids});
+        COMMIT;
+        SQL
+
+        /usr/syno/bin/synopkg start ActiveBackup >/dev/null
+        started=1
+        trap - EXIT
+
+        printf 'Backed up Active Backup DBs to %s\n' "${backup_dir}"
+      register: synology_activebackup_retention_update
+      changed_when: true
+      when: "'drift=1' in synology_activebackup_retention_drift.stdout"
+
+    - name: Verify updated Active Backup task retention policies
+      ansible.builtin.raw: >-
+        sqlite3 -json {{ synology_activebackup_config_db | quote }}
+        'select task_id, task_name, retention_policy from task_table
+        where task_id in ({{ (synology_activebackup_retention_active_task_ids + synology_activebackup_retention_stale_task_ids) | join(",") }})
+        order by task_id;'
+      changed_when: false
+      register: synology_activebackup_retention_tasks
+
+    - name: Verify updated Active Backup template retention policies
+      ansible.builtin.raw: >-
+        sqlite3 -json {{ synology_activebackup_agent_db | quote }}
+        'select id, backup_type, platform_type, share_name, retention_policy
+        from task_template_table
+        where id in ({{ synology_activebackup_retention_template_ids | join(",") }})
+        order by id;'
+      changed_when: false
+      register: synology_activebackup_retention_templates
+
+    - name: Confirm Active Backup package is running
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synopkg status ActiveBackup 2>/dev/null
+        || /usr/syno/sbin/synopkg status ActiveBackup
+      changed_when: false
+      register: synology_activebackup_retention_status
+
+    - name: Summarize Active Backup retention update
+      ansible.builtin.debug:
+        msg:
+          - "{{ synology_activebackup_retention_update.stdout | default('No Active Backup retention drift detected; no DB write needed.') | trim }}"
+          - "Task policies: {{ synology_activebackup_retention_tasks.stdout }}"
+          - "Template policies: {{ synology_activebackup_retention_templates.stdout }}"
+          - "Package: {{ synology_activebackup_retention_status.stdout | regex_search('\"status\"\\s*:\\s*\"[^\"]+\"') | default('unknown') }}"

@@ -1,0 +1,232 @@
+---
+- name: Configure Synology share snapshot retention
+  hosts: "{{ synology_snapshot_retention_hosts | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+
+  vars:
+    synology_ssh_host: "{{ ansible_host | default(inventory_hostname) }}"
+    synology_ssh_port: "{{ ansible_port | default(22) }}"
+    synology_ssh_command: >-
+      sshpass -e ssh
+      -q
+      -p {{ synology_ssh_port | quote }}
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      {{ ansible_user | quote }}@{{ synology_ssh_host | quote }}
+    synology_sshpass_environment:
+      SSHPASS: "{{ ansible_password }}"
+
+    synology_snapshot_retention_profiles_by_host:
+      scooter.myrobertson.net:
+        - { name: ActiveBackup_PC, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: ActiveBackupforBusiness-Kermit, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: HyperBackupVault, policy_name: retain_by_adv, hourly: 24, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: NetBackup, policy_name: retain_by_adv, hourly: 24, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: NetBackup-Kermit, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: Time Machine Folder, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: Vault, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
+        - { name: docker, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
+        - { name: downloads, policy_name: retain_latest, recently: 128 }
+        - { name: homes-replicated, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
+        - { name: janice, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
+        - { name: logs, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: music, policy_name: retain_latest, recently: 128 }
+        - { name: nextcloud-data, policy_name: retain_by_adv, hourly: 24, daily: 7, weekly: 2, monthly: 1, yearly: 0, retain_all_days: 1, minimum: 5 }
+        - { name: nextcloud-data-prod, policy_name: retain_by_adv, hourly: 24, daily: 7, weekly: 2, monthly: 1, yearly: 0, retain_all_days: 1, minimum: 5, trigger_hour: 0 }
+        - { name: nextcloud-data-stage, policy_name: retain_by_adv, hourly: 24, daily: 7, weekly: 2, monthly: 1, yearly: 0, retain_all_days: 1, minimum: 5, trigger_hour: 0 }
+        - { name: photo, policy_name: retain_latest, recently: 128 }
+        - { name: plex, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 0, retain_all_days: 1, minimum: 5, trigger_hour: 0 }
+        - { name: radarr, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 8, monthly: 3, yearly: 0, retain_all_days: 7, minimum: 14, trigger_hour: 0 }
+        - { name: remotes, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
+        - { name: unraid, policy_name: retain_by_adv, hourly: 24, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: web, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
+        - { name: web_packages, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
+      kermit.myrobertson.net:
+        - { name: ActiveBackup_PC, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: ActiveBackupforBusiness, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: HyperBackupVault, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 15, trigger_hour: 0 }
+        - { name: HyperBackupVault-Scooter, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: NetBackup, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: NetBackup-1, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: Time Machine Folder, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: Vault, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
+        - { name: Vault-1, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
+        - { name: docker, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
+        - { name: homes, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30, trigger_hour: 0 }
+        - { name: music, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 15 }
+        - { name: nextcloud-data-prod, policy_name: retain_by_adv, hourly: 24, daily: 7, weekly: 2, monthly: 1, yearly: 0, retain_all_days: 1, minimum: 5 }
+        - { name: nextcloud-data-stage, policy_name: retain_by_adv, hourly: 24, daily: 7, weekly: 2, monthly: 1, yearly: 0, retain_all_days: 1, minimum: 5 }
+        - { name: photo, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
+        - { name: plex, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 0, retain_all_days: 1, minimum: 5, trigger_hour: 0 }
+        - { name: radarr, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 8, monthly: 3, yearly: 0, retain_all_days: 7, minimum: 14, trigger_hour: 0 }
+        - { name: video, policy_name: retain_by_adv, hourly: 0, daily: 14, weekly: 8, monthly: 6, yearly: 1, retain_all_days: 7, minimum: 14 }
+        - { name: web, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
+        - { name: web_packages, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
+
+    synology_snapshot_retention_profiles: >-
+      {{
+        synology_snapshot_retention_profiles_by_host[inventory_hostname]
+        | default([])
+      }}
+
+  tasks:
+    - name: Require host-specific snapshot retention profiles
+      ansible.builtin.assert:
+        that:
+          - synology_snapshot_retention_profiles | length > 0
+        fail_msg: "No snapshot retention profile is defined for {{ inventory_hostname }}."
+
+    - name: Ensure configured shares exist
+      ansible.builtin.shell: |
+        {{ synology_ssh_command }} {{ (
+          "sudo -S /usr/syno/sbin/synoshare --get "
+          ~ (item.name | quote)
+          ~ " >/dev/null"
+        ) | quote }} <<< "$SSHPASS"
+      args:
+        executable: /bin/bash
+      delegate_to: localhost
+      environment: "{{ synology_sshpass_environment }}"
+      changed_when: false
+      loop: "{{ synology_snapshot_retention_profiles }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Configure retain-latest snapshot retention policies
+      ansible.builtin.shell: |
+        set -eu
+
+        share={{ item.name | quote }}
+        current="$(
+          {{ synology_ssh_command }} {{ (
+            "sudo -S /usr/syno/bin/synoretentionconf --get "
+            ~ ("Share#" | quote) ~ " "
+            ~ (item.name | quote)
+            ~ " 2>&1"
+          ) | quote }} <<< "$SSHPASS" || true
+        )"
+        drift=0
+
+        field() {
+          printf '%s\n' "${current}" | awk -F': ' -v key="$1" '$1 == key {print $2; exit}'
+        }
+
+        [ "$(field "Policy type")" = "20 (Retain latest)" ] || drift=1
+        [ "$(field "Recently")" = {{ item.recently | string | quote }} ] || drift=1
+
+        if [ "${drift}" -eq 1 ]; then
+          {{ synology_ssh_command }} {{ (
+            "sudo -S /usr/syno/bin/synoretentionconf --set-policy "
+            ~ ("Share#" | quote) ~ " "
+            ~ (item.name | quote) ~ " "
+            ~ (item.policy_name | quote) ~ " "
+            ~ (item.recently | string | quote)
+            ~ ((" " ~ (item.trigger_hour | string | quote)) if item.trigger_hour is defined else "")
+            ~ " 2>&1"
+          ) | quote }} <<< "$SSHPASS"
+        fi
+
+        printf 'share=%s changed=%s\n' "${share}" "${drift}"
+      args:
+        executable: /bin/bash
+      delegate_to: localhost
+      environment: "{{ synology_sshpass_environment }}"
+      register: synology_snapshot_retention_latest_set
+      changed_when: "'changed=1' in synology_snapshot_retention_latest_set.stdout"
+      failed_when: synology_snapshot_retention_latest_set.rc != 0
+      loop: "{{ synology_snapshot_retention_profiles | selectattr('policy_name', 'equalto', 'retain_latest') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Configure advanced snapshot retention policies
+      ansible.builtin.shell: |
+        set -eu
+
+        share={{ item.name | quote }}
+        current="$(
+          {{ synology_ssh_command }} {{ (
+            "sudo -S /usr/syno/bin/synoretentionconf --get "
+            ~ ("Share#" | quote) ~ " "
+            ~ (item.name | quote)
+            ~ " 2>&1"
+          ) | quote }} <<< "$SSHPASS" || true
+        )"
+        drift=0
+
+        field() {
+          printf '%s\n' "${current}" | awk -F': ' -v key="$1" '$1 == key {print $2; exit}'
+        }
+
+        printf '%s\n' "$(field "Policy type")" | grep -q "Retain by advance" || drift=1
+        [ "$(field "Advance Hourly")" = {{ item.hourly | string | quote }} ] || drift=1
+        [ "$(field "Advance Daily")" = {{ item.daily | string | quote }} ] || drift=1
+        [ "$(field "Advance Weekly")" = {{ item.weekly | string | quote }} ] || drift=1
+        [ "$(field "Advance Monthly")" = {{ item.monthly | string | quote }} ] || drift=1
+        [ "$(field "Advance Yearly")" = {{ item.yearly | string | quote }} ] || drift=1
+        [ "$(field "Advance RetainDay")" = {{ item.retain_all_days | string | quote }} ] || drift=1
+        [ "$(field "Advance Minimum")" = {{ item.minimum | string | quote }} ] || drift=1
+        {% if item.trigger_hour is defined %}
+        printf '%s\n' "$(field "Policy type")" | grep -q "Time trigger" || drift=1
+        {% endif %}
+
+        if [ "${drift}" -eq 1 ]; then
+          {{ synology_ssh_command }} {{ (
+            "sudo -S /usr/syno/bin/synoretentionconf --set-policy "
+            ~ ("Share#" | quote) ~ " "
+            ~ (item.name | quote) ~ " "
+            ~ (item.policy_name | quote) ~ " "
+            ~ (item.hourly | string | quote) ~ " "
+            ~ (item.daily | string | quote) ~ " "
+            ~ (item.weekly | string | quote) ~ " "
+            ~ (item.monthly | string | quote) ~ " "
+            ~ (item.yearly | string | quote) ~ " "
+            ~ (item.retain_all_days | string | quote) ~ " "
+            ~ (item.minimum | string | quote)
+            ~ ((" " ~ (item.trigger_hour | string | quote)) if item.trigger_hour is defined else "")
+            ~ " 2>&1"
+          ) | quote }} <<< "$SSHPASS"
+        fi
+
+        printf 'share=%s changed=%s\n' "${share}" "${drift}"
+      args:
+        executable: /bin/bash
+      delegate_to: localhost
+      environment: "{{ synology_sshpass_environment }}"
+      register: synology_snapshot_retention_adv_set
+      changed_when: "'changed=1' in synology_snapshot_retention_adv_set.stdout"
+      failed_when: synology_snapshot_retention_adv_set.rc != 0
+      loop: "{{ synology_snapshot_retention_profiles | selectattr('policy_name', 'equalto', 'retain_by_adv') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Verify snapshot retention policies
+      ansible.builtin.shell: |
+        set -eu
+        {{ synology_ssh_command }} {{ (
+          "sudo -S /usr/syno/bin/synoretentionconf --get "
+          ~ ("Share#" | quote) ~ " "
+          ~ (item.name | quote)
+          ~ " 2>&1"
+        ) | quote }} <<< "$SSHPASS" |
+          awk -F': ' '
+            /^(Policy type|Recently|Advance Hourly|Advance Daily|Advance Weekly|Advance Monthly|Advance Yearly|Advance RetainDay|Advance Minimum):/ {
+              printf "%s=%s; ", $1, $2
+            }
+            END { printf "\n" }
+          '
+      args:
+        executable: /bin/bash
+      delegate_to: localhost
+      environment: "{{ synology_sshpass_environment }}"
+      changed_when: false
+      register: synology_snapshot_retention_verify
+      loop: "{{ synology_snapshot_retention_profiles }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Summarize snapshot retention policies
+      ansible.builtin.debug:
+        msg: "{{ item.item.name }}: {{ item.stdout | trim }}"
+      loop: "{{ synology_snapshot_retention_verify.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"

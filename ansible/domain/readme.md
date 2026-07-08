@@ -106,6 +106,51 @@ dc_w32time_special_poll_interval: 900
 dc_w32time_announce_flags: 5
 ```
 
+## Domain Account Provisioning
+
+Use `provision_domain_accounts.yml` to create or update family domain accounts in Active Directory.
+The playbook currently manages:
+
+- `OU=Family,DC=myrobertson,DC=net`
+- `OU=Service Accounts,DC=myrobertson,DC=net`
+- `CN=Family,OU=Family,DC=myrobertson,DC=net`
+- `stella@myrobertson.net`, with `mail=stella@myrobertson.net`, under the `Family` OU and in the `Family` group
+- `keycloak-ldap@myrobertson.net`, under the `Service Accounts` OU
+- Password reset/change delegation for `keycloak-ldap@myrobertson.net` on descendant users in `OU=Family,DC=myrobertson,DC=net`, allowing Keycloak's writable LDAP provider to complete password-update flows
+
+The playbook requires a temporary password when creating a brand-new account. Store that outside git, for example in Vault, then source your shell profile before retrieving it:
+
+Keep AD `change_password_at_logon` disabled for Keycloak-backed accounts. If a first-login password change is required, set Keycloak's `UPDATE_PASSWORD` required action instead; AD's `pwdLastSet=0` simple-bind response is surfaced to Keycloak as invalid credentials before the browser flow can complete.
+
+```sh
+bash -lc '
+  source ~/.bash_profile
+  domain_secret="$(vault kv get -format=json secret/windows/domain/ldap)"
+  stella_secret="$(vault kv get -format=json secret/windows/domain/users/stella)"
+  keycloak_ldap_secret="$(vault kv get -format=json secret/windows/domain/service-accounts/keycloak-ldap)"
+
+  tmp_vars="$(mktemp)"
+  chmod 600 "${tmp_vars}"
+  trap "rm -f ${tmp_vars}" EXIT
+
+  jq -n \
+    --arg ansible_user "$(jq -r ".data.data.username" <<<"${domain_secret}")" \
+    --arg ansible_password "$(jq -r ".data.data.password" <<<"${domain_secret}")" \
+    --arg domain_account_initial_password "$(jq -r ".data.data.password" <<<"${stella_secret}")" \
+    --arg domain_account_keycloak_ldap_password "$(jq -r ".data.data.password" <<<"${keycloak_ldap_secret}")" \
+    "{ansible_user: \$ansible_user, ansible_password: \$ansible_password, domain_account_initial_password: \$domain_account_initial_password, domain_account_keycloak_ldap_password: \$domain_account_keycloak_ldap_password}" \
+    > "${tmp_vars}"
+
+  OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES homelab_ansible/.venv/bin/ansible-playbook \
+    -f 1 \
+    -i homelab_ansible/inventory/environments/production.ini \
+    homelab_ansible/ansible/domain/provision_domain_accounts.yml \
+    -e "@${tmp_vars}"
+'
+```
+
+To add more accounts, override `domain_accounts` with entries containing `username`, `user_principal_name`, `email`, optional `given_name`/`surname`, and optional `groups`.
+
 ## Windows DHCP High Availability
 
 Use `configure_windows_dhcp_ha.yml` to install and authorize the DHCP role on two Windows servers, create IPv4 scopes, apply common DHCP options, and configure Microsoft DHCP failover.

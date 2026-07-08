@@ -1,0 +1,376 @@
+---
+- name: Provision Active Directory domain accounts
+  hosts: domain_controllers_windows[0]
+  gather_facts: false
+
+  vars:
+    domain_account_base_dn: DC=myrobertson,DC=net
+    domain_account_default_ou: Family
+    domain_account_default_groups:
+      - Family
+    domain_account_service_accounts_ou: Service Accounts
+    domain_account_keycloak_ldap_username: keycloak-ldap
+    domain_account_keycloak_ldap_password: ""
+    domain_account_delegate_password_principal: "{{ domain_account_keycloak_ldap_username }}"
+    domain_account_delegate_password_ou: "{{ domain_account_default_ou }}"
+    domain_account_move_existing_users: true
+    domain_account_initial_password: ""
+    domain_accounts:
+      - username: stella
+        user_principal_name: stella@myrobertson.net
+        email: stella@myrobertson.net
+        given_name: Stella
+        surname: Robertson
+        display_name: Stella
+        ou: "{{ domain_account_default_ou }}"
+        groups: "{{ domain_account_default_groups }}"
+        enabled: true
+        change_password_at_logon: false
+
+  pre_tasks:
+    - name: Validate domain account inputs
+      ansible.builtin.assert:
+        that:
+          - domain_account_base_dn | length > 0
+          - domain_account_default_ou | length > 0
+          - domain_account_default_groups | length > 0
+          - domain_accounts | length > 0
+          - domain_accounts | selectattr('username', 'defined') | list | length == domain_accounts | length
+          - domain_accounts | selectattr('user_principal_name', 'defined') | list | length == domain_accounts | length
+          - domain_accounts | selectattr('email', 'defined') | list | length == domain_accounts | length
+        fail_msg: >-
+          Define domain_account_base_dn, domain_account_default_ou,
+          domain_account_default_groups, and at least one domain account with
+          username, user_principal_name, and email.
+
+  tasks:
+    - name: Ensure Active Directory PowerShell module is available
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
+            throw 'ActiveDirectory PowerShell module is not available on this host.'
+          }
+          Write-Output 'ActiveDirectory module available'
+      changed_when: false
+
+    - name: Ensure family organizational unit exists
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $ouName = {{ domain_account_default_ou | to_json }}
+          $baseDn = {{ domain_account_base_dn | to_json }}
+          $existing = Get-ADOrganizationalUnit -LDAPFilter "(ou=$ouName)" -SearchBase $baseDn -SearchScope OneLevel -ErrorAction SilentlyContinue
+
+          if ($existing) {
+            Write-Output 'Changed=False'
+            exit 0
+          }
+
+          New-ADOrganizationalUnit -Name $ouName -Path $baseDn -ProtectedFromAccidentalDeletion $true
+          Write-Output 'Changed=True'
+      register: domain_account_ou_result
+      changed_when: "'Changed=True' in domain_account_ou_result.output"
+
+    - name: Ensure service accounts organizational unit exists
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $ouName = {{ domain_account_service_accounts_ou | to_json }}
+          $baseDn = {{ domain_account_base_dn | to_json }}
+          $existing = Get-ADOrganizationalUnit -LDAPFilter "(ou=$ouName)" -SearchBase $baseDn -SearchScope OneLevel -ErrorAction SilentlyContinue
+
+          if ($existing) {
+            Write-Output 'Changed=False'
+            exit 0
+          }
+
+          New-ADOrganizationalUnit -Name $ouName -Path $baseDn -ProtectedFromAccidentalDeletion $true
+          Write-Output 'Changed=True'
+      register: domain_account_service_ou_result
+      changed_when: "'Changed=True' in domain_account_service_ou_result.output"
+
+    - name: Ensure Keycloak LDAP bind service account exists
+      no_log: true
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $username = {{ domain_account_keycloak_ldap_username | to_json }}
+          $password = {{ domain_account_keycloak_ldap_password | to_json }}
+          $baseDn = {{ domain_account_base_dn | to_json }}
+          $ouName = {{ domain_account_service_accounts_ou | to_json }}
+          $targetOuDn = "OU=$ouName,$baseDn"
+          $upn = "$username@myrobertson.net"
+          $displayName = 'Keycloak LDAP Bind'
+          $changed = $false
+
+          $user = Get-ADUser -LDAPFilter "(sAMAccountName=$username)" -Properties userPrincipalName,displayName,Enabled,PasswordNeverExpires -ErrorAction SilentlyContinue
+          if (-not $user) {
+            if (-not $password) {
+              throw "Service account $username does not exist and no password was supplied."
+            }
+
+            New-ADUser `
+              -SamAccountName $username `
+              -Name $displayName `
+              -DisplayName $displayName `
+              -UserPrincipalName $upn `
+              -Path $targetOuDn `
+              -AccountPassword (ConvertTo-SecureString $password -AsPlainText -Force) `
+              -Enabled $true `
+              -PasswordNeverExpires $true
+            $user = Get-ADUser -Identity $username -Properties userPrincipalName,displayName,Enabled,PasswordNeverExpires
+            $changed = $true
+          }
+
+          $replace = @{}
+          if ($user.userPrincipalName -ne $upn) {
+            $replace['userPrincipalName'] = $upn
+          }
+          if ($user.displayName -ne $displayName) {
+            $replace['displayName'] = $displayName
+          }
+          if ($replace.Count -gt 0) {
+            Set-ADUser -Identity $user -Replace $replace
+            $changed = $true
+          }
+          if (-not $user.Enabled) {
+            Enable-ADAccount -Identity $user
+            $changed = $true
+          }
+          if (-not $user.PasswordNeverExpires) {
+            Set-ADUser -Identity $user -PasswordNeverExpires $true
+            $changed = $true
+          }
+          if ($user.DistinguishedName -notlike "*$targetOuDn") {
+            Move-ADObject -Identity $user.DistinguishedName -TargetPath $targetOuDn
+            $changed = $true
+          }
+
+          Write-Output "Changed=$changed"
+      register: domain_account_keycloak_ldap_result
+      changed_when: "'Changed=True' in domain_account_keycloak_ldap_result.output"
+
+    - name: Delegate family password management to Keycloak LDAP bind account
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $principalName = {{ domain_account_delegate_password_principal | to_json }}
+          $ouName = {{ domain_account_delegate_password_ou | to_json }}
+          $baseDn = {{ domain_account_base_dn | to_json }}
+          $targetOuDn = "OU=$ouName,$baseDn"
+
+          $principal = Get-ADUser -Identity $principalName
+          $targetOu = Get-ADOrganizationalUnit -Identity $targetOuDn
+          $aclPath = "AD:\$($targetOu.DistinguishedName)"
+          $acl = Get-Acl -Path $aclPath
+          $sid = [System.Security.Principal.SecurityIdentifier]$principal.SID
+          $userClassGuid = [Guid]'bf967aba-0de6-11d0-a285-00aa003049e2'
+          $resetPasswordGuid = [Guid]'00299570-246d-11d0-a768-00aa006e0529'
+          $changePasswordGuid = [Guid]'ab721a53-1e2f-11d0-9819-00aa0040529b'
+          $schemaDn = (Get-ADRootDSE).schemaNamingContext
+          $pwdLastSetAttr = Get-ADObject -SearchBase $schemaDn -LDAPFilter '(lDAPDisplayName=pwdLastSet)' -Properties schemaIDGUID
+          $pwdLastSetGuid = New-Object Guid (,$pwdLastSetAttr.schemaIDGUID)
+
+          $changed = $false
+          $existingRules = $acl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier])
+
+          function Add-DelegatedRule {
+            param(
+              [System.DirectoryServices.ActiveDirectoryRights]$Rights,
+              [Guid]$ObjectType
+            )
+
+            $present = $false
+            foreach ($existingRule in $existingRules) {
+              if (
+                $existingRule.IdentityReference -eq $sid -and
+                $existingRule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
+                (($existingRule.ActiveDirectoryRights -band $Rights) -eq $Rights) -and
+                $existingRule.ObjectType -eq $ObjectType -and
+                $existingRule.InheritanceType -eq [System.DirectoryServices.ActiveDirectorySecurityInheritance]::Descendents -and
+                $existingRule.InheritedObjectType -eq $userClassGuid
+              ) {
+                $present = $true
+                break
+              }
+            }
+
+            if (-not $present) {
+              $rule = [System.DirectoryServices.ActiveDirectoryAccessRule]::new(
+                $sid,
+                $Rights,
+                [System.Security.AccessControl.AccessControlType]::Allow,
+                $ObjectType,
+                [System.DirectoryServices.ActiveDirectorySecurityInheritance]::Descendents,
+                $userClassGuid
+              )
+              $acl.AddAccessRule($rule)
+              $script:changed = $true
+            }
+          }
+
+          Add-DelegatedRule -Rights ([System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight) -ObjectType $resetPasswordGuid
+          Add-DelegatedRule -Rights ([System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight) -ObjectType $changePasswordGuid
+          Add-DelegatedRule -Rights ([System.DirectoryServices.ActiveDirectoryRights]::WriteProperty) -ObjectType $pwdLastSetGuid
+
+          if ($changed) {
+            Set-Acl -Path $aclPath -AclObject $acl
+          }
+
+          Write-Output "Changed=$changed"
+      register: domain_account_password_delegation_result
+      changed_when: "'Changed=True' in domain_account_password_delegation_result.output"
+
+    - name: Ensure family domain groups exist
+      loop: "{{ domain_account_default_groups }}"
+      loop_control:
+        label: "{{ item }}"
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $groupName = {{ item | to_json }}
+          $ouName = {{ domain_account_default_ou | to_json }}
+          $baseDn = {{ domain_account_base_dn | to_json }}
+          $ouDn = "OU=$ouName,$baseDn"
+          $existing = Get-ADGroup -LDAPFilter "(cn=$groupName)" -SearchBase $ouDn -SearchScope OneLevel -ErrorAction SilentlyContinue
+
+          if ($existing) {
+            Write-Output 'Changed=False'
+            exit 0
+          }
+
+          New-ADGroup `
+            -Name $groupName `
+            -SamAccountName $groupName `
+            -GroupScope Global `
+            -GroupCategory Security `
+            -Path $ouDn
+          Write-Output 'Changed=True'
+      register: domain_account_group_result
+      changed_when: "'Changed=True' in domain_account_group_result.output"
+
+    - name: Provision domain users
+      loop: "{{ domain_accounts }}"
+      loop_control:
+        label: "{{ item.user_principal_name }}"
+      no_log: true
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $account = @{
+            Username = {{ item.username | to_json }}
+            UserPrincipalName = {{ item.user_principal_name | to_json }}
+            Email = {{ item.email | to_json }}
+            GivenName = {{ item.given_name | default('') | to_json }}
+            Surname = {{ item.surname | default('') | to_json }}
+            DisplayName = {{ item.display_name | default(item.username) | to_json }}
+            Ou = {{ item.ou | default(domain_account_default_ou) | to_json }}
+            Enabled = [System.Convert]::ToBoolean({{ item.enabled | default(true) | string | lower | to_json }})
+            ChangePasswordAtLogon = [System.Convert]::ToBoolean({{ item.change_password_at_logon | default(true) | string | lower | to_json }})
+            Password = {{ item.password | default(domain_account_initial_password) | to_json }}
+            Groups = @({{ item.groups | default(domain_account_default_groups) | map('to_json') | join(', ') }})
+          }
+
+          $baseDn = {{ domain_account_base_dn | to_json }}
+          $moveExistingUsers = [System.Convert]::ToBoolean({{ domain_account_move_existing_users | string | lower | to_json }})
+          $targetOuDn = "OU=$($account.Ou),$baseDn"
+          $changed = $false
+
+          $user = Get-ADUser -LDAPFilter "(sAMAccountName=$($account.Username))" -Properties mail,userPrincipalName,givenName,sn,displayName,Enabled -ErrorAction SilentlyContinue
+
+          if (-not $user) {
+            if (-not $account.Password) {
+              throw "Account $($account.Username) does not exist and no initial password was supplied."
+            }
+
+            $newUserParams = @{
+              SamAccountName = $account.Username
+              Name = $account.DisplayName
+              DisplayName = $account.DisplayName
+              UserPrincipalName = $account.UserPrincipalName
+              EmailAddress = $account.Email
+              Path = $targetOuDn
+              AccountPassword = ConvertTo-SecureString $account.Password -AsPlainText -Force
+              Enabled = $account.Enabled
+              ChangePasswordAtLogon = $account.ChangePasswordAtLogon
+            }
+            if ($account.GivenName) {
+              $newUserParams['GivenName'] = $account.GivenName
+            }
+            if ($account.Surname) {
+              $newUserParams['Surname'] = $account.Surname
+            }
+
+            New-ADUser @newUserParams
+            $user = Get-ADUser -Identity $account.Username -Properties mail,userPrincipalName,givenName,sn,displayName,Enabled
+            $changed = $true
+          }
+
+          $replace = @{}
+          if ($user.mail -ne $account.Email) {
+            $replace['mail'] = $account.Email
+          }
+          if ($user.userPrincipalName -ne $account.UserPrincipalName) {
+            $replace['userPrincipalName'] = $account.UserPrincipalName
+          }
+          if ($account.GivenName -and $user.givenName -ne $account.GivenName) {
+            $replace['givenName'] = $account.GivenName
+          }
+          if ($account.Surname -and $user.sn -ne $account.Surname) {
+            $replace['sn'] = $account.Surname
+          }
+          if ($user.displayName -ne $account.DisplayName) {
+            $replace['displayName'] = $account.DisplayName
+          }
+          if ($replace.Count -gt 0) {
+            Set-ADUser -Identity $user -Replace $replace
+            $changed = $true
+          }
+
+          if ($user.Enabled -ne $account.Enabled) {
+            if ($account.Enabled) {
+              Enable-ADAccount -Identity $user
+            }
+            else {
+              Disable-ADAccount -Identity $user
+            }
+            $changed = $true
+          }
+
+          if ($moveExistingUsers -and $user.DistinguishedName -notlike "*$targetOuDn") {
+            Move-ADObject -Identity $user.DistinguishedName -TargetPath $targetOuDn
+            $user = Get-ADUser -Identity $account.Username -Properties mail,userPrincipalName,givenName,sn,displayName,Enabled
+            $changed = $true
+          }
+
+          foreach ($groupName in $account.Groups) {
+            $group = Get-ADGroup -LDAPFilter "(cn=$groupName)" -SearchBase $baseDn -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $group) {
+              throw "Group $groupName was not found under $baseDn."
+            }
+
+            $isMember = Get-ADGroupMember -Identity $group -Recursive |
+              Where-Object { $_.DistinguishedName -eq $user.DistinguishedName }
+
+            if (-not $isMember) {
+              Add-ADGroupMember -Identity $group -Members $user
+              $changed = $true
+            }
+          }
+
+          Write-Output "Changed=$changed"
+      register: domain_account_user_result
+      changed_when: "'Changed=True' in domain_account_user_result.output"

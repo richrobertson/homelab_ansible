@@ -11,6 +11,9 @@ The playbooks target the inventory group `synology_nas` and use host vars from `
 - `sync_drive_certificate.yml`: Syncs the cert-manager managed `drive.myrobertson.com` certificate to Kermit, assigns it to DSM Desktop Service and Synology Drive Server, and restarts the affected services.
 - `provision_nextcloud_nfs_share.yml`: Creates separate `nextcloud-data-stage` and `nextcloud-data-prod` Btrfs shared folders, keeps recycle bin disabled, verifies data checksumming is not disabled, and applies Kubernetes-worker-only NFS privileges.
 - `configure_nextcloud_data_protection.yml`: Configures Scooter Snapshot Replication plans for `nextcloud-data-prod` and `nextcloud-data-stage` to Kermit, enforces snapshot retention, and manages the existing Hyper Backup schedule and retention for backing up `nextcloud-data-prod` to Backblaze B2.
+- `configure_snapshot_retention.yml`: Idempotently reconciles the expected shared-folder Snapshot Replication retention policies on Scooter and Kermit without deleting snapshots or recreating replication plans.
+- `configure_media_snapshot_retention.yml`: Targeted helper for reconciling only the media-share Snapshot Replication retention policies, currently `radarr` and `plex`.
+- `configure_activebackup_retention.yml`: Idempotently reconciles Active Backup for Business task/template retention on Kermit, backing up the package databases before any required write.
 - `disable_snapshot_replication_worm_lock.yml`: Repair playbook for selected legacy Snapshot Replication jobs that fail with permission errors when DSM attempts WORM/locked-snapshot replication. It preserves the daily schedule and disables only the replication policy's WORM lock flag before triggering a fresh sync.
 - `discover_orphaned_luns.yml`: Lists likely orphaned LUN UUIDs using mapping heuristics.
 - `cleanup_orphaned_luns.yml`: Deletes explicitly provided orphan LUN UUIDs.
@@ -50,6 +53,47 @@ SMTP_PASS="$(vault kv get -field=password -mount=secret mailu/prod/accounts/nas-
 ```
 
 The notification sender account is `nas-notifications@myrobertson.net`, with its password stored at `secret/mailu/prod/accounts/nas-notifications`. The playbook defaults the SMTP endpoint to `mail.myrobertson.net:587` with DSM's SSL/TLS flag enabled and preserves the current notification recipients, `rich@myrobertson.com` and `roy@myrobertson.com`.
+
+## Snapshot and backup retention
+
+Reconcile shared-folder Snapshot Replication retention policies on Scooter and
+Kermit:
+
+```bash
+source ~/.bash_profile
+SYNO_USER="$(vault kv get -field=username -mount=secret synology/dsm-admin/local-ssh-account)"
+SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local-ssh-account)"
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 .venv/bin/ansible-playbook \
+  ansible/synology/configure_snapshot_retention.yml \
+  -i inventory/environments/production.ini \
+  -e "ansible_user=${SYNO_USER}" \
+  -e "ansible_password=${SYNO_PASS}" \
+  -e "ansible_become_password=${SYNO_PASS}"
+```
+
+This playbook manages retention policy values only. It preserves the existing
+Snapshot Replication topology, does not delete snapshots, and reports `changed`
+only when a share's retention policy drifts.
+
+For a narrow media-only update, run `configure_media_snapshot_retention.yml`
+with the same Vault-backed variables.
+
+Reconcile Active Backup for Business retention on Kermit:
+
+```bash
+source ~/.bash_profile
+SYNO_USER="$(vault kv get -field=username -mount=secret synology/dsm-admin/local-ssh-account)"
+SYNO_PASS="$(vault kv get -field=password -mount=secret synology/dsm-admin/local-ssh-account)"
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 .venv/bin/ansible-playbook \
+  ansible/synology/configure_activebackup_retention.yml \
+  -i inventory/environments/production.ini \
+  -e "ansible_user=${SYNO_USER}" \
+  -e "ansible_password=${SYNO_PASS}" \
+  -e "ansible_become_password=${SYNO_PASS}"
+```
+
+The Active Backup playbook first checks for drift and skips database writes when
+the configured policies already match.
 
 ## Synology OIDC SSO
 
