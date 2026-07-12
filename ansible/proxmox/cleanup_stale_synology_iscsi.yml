@@ -1,0 +1,82 @@
+---
+- name: Remove an unused stale Synology iSCSI target from Proxmox
+  hosts: "{{ proxmox_stale_iscsi_hosts | default('pve4.myrobertson.net:pve5.myrobertson.net') }}"
+  gather_facts: false
+  serial: 1
+
+  vars:
+    proxmox_stale_iscsi_portal: 192.168.1.215:3260
+    proxmox_stale_iscsi_iqn: iqn.2000-01.com.synology:scooter.Target-1.ea061292341
+
+  tasks:
+    - name: Prove the stale target is unused before removal
+      ansible.builtin.raw: |
+        set -eu
+        portal={{ proxmox_stale_iscsi_portal | quote }}
+        iqn={{ proxmox_stale_iscsi_iqn | quote }}
+
+        if ! iscsiadm -m node 2>/dev/null | grep -Fq "${portal},1 ${iqn}"; then
+          printf 'safe=1 node_present=0\n'
+          exit 0
+        fi
+
+        if grep -RqsF "${iqn}" \
+          /etc/pve/storage.cfg /etc/pve/qemu-server /etc/pve/lxc \
+          /etc/fstab /etc/systemd/system; then
+          echo 'Unsafe: stale IQN is still referenced by configuration' >&2
+          exit 1
+        fi
+
+        links="$(find /dev/disk/by-path -maxdepth 1 -type l \
+          -name "ip-${portal}-iscsi-${iqn}-lun-*" -print 2>/dev/null || true)"
+        for link in ${links}; do
+          device="$(readlink -f "${link}" || true)"
+          [ -n "${device}" ] || continue
+          if findmnt -rn -S "${device}" | grep -q .; then
+            echo "Unsafe: ${device} is mounted" >&2
+            exit 1
+          fi
+          block="$(lsblk -ndo PKNAME "${device}" 2>/dev/null || true)"
+          [ -n "${block}" ] || block="$(basename "${device}")"
+          if [ -d "/sys/class/block/${block}/holders" ] &&
+             find "/sys/class/block/${block}/holders" -mindepth 1 -maxdepth 1 | grep -q .; then
+            echo "Unsafe: /dev/${block} has active holders" >&2
+            exit 1
+          fi
+          if pvs --noheadings -o pv_name 2>/dev/null | grep -Fq "/dev/${block}"; then
+            echo "Unsafe: /dev/${block} is an LVM physical volume" >&2
+            exit 1
+          fi
+        done
+
+        printf 'safe=1 node_present=1\n'
+      changed_when: false
+      register: proxmox_stale_iscsi_preflight
+
+    - name: Log out and delete the unused stale target record
+      ansible.builtin.raw: |
+        set -eu
+        portal={{ proxmox_stale_iscsi_portal | quote }}
+        iqn={{ proxmox_stale_iscsi_iqn | quote }}
+        if iscsiadm -m node 2>/dev/null | grep -Fq "${portal},1 ${iqn}"; then
+          timeout 20 iscsiadm -m node -T "${iqn}" -p "${portal}" --logout >/dev/null 2>&1 || true
+          iscsiadm -m node -T "${iqn}" -p "${portal}" --op delete
+          udevadm settle --timeout=20 || true
+          printf 'removed=1\n'
+        else
+          printf 'removed=0\n'
+        fi
+      register: proxmox_stale_iscsi_cleanup
+      changed_when: "'removed=1' in proxmox_stale_iscsi_cleanup.stdout"
+
+    - name: Verify the stale target and reconnect session are absent
+      ansible.builtin.raw: |
+        set -eu
+        portal={{ proxmox_stale_iscsi_portal | quote }}
+        iqn={{ proxmox_stale_iscsi_iqn | quote }}
+        ! iscsiadm -m node 2>/dev/null | grep -Fq "${portal},1 ${iqn}"
+        ! iscsiadm -m session 2>/dev/null | grep -Fq "${portal},1 ${iqn}"
+        ! find /dev/disk/by-path -maxdepth 1 -type l \
+          -name "ip-${portal}-iscsi-${iqn}-lun-*" -print 2>/dev/null | grep -q .
+        printf 'verified=1\n'
+      changed_when: false

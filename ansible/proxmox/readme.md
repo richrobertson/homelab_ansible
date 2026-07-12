@@ -19,6 +19,7 @@ This directory contains playbooks, roles, and templates for managing Proxmox clu
 - `pbs_config_export_to_vault.yml`: archive PBS configuration into Vault for disaster recovery
 - `pbs_config_restore_from_vault.yml`: stage or apply a PBS configuration archive from Vault onto a replacement PBS VM
 - `proxmox_transport_metrics.yml`: export Proxmox migration, replication, backup storage route, and Ceph transport metrics through node-exporter textfile collection
+- `cleanup_stale_synology_iscsi.yml`: safely remove an unused, reconnecting Synology iSCSI target from Proxmox initiators after proving no mount, holder, LVM, VM, container, or storage configuration references it
 - `pbs_guest_agent_freeze_audit.yml`: audit PBS-backed QEMU VMs for Proxmox guest-agent enablement, guest-agent responsiveness, and filesystem freeze/thaw readiness
 - `configure_authelia_sso.yml`: seed Proxmox/Authelia OIDC secrets in Vault and configure the Proxmox OpenID Connect realm for Authelia SSO
 - `configure_pbs_authelia_sso.yml`: seed PBS/Authelia OIDC secrets in Vault and configure the Proxmox Backup Server OpenID Connect realm for Authelia SSO
@@ -49,6 +50,7 @@ ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_co
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_config_restore_from_vault.yml -e pbs_config_restore_hosts=pbs-restore.myrobertson.net
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/pbs_guest_agent_freeze_audit.yml
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/proxmox_transport_metrics.yml
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/cleanup_stale_synology_iscsi.yml
 VAULT_ADDR=https://vault.myrobertson.net:8200 VAULT_TOKEN=<token> ansible-playbook -i inventory/environments/production.ini ansible/proxmox/configure_authelia_sso.yml
 VAULT_ADDR=https://vault.myrobertson.net:8200 VAULT_TOKEN=<token> ansible-playbook -i inventory/environments/production.ini ansible/proxmox/configure_pbs_authelia_sso.yml
 ```
