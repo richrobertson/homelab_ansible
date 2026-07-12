@@ -33,6 +33,10 @@
     synology_activebackup_agent_installer: C:\Windows\Temp\Synology-Active-Backup-Agent-3.2.0-5053-x64.msi
     synology_activebackup_agent_service: Synology Active Backup for Business Service
     synology_activebackup_remove_installer: true
+    # Recovery switch for an installed agent whose first enrollment failed.
+    # Keep false for normal idempotent runs; set true only to remove and
+    # reinstall the agent so the MSI enrollment action runs again.
+    synology_activebackup_force_reenroll: false
 
   tasks:
     - name: Validate enrollment inputs
@@ -74,6 +78,12 @@
         timeout: 15
       tags: [preflight]
 
+    - name: Remove the agent before forced reenrollment
+      ansible.windows.win_package:
+        product_id: "{{ synology_activebackup_agent_product_id }}"
+        state: absent
+      when: synology_activebackup_force_reenroll | bool
+
     - name: Download the pinned Synology agent MSI
       ansible.windows.win_get_url:
         url: "{{ synology_activebackup_agent_url }}"
@@ -110,6 +120,41 @@
         name: "{{ synology_activebackup_agent_service }}"
         start_mode: auto
         state: started
+
+    - name: Confirm the MSI enrollment completed successfully
+      ansible.windows.win_powershell:
+        script: |
+          $log = 'C:\ProgramData\ActiveBackupforBusinessAgent\log\log.txt'
+          if (-not (Test-Path $log)) {
+              throw 'Active Backup enrollment log is missing'
+          }
+
+          $lines = Get-Content $log
+          $confirmLine = -1
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -match 'send request.*"action": "confirm_auth"') {
+                  $confirmLine = $i
+              }
+          }
+          if ($confirmLine -lt 0) {
+              throw 'The agent did not attempt to confirm enrollment'
+          }
+
+          $endLine = [Math]::Min($confirmLine + 20, $lines.Count - 1)
+          $response = $lines[$confirmLine..$endLine] -join "`n"
+          if ($response -match 'Auth failed' -or $response -match '"error":') {
+              throw 'Kermit rejected Active Backup enrollment; inspect the NAS task template and agent log'
+          }
+          if ($response -notmatch 'recv response') {
+              throw 'The agent did not receive an enrollment confirmation from Kermit'
+          }
+
+          [pscustomobject]@{
+              ComputerName = $env:COMPUTERNAME
+              Enrollment = 'confirmed'
+          }
+      changed_when: false
+      when: synology_activebackup_install.changed | default(false)
 
     - name: Verify installed agent version
       ansible.windows.win_powershell:

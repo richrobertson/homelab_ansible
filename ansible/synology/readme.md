@@ -114,8 +114,10 @@ Prerequisites:
 - The Vault token must read `secret/windows/domain/ldap` and
   `secret/synology/dsm-admin/ad-service-account`.
 - The Windows hosts must reach `kermit.myrobertson.net:5510`.
-- Kermit's default Active Backup template must be enabled so newly connected
-  devices receive a backup task.
+- Kermit's default template for the target device type must have a valid
+  destination. Windows Server enrollments use the Server template, not the PC
+  template. A blank Server-template `share_name` causes agent error 4111
+  (`Create Task Failed due to invalid parameters`).
 
 Load the four required values into short-lived environment variables. This uses
 the Vault CLI's trusted TLS path and keeps secrets out of command arguments and
@@ -162,6 +164,21 @@ OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 \
 unset SYN_ABB_WINDOWS_USERNAME SYN_ABB_WINDOWS_PASSWORD \
   SYN_ABB_ENROLLMENT_USERNAME SYN_ABB_ENROLLMENT_PASSWORD
 ```
+
+If installation succeeded but enrollment failed, correct the Kermit task
+template first and explicitly request one remove/reinstall cycle:
+
+```bash
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 \
+  .venv/bin/ansible-playbook \
+  ansible/synology/configure_windows_activebackup_agent.yml \
+  -i inventory/environments/production.ini \
+  -e synology_activebackup_force_reenroll=true
+```
+
+Do not leave `synology_activebackup_force_reenroll` enabled for routine runs.
+The playbook validates the latest MSI `confirm_auth` response and fails the host
+when Kermit rejects automatic task creation.
 
 After enrollment, verify both device names and their first successful recovery
 points in Kermit before updating disaster-recovery coverage. Re-run
