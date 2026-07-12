@@ -1,0 +1,162 @@
+---
+- name: Install and enroll Synology Active Backup agents on Windows servers
+  hosts: >-
+    {{ synology_activebackup_windows_hosts |
+       default('dc1.myrobertson.net:dns01.myrobertson.net') }}
+  gather_facts: false
+  serial: 1
+
+  vars:
+    synology_activebackup_windows_username: >-
+      {{ lookup('ansible.builtin.env', 'SYN_ABB_WINDOWS_USERNAME') }}
+    synology_activebackup_windows_password: >-
+      {{ lookup('ansible.builtin.env', 'SYN_ABB_WINDOWS_PASSWORD') }}
+    synology_activebackup_enrollment_username: >-
+      {{ lookup('ansible.builtin.env', 'SYN_ABB_ENROLLMENT_USERNAME') }}
+    synology_activebackup_enrollment_password: >-
+      {{ lookup('ansible.builtin.env', 'SYN_ABB_ENROLLMENT_PASSWORD') }}
+
+    ansible_user: "{{ synology_activebackup_windows_username }}"
+    ansible_password: "{{ synology_activebackup_windows_password }}"
+
+    synology_activebackup_server_address: kermit.myrobertson.net
+    synology_activebackup_server_port: 5510
+    # Kermit's internal ABB endpoint is reachable only by its .net name and
+    # currently cannot be validated through the public .com certificate path.
+    synology_activebackup_allow_untrusted_certificate: true
+
+    synology_activebackup_agent_version: 3.2.5053
+    synology_activebackup_agent_product_id: '{FB4084F8-8EF5-42C8-BCAE-E28DC96FC7D9}'
+    synology_activebackup_agent_url: >-
+      https://global.synologydownload.com/download/Utility/ActiveBackupBusinessAgent/3.2.0-5053/Windows/x86_64/Synology%20Active%20Backup%20for%20Business%20Agent-3.2.0-5053-x64.msi
+    synology_activebackup_agent_checksum: d9d670ce5342f96357a0e9fb0ff2b222e3d984971fd2ea4d33f47e9b047b5ec1
+    synology_activebackup_agent_installer: C:\Windows\Temp\Synology-Active-Backup-Agent-3.2.0-5053-x64.msi
+    synology_activebackup_agent_service: Synology Active Backup for Business Service
+    synology_activebackup_remove_installer: true
+
+  tasks:
+    - name: Validate enrollment inputs
+      ansible.builtin.assert:
+        that:
+          - synology_activebackup_server_address | length > 0
+          - synology_activebackup_agent_url | length > 0
+          - synology_activebackup_agent_checksum | length == 64
+          - synology_activebackup_windows_username | length > 0
+          - synology_activebackup_windows_password | length > 0
+          - synology_activebackup_enrollment_username | length > 0
+          - synology_activebackup_enrollment_password | length > 0
+        fail_msg: >-
+          Populate the SYN_ABB_WINDOWS_* and SYN_ABB_ENROLLMENT_* environment
+          variables from Vault before running this playbook.
+      no_log: true
+      tags: [preflight]
+
+    - name: Confirm the target is Windows Server
+      ansible.windows.win_powershell:
+        script: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          if ($os.ProductType -eq 1) {
+              throw "$env:COMPUTERNAME is a workstation, not Windows Server"
+          }
+          [pscustomobject]@{
+              ComputerName = $env:COMPUTERNAME
+              Caption = $os.Caption
+              Version = $os.Version
+          }
+      changed_when: false
+      tags: [preflight]
+
+    - name: Verify the Active Backup endpoint is reachable
+      ansible.windows.win_wait_for:
+        host: "{{ synology_activebackup_server_address }}"
+        port: "{{ synology_activebackup_server_port }}"
+        state: started
+        timeout: 15
+      tags: [preflight]
+
+    - name: Download the pinned Synology agent MSI
+      ansible.windows.win_get_url:
+        url: "{{ synology_activebackup_agent_url }}"
+        dest: "{{ synology_activebackup_agent_installer }}"
+        checksum: "{{ synology_activebackup_agent_checksum }}"
+        checksum_algorithm: sha256
+
+    - name: Install and enroll the Synology Active Backup agent
+      ansible.windows.win_package:
+        path: "{{ synology_activebackup_agent_installer }}"
+        product_id: "{{ synology_activebackup_agent_product_id }}"
+        state: present
+        arguments:
+          - /qn
+          - /norestart
+          - REBOOT=ReallySuppress
+          - IAgree=Yes
+          - LaunchApp=0
+          - NO_SHORTCUT=1
+          - "ADDRESS={{ synology_activebackup_server_address }}"
+          - "USERNAME={{ synology_activebackup_enrollment_username }}"
+          - "PASSWORD={{ synology_activebackup_enrollment_password }}"
+          - >-
+            ALLOW_UNTRUST={{
+              synology_activebackup_allow_untrusted_certificate |
+              bool | ternary('1', '0') }}
+          # Prevent Windows Installer logs from recording password properties.
+          - MsiHiddenProperties=PASSWORD;PROXY_PASSWORD
+      register: synology_activebackup_install
+      no_log: true
+
+    - name: Ensure the Active Backup service is enabled and running
+      ansible.windows.win_service:
+        name: "{{ synology_activebackup_agent_service }}"
+        start_mode: auto
+        state: started
+
+    - name: Verify installed agent version
+      ansible.windows.win_powershell:
+        script: |
+          $paths = @(
+            'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+            'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+          )
+          $agent = Get-ItemProperty $paths -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.DisplayName -eq 'Synology Active Backup for Business Agent'
+            } |
+            Select-Object -First 1
+
+          if (-not $agent) {
+              throw 'Synology Active Backup agent is not registered as installed'
+          }
+          if ($agent.DisplayVersion -ne '{{ synology_activebackup_agent_version }}') {
+              throw "Unexpected agent version $($agent.DisplayVersion)"
+          }
+
+          $service = Get-Service -Name '{{ synology_activebackup_agent_service }}'
+          [pscustomobject]@{
+              ComputerName = $env:COMPUTERNAME
+              Version = $agent.DisplayVersion
+              ServiceStatus = [string]$service.Status
+              RebootRequired = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+          }
+      changed_when: false
+      register: synology_activebackup_agent_status
+
+    - name: Remove the downloaded MSI
+      ansible.windows.win_file:
+        path: "{{ synology_activebackup_agent_installer }}"
+        state: absent
+      when: synology_activebackup_remove_installer | bool
+
+    - name: Report agent installation result
+      ansible.builtin.debug:
+        msg:
+          - "Active Backup agent {{ synology_activebackup_agent_version }} is running on {{ inventory_hostname }}."
+          - >-
+            Installer changed host: {{
+              synology_activebackup_install.changed | default(false) }}
+          - >-
+            Reboot requested by installer: {{
+              synology_activebackup_install.reboot_required | default(false) }}
+          - >-
+            Confirm that Kermit created a device and backup task before treating
+            this host as protected.

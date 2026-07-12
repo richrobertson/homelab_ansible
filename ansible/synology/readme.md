@@ -14,6 +14,7 @@ The playbooks target the inventory group `synology_nas` and use host vars from `
 - `configure_snapshot_retention.yml`: Idempotently reconciles the expected shared-folder Snapshot Replication retention policies on Scooter and Kermit without deleting snapshots or recreating replication plans.
 - `configure_media_snapshot_retention.yml`: Targeted helper for reconciling only the media-share Snapshot Replication retention policies, currently `radarr` and `plex`.
 - `configure_activebackup_retention.yml`: Idempotently reconciles Active Backup for Business task/template retention on Kermit, backing up the package databases before any required write.
+- `configure_windows_activebackup_agent.yml`: Installs and silently enrolls the pinned Synology Active Backup Windows agent on `dc1` and `dns01` using Vault-backed credentials and MSI public properties.
 - `disable_snapshot_replication_worm_lock.yml`: Repair playbook for selected legacy Snapshot Replication jobs that fail with permission errors when DSM attempts WORM/locked-snapshot replication. It preserves the daily schedule and disables only the replication policy's WORM lock flag before triggering a fresh sync.
 - `discover_orphaned_luns.yml`: Lists likely orphaned LUN UUIDs using mapping heuristics.
 - `cleanup_orphaned_luns.yml`: Deletes explicitly provided orphan LUN UUIDs.
@@ -94,6 +95,78 @@ OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 .venv/bin/ansible-playbo
 
 The Active Backup playbook first checks for drift and skips database writes when
 the configured policies already match.
+
+### Windows Active Backup agent enrollment
+
+Synology's Windows MSI exposes public properties for unattended enrollment, so
+the playbook does not use a plaintext answer file. It passes `ADDRESS`,
+`USERNAME`, `PASSWORD`, and `ALLOW_UNTRUST` directly to the MSI with Ansible
+`no_log` enabled and `MsiHiddenProperties` set for password fields.
+
+The playbook is pinned to the official Synology agent `3.2.5053` MSI and its
+SHA-256 checksum. It targets `dc1.myrobertson.net` and
+`dns01.myrobertson.net` by default. Override
+`synology_activebackup_windows_hosts` to select a different inventory pattern.
+
+Prerequisites:
+
+- Run `vault login` locally.
+- The Vault token must read `secret/windows/domain/ldap` and
+  `secret/synology/dsm-admin/ad-service-account`.
+- The Windows hosts must reach `kermit.myrobertson.net:5510`.
+- Kermit's default Active Backup template must be enabled so newly connected
+  devices receive a backup task.
+
+Load the four required values into short-lived environment variables. This uses
+the Vault CLI's trusted TLS path and keeps secrets out of command arguments and
+files:
+
+```bash
+export VAULT_ADDR=https://vault.myrobertson.net:8200
+export SYN_ABB_WINDOWS_USERNAME="$(vault read -format=json secret/data/windows/domain/ldap | jq -r '.data.data.username')"
+export SYN_ABB_WINDOWS_PASSWORD="$(vault read -format=json secret/data/windows/domain/ldap | jq -r '.data.data.password')"
+export SYN_ABB_ENROLLMENT_USERNAME="$(vault read -format=json secret/data/synology/dsm-admin/ad-service-account | jq -r '.data.data.username')"
+export SYN_ABB_ENROLLMENT_PASSWORD="$(vault read -format=json secret/data/synology/dsm-admin/ad-service-account | jq -r '.data.data.password')"
+```
+
+Syntax check:
+
+```bash
+export VAULT_ADDR=https://vault.myrobertson.net:8200
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 \
+  .venv/bin/ansible-playbook \
+  ansible/synology/configure_windows_activebackup_agent.yml \
+  -i inventory/environments/production.ini \
+  --syntax-check
+```
+
+Run the non-mutating host and connectivity preflight:
+
+```bash
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 \
+  .venv/bin/ansible-playbook \
+  ansible/synology/configure_windows_activebackup_agent.yml \
+  -i inventory/environments/production.ini \
+  --tags preflight
+```
+
+Install and enroll serially:
+
+```bash
+export VAULT_ADDR=https://vault.myrobertson.net:8200
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 \
+  .venv/bin/ansible-playbook \
+  ansible/synology/configure_windows_activebackup_agent.yml \
+  -i inventory/environments/production.ini
+
+unset SYN_ABB_WINDOWS_USERNAME SYN_ABB_WINDOWS_PASSWORD \
+  SYN_ABB_ENROLLMENT_USERNAME SYN_ABB_ENROLLMENT_PASSWORD
+```
+
+After enrollment, verify both device names and their first successful recovery
+points in Kermit before updating disaster-recovery coverage. Re-run
+`configure_activebackup_retention.yml` after recording the new task IDs if the
+new tasks do not inherit the active template policy.
 
 ## Synology OIDC SSO
 
