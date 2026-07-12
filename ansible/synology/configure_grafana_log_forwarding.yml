@@ -1,0 +1,89 @@
+---
+- name: Forward Synology logs and backup health to Grafana Loki
+  hosts: "{{ synology_observability_hosts | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+  become: true
+  become_method: sudo
+
+  vars:
+    synology_loki_syslog_host: 10.31.0.74
+    synology_loki_syslog_port: 514
+    synology_observability_files:
+      - path: /etc/syslog-ng/patterndb.d/zz-grafana-loki.conf
+        mode: "0644"
+        content: "{{ lookup('template', 'templates/grafana-loki-syslog.conf') }}"
+      - path: /usr/local/sbin/synology-observability-logger
+        mode: "0755"
+        content: "{{ lookup('template', 'templates/synology-observability-logger.sh') }}"
+      - path: /etc/systemd/system/synology-observability.service
+        mode: "0644"
+        content: "{{ lookup('template', 'templates/synology-observability.service') }}"
+      - path: /etc/systemd/system/synology-observability.timer
+        mode: "0644"
+        content: "{{ lookup('template', 'templates/synology-observability.timer') }}"
+
+  tasks:
+    - name: Verify required DSM commands are available
+      ansible.builtin.raw: >-
+        command -v syslog-ng >/dev/null &&
+        command -v logger >/dev/null &&
+        command -v jq >/dev/null &&
+        command -v sqlite3 >/dev/null &&
+        command -v systemctl >/dev/null
+      changed_when: false
+
+    - name: Install Synology observability configuration
+      ansible.builtin.raw: |
+        set -eu
+        target={{ item.path | quote }}
+        tmp="${target}.ansible.$$"
+        umask 022
+        mkdir -p "$(dirname "${target}")"
+        printf '%s' {{ item.content | b64encode | quote }} | base64 -d > "${tmp}"
+        chmod {{ item.mode | quote }} "${tmp}"
+        if [ -f "${target}" ] && cmp -s "${tmp}" "${target}"; then
+          rm -f "${tmp}"
+          printf 'installed=0\n'
+        else
+          mv -f "${tmp}" "${target}"
+          printf 'installed=1\n'
+        fi
+      loop: "{{ synology_observability_files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: synology_observability_install
+      changed_when: "'installed=1' in synology_observability_install.stdout"
+
+    - name: Validate complete syslog-ng configuration
+      ansible.builtin.raw: syslog-ng -s -f /etc/syslog-ng/syslog-ng.conf
+      changed_when: false
+
+    - name: Reload systemd and enable health collector timer
+      ansible.builtin.raw: |
+        set -eu
+        systemctl daemon-reload
+        systemctl enable synology-observability.timer >/dev/null
+        systemctl start synology-observability.timer
+      changed_when: false
+
+    - name: Restart syslog-ng with validated forwarding configuration
+      ansible.builtin.raw: systemctl restart syslog-ng
+      changed_when: false
+
+    - name: Emit initial backup health events
+      ansible.builtin.raw: systemctl start synology-observability.service
+      changed_when: false
+
+    - name: Verify forwarding and collector services
+      ansible.builtin.raw: |
+        set -eu
+        test "$(systemctl is-active syslog-ng)" = active
+        test "$(systemctl is-active synology-observability.timer)" = active
+        systemctl show synology-observability.service \
+          --property=Result --property=ExecMainStatus --no-pager
+      changed_when: false
+      register: synology_observability_status
+
+    - name: Summarize Synology observability status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ synology_observability_status.stdout_lines }}"

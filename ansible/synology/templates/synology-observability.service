@@ -1,0 +1,7 @@
+[Unit]
+Description=Emit Synology backup health events to syslog
+After=syslog-ng.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/synology-observability-logger
