@@ -2,6 +2,10 @@
 
 This directory contains playbooks and roles for managing domain services for myrobertson.net and related infrastructure.
 
+Recovery of Active Directory, DNS, DHCP, and Windows member servers is
+documented in
+[the Windows domain disaster-recovery runbook](../../runbooks/domain/windows-domain-disaster-recovery.md).
+
 ## Example Playbook: domain.yml
 
 ```yaml

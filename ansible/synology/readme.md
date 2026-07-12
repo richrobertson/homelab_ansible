@@ -3,6 +3,10 @@
 This folder includes playbooks to discover and clean likely orphaned iSCSI LUNs on Synology NAS 192.168.1.215.
 The playbooks target the inventory group `synology_nas` and use host vars from `inventory/environments/synology.ini`.
 
+Disaster recovery for Kermit and Scooter—including Snapshot Replication,
+Hyper Backup, and Active Backup for Business—is documented in
+[the Synology disaster-recovery runbook](../../runbooks/synology/synology-disaster-recovery.md).
+
 ## Playbooks
 
 - `preflight_nas_connectivity.yml`: Verifies SSH reachability, API auth, and LUN endpoint shape.
