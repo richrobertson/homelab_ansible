@@ -1,0 +1,112 @@
+---
+- name: Reload upgraded Ceph daemons without taking the cluster down
+  hosts: "{{ ceph_admin_host | default('pve3.myrobertson.net') }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  force_handlers: true
+
+  vars:
+    ceph_restart_hosts:
+      - pve3.myrobertson.net
+      - pve5.myrobertson.net
+      - pve4.myrobertson.net
+
+  tasks:
+    - name: Require a healthy cluster or version-skew-only warning
+      ansible.builtin.shell: |
+        set -o pipefail
+        ceph health --format json |
+          jq -e '(.status == "HEALTH_OK") or ((.checks | keys) == ["DAEMON_OLD_VERSION"])'
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Prevent OSDs from being marked out during rolling restarts
+      ansible.builtin.command: ceph osd set noout
+      register: ceph_noout_set
+      changed_when: "'noout is set' in ceph_noout_set.stderr"
+      notify: Clear Ceph noout flag
+
+    - name: Restart one host's Ceph daemons and wait for recovery
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        host="$(hostname -s)"
+        expected_quorum="$(ceph quorum_status --format json | jq '.quorum_names | length')"
+        expected_osds="$(ceph osd stat --format json | jq '.num_osds')"
+        expected_active_mds="$(ceph fs status --format json | jq '[.mdsmap[] | select(.state == "active")] | length')"
+
+        wait_for() {
+          description="$1"
+          command="$2"
+          for _ in $(seq 1 150); do
+            if eval "$command"; then
+              return 0
+            fi
+            sleep 2
+          done
+          echo "Timed out waiting for ${description}" >&2
+          return 1
+        }
+
+        systemctl restart "ceph-mgr@${host}.service"
+        wait_for "Ceph manager availability" \
+          "ceph mgr stat --format json | jq -e '.available == true' >/dev/null"
+
+        systemctl restart "ceph-mon@${host}.service"
+        wait_for "monitor quorum" \
+          "test \$(ceph quorum_status --format json | jq '.quorum_names | length') -eq ${expected_quorum}"
+
+        while read -r unit; do
+          [ -n "$unit" ] || continue
+          systemctl restart "$unit"
+          wait_for "OSD and placement-group recovery after ${unit}" \
+            "ceph osd stat --format json | jq -e '.num_osds == ${expected_osds} and .num_up_osds == ${expected_osds} and .num_in_osds == ${expected_osds}' >/dev/null && ceph pg stat --format json | jq -e '.pg_summary.num_pg_by_state | all(.name | contains(\"active+clean\"))' >/dev/null"
+        done < <(systemctl list-units --type=service --state=running --no-legend 'ceph-osd@*.service' | awk '{print $1}')
+
+        while read -r unit; do
+          [ -n "$unit" ] || continue
+          systemctl restart "$unit"
+          wait_for "CephFS MDS recovery after ${unit}" \
+            "test \$(ceph fs status --format json | jq '[.mdsmap[] | select(.state == \"active\")] | length') -eq ${expected_active_mds} && test \$(ceph fs status --format json | jq '[.mdsmap[] | select(.state == \"standby\")] | length') -ge 1"
+        done < <(systemctl list-units --type=service --state=running --no-legend 'ceph-mds@*.service' | awk '{print $1}')
+
+        if systemctl list-unit-files --type=service --no-legend radosgw.service | grep -q '^radosgw.service'; then
+          systemctl restart radosgw.service
+          wait_for "RADOS Gateway service" "systemctl is-active --quiet radosgw.service"
+        fi
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ item }}"
+      loop: "{{ ceph_restart_hosts }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Clear the temporary noout flag before final validation
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for all runtime daemons to report one version and HEALTH_OK
+      ansible.builtin.shell: |
+        set -o pipefail
+        for _ in $(seq 1 150); do
+          if [ "$(ceph versions --format json | jq '.overall | keys | length')" -eq 1 ] && \
+             [ "$(ceph health --format json | jq -r '.status')" = "HEALTH_OK" ]; then
+            ceph versions
+            ceph status
+            exit 0
+          fi
+          sleep 2
+        done
+        ceph versions
+        ceph health detail
+        exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+  handlers:
+    - name: Clear Ceph noout flag
+      ansible.builtin.command: ceph osd unset noout
+      register: ceph_noout_unset
+      changed_when: "'noout is unset' in ceph_noout_unset.stderr"

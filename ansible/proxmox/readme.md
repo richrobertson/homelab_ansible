@@ -39,6 +39,7 @@ ansible-playbook -i inventory/proxmox.yml ansible/proxmox/ceph_admin_portal.yml 
 ansible-playbook -i inventory/proxmox.yml ansible/proxmox/ceph_object_gw.yml
 ansible-playbook -i inventory/proxmox.yml ansible/proxmox/rolling_restart.yml
 ansible-playbook -i inventory/proxmox.yml ansible/proxmox/regular_maintenance.yml
+ansible-playbook -i inventory/environments/production.ini ansible/proxmox/ceph_daemon_rolling_restart.yml
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/cpu_thermal_policy.yml --limit proxmox_nodes
 ansible-playbook -i inventory/proxmox.yml ansible/proxmox/intel_vpro.yml
 ansible-playbook -i inventory/environments/production.ini ansible/proxmox/provision_certificates.yml --limit proxmox_cert_nodes
