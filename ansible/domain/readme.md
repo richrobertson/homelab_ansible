@@ -110,6 +110,36 @@ dc_w32time_special_poll_interval: 900
 dc_w32time_announce_flags: 5
 ```
 
+## Windows System Volume Headroom for VSS
+
+Use `reclaim_windows_system_volume.yml` when a Windows server has less than
+5 GiB free on `C:` and stale Windows Update downloads are preventing VSS or
+Active Backup for Business snapshots. The playbook:
+
+- measures both the active and interrupted-run Windows Update cache trees;
+- cleans the cache only when free space is below the configured threshold;
+- restores Windows Update services to their original running state; and
+- requires at least 5 GiB free and healthy VSS writers after maintenance.
+
+Load the existing Windows management credentials from Vault and run it against
+DC1 with:
+
+```sh
+export VAULT_ADDR=https://vault.myrobertson.net:8200
+export SYN_ABB_WINDOWS_USERNAME="$(vault read -format=json secret/data/windows/domain/ldap | jq -r '.data.data.username')"
+export SYN_ABB_WINDOWS_PASSWORD="$(vault read -format=json secret/data/windows/domain/ldap | jq -r '.data.data.password')"
+
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 \
+  .venv/bin/ansible-playbook \
+  -i inventory/environments/production.ini \
+  ansible/domain/reclaim_windows_system_volume.yml
+```
+
+Override `windows_system_volume_hosts` or
+`windows_system_minimum_free_bytes` for another host or threshold. The cleanup
+does not uninstall applied updates; Windows Update downloads missing packages
+again if they are still required.
+
 ## Domain Account Provisioning
 
 Use `provision_domain_accounts.yml` to create or update family domain accounts in Active Directory.

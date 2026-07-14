@@ -1,0 +1,182 @@
+---
+- name: Reclaim Windows system-volume headroom for VSS backups
+  hosts: "{{ windows_system_volume_hosts | default('dc1.myrobertson.net') }}"
+  gather_facts: false
+  serial: 1
+
+  vars:
+    windows_system_volume_username: >-
+      {{ lookup('ansible.builtin.env', 'SYN_ABB_WINDOWS_USERNAME') }}
+    windows_system_volume_password: >-
+      {{ lookup('ansible.builtin.env', 'SYN_ABB_WINDOWS_PASSWORD') }}
+    ansible_user: "{{ windows_system_volume_username }}"
+    ansible_password: "{{ windows_system_volume_password }}"
+    windows_system_drive: C
+    windows_system_minimum_free_bytes: 5368709120
+    windows_update_download_path: C:\Windows\SoftwareDistribution\Download
+
+  tasks:
+    - name: Validate Windows credentials
+      ansible.builtin.assert:
+        that:
+          - windows_system_volume_username | length > 0
+          - windows_system_volume_password | length > 0
+        fail_msg: >-
+          Populate SYN_ABB_WINDOWS_USERNAME and SYN_ABB_WINDOWS_PASSWORD from
+          Vault before running this playbook.
+      no_log: true
+      tags: [preflight]
+
+    - name: Measure system volume and Windows Update cache
+      ansible.windows.win_powershell:
+        script: |
+          $volume = Get-Volume -DriveLetter '{{ windows_system_drive }}'
+          $cachePath = '{{ windows_update_download_path }}'
+          $cacheBytes = 0L
+          $cachePaths = @($cachePath, "$cachePath.ansible-cleanup")
+          foreach ($path in $cachePaths) {
+              if (Test-Path -LiteralPath $path) {
+                  $sum = Get-ChildItem -LiteralPath $path -Force -Recurse -File `
+                      -ErrorAction SilentlyContinue | Measure-Object Length -Sum
+                  if ($null -ne $sum.Sum) {
+                      $cacheBytes += [int64]$sum.Sum
+                  }
+              }
+          }
+
+          [pscustomobject]@{
+              Drive = $volume.DriveLetter
+              FreeBytes = [int64]$volume.SizeRemaining
+              SizeBytes = [int64]$volume.Size
+              UpdateCacheBytes = $cacheBytes
+          }
+      changed_when: false
+      register: windows_system_volume_before
+      tags: [preflight]
+
+    - name: Reclaim stale Windows Update downloads when free space is low
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $cachePath = '{{ windows_update_download_path }}'
+          $stalePath = "$cachePath.ansible-cleanup"
+          $serviceNames = @('bits', 'dosvc', 'wuauserv')
+          $services = Get-Service -Name $serviceNames -ErrorAction SilentlyContinue
+          $runningServices = @($services | Where-Object Status -eq 'Running' |
+              Select-Object -ExpandProperty Name)
+
+          function Remove-DirectoryRobust {
+              param([Parameter(Mandatory = $true)][string]$Path)
+
+              if (-not (Test-Path -LiteralPath $Path)) {
+                  return
+              }
+
+              $emptyPath = Join-Path $env:ProgramData 'Ansible\empty-cache-tree'
+              New-Item -ItemType Directory -Path $emptyPath -Force | Out-Null
+              & robocopy.exe $emptyPath $Path /MIR /R:1 /W:1 /NFL /NDL `
+                  /NJH /NJS /NP | Out-Null
+              $robocopyExitCode = $LASTEXITCODE
+              if ($robocopyExitCode -ge 8) {
+                  throw "Robocopy could not empty $Path (exit $robocopyExitCode)."
+              }
+
+              & cmd.exe /d /c "rd /s /q `"$Path`""
+              if (Test-Path -LiteralPath $Path) {
+                  throw "Directory cleanup did not remove $Path."
+              }
+              Remove-Item -LiteralPath $emptyPath -Force -ErrorAction SilentlyContinue
+          }
+
+          # A previous interrupted run can leave only the isolated stale tree.
+          # It is no longer used by Windows Update and can be removed first.
+          Remove-DirectoryRobust -Path $stalePath
+
+          try {
+              foreach ($service in $services) {
+                  if ($service.Status -ne 'Stopped') {
+                      Stop-Service -Name $service.Name -Force -ErrorAction Stop
+                  }
+              }
+
+              if (Test-Path -LiteralPath $cachePath) {
+                  Rename-Item -LiteralPath $cachePath -NewName `
+                      (Split-Path -Leaf $stalePath) -ErrorAction Stop
+              }
+              New-Item -ItemType Directory -Path $cachePath -Force |
+                  Out-Null
+          }
+          finally {
+              foreach ($serviceName in $runningServices) {
+                  Start-Service -Name $serviceName -ErrorAction Continue
+              }
+          }
+
+          if (Test-Path -LiteralPath $stalePath) {
+              Remove-DirectoryRobust -Path $stalePath
+          }
+
+          $Ansible.Changed = $true
+          [pscustomobject]@{
+              CachePath = $cachePath
+              RestoredServices = $runningServices
+          }
+      async: 1800
+      poll: 15
+      when:
+        - not ansible_check_mode
+        - >-
+          (windows_system_volume_before.output[0].FreeBytes | int) <
+          (windows_system_minimum_free_bytes | int)
+        - (windows_system_volume_before.output[0].UpdateCacheBytes | int) > 0
+      register: windows_update_cache_cleanup
+      tags: [cleanup]
+
+    - name: Measure system volume after maintenance
+      ansible.windows.win_powershell:
+        script: |
+          $volume = Get-Volume -DriveLetter '{{ windows_system_drive }}'
+          [pscustomobject]@{
+              Drive = $volume.DriveLetter
+              FreeBytes = [int64]$volume.SizeRemaining
+              SizeBytes = [int64]$volume.Size
+              FreePercent = [math]::Round(
+                  (100.0 * $volume.SizeRemaining / $volume.Size), 2)
+          }
+      changed_when: false
+      register: windows_system_volume_after
+      tags: [verify]
+
+    - name: Verify minimum VSS headroom
+      ansible.builtin.assert:
+        that:
+          - >-
+            (windows_system_volume_after.output[0].FreeBytes | int) >=
+            (windows_system_minimum_free_bytes | int)
+        fail_msg: >-
+          {{ windows_system_drive }}: still has only
+          {{ windows_system_volume_after.output[0].FreeBytes }} free bytes;
+          at least {{ windows_system_minimum_free_bytes }} are required.
+        success_msg: >-
+          {{ windows_system_drive }}: has
+          {{ windows_system_volume_after.output[0].FreeBytes }} free bytes
+          ({{ windows_system_volume_after.output[0].FreePercent }}%).
+      tags: [verify]
+
+    - name: Verify VSS writers and shadow storage
+      ansible.windows.win_command: >-
+        powershell.exe -NoProfile -NonInteractive -Command
+        "vssadmin list writers; vssadmin list shadowstorage"
+      changed_when: false
+      register: windows_vss_status
+      tags: [verify]
+
+    - name: Confirm that all VSS writers are stable
+      ansible.builtin.assert:
+        that:
+          - "'State: [1] Stable' in windows_vss_status.stdout"
+          - "'Last error: No error' in windows_vss_status.stdout"
+          - "'State: [7] Failed' not in windows_vss_status.stdout"
+        fail_msg: "One or more VSS writers are not healthy after maintenance."
+        success_msg: "VSS writers are stable and report no errors."
+      tags: [verify]
