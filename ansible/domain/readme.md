@@ -298,6 +298,94 @@ ansible-playbook -i inventory/environments/staging.ini ansible/domain/configure_
 - Scope creation happens on the primary server and is then replicated to the partner by DHCP failover.
 - Existing failover relationships with the same name are reused if already present.
 
+## Trusted and Automatically Renewed RDP Certificates
+
+Use `configure_windows_rdp_certificates.yml` to replace the default self-signed
+RDP listener certificates with certificates selected and renewed through AD CS.
+The playbook manages the existing domain-wide **Windows RDP Certificate
+Autoenrollment** GPO, adds a higher-precedence Domain Controllers OU override,
+triggers computer certificate auto-enrollment, and verifies that the `RDP-tcp`
+listener reports a Group Policy-selected certificate.
+
+By default, the playbook detects each server's Windows domain role: domain
+controllers use the built-in `DomainController` template and other servers use
+the built-in `Machine` template. This does not depend on inventory group
+membership. Override `windows_rdp_member_certificate_template` and
+`windows_rdp_domain_controller_certificate_template` if the domain uses custom
+templates. Set both variables to the same value for one shared RDP template.
+The template must be issued by the enterprise CA,
+grant the target computer Enroll permission, include Server Authentication, and
+build the subject/SAN from the computer's DNS name. For a custom template, keep
+its template name and display name identical so RDP does not repeatedly enroll
+new certificates.
+
+### Inventory example
+
+```ini
+[domain_controllers_windows]
+dc1.myrobertson.net
+rhonda.myrobertson.net
+
+[rdp_member_servers_windows]
+janice.myrobertson.net
+
+[rdp_servers_windows:children]
+domain_controllers_windows
+rdp_member_servers_windows
+
+[rdp_servers_windows:vars]
+ansible_connection=winrm
+ansible_port=5985
+ansible_winrm_scheme=http
+ansible_winrm_transport=ntlm
+ansible_user=ldap@myrobertson.net
+```
+
+### Run
+
+Load the existing Windows management credentials from Vault, then perform a
+one-server canary before the serial full rollout:
+
+```sh
+export SYN_ABB_WINDOWS_USERNAME="$(vault read -format=json secret/data/windows/domain/ldap | jq -r '.data.data.username')"
+export SYN_ABB_WINDOWS_PASSWORD="$(vault read -format=json secret/data/windows/domain/ldap | jq -r '.data.data.password')"
+
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES .venv/bin/ansible-playbook -f 1 \
+  -i inventory/environments/production.ini \
+  ansible/domain/configure_windows_rdp_certificates.yml \
+  --limit dc1.myrobertson.net
+
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES .venv/bin/ansible-playbook -f 1 \
+  -i inventory/environments/production.ini \
+  ansible/domain/configure_windows_rdp_certificates.yml
+```
+
+The playbook restarts `TermService` only when the listener is not already using
+the policy-selected certificate, which disconnects existing RDP sessions on
+that host. Set `windows_rdp_certificate_restart_service=false` to stage policy
+and enrollment without restarting RDP; a later restart is then required before
+verification can pass.
+
+## Scoped WinRM Management Access
+
+Use `configure_windows_winrm.yml` to keep WinRM HTTP enabled on domain servers
+and install an all-profile firewall rule restricted to trusted management
+networks. The defaults allow the homelab LAN (`192.168.1.0/24`) and the VPN
+subnet-router NAT network (`192.168.16.0/24`). This keeps WinRM reachable when a
+server temporarily misclassifies its NIC as Public without exposing port 5985
+to arbitrary Public networks.
+
+Run it with the same Vault-provided Windows credentials:
+
+```sh
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES .venv/bin/ansible-playbook -f 1 \
+  -i inventory/environments/production.ini \
+  ansible/domain/configure_windows_winrm.yml
+```
+
+Override `windows_winrm_allowed_remote_addresses` when management network
+ranges change.
+
 ## Roles
 
 See `roles/` for included custom roles, such as:

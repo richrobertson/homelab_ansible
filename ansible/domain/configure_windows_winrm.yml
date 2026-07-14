@@ -1,0 +1,208 @@
+---
+- name: Configure scoped WinRM access on Windows domain servers
+  hosts: "{{ windows_winrm_hosts | default('rdp_servers_windows') }}"
+  gather_facts: false
+  serial: 1
+
+  vars:
+    windows_winrm_username: >-
+      {{ lookup('ansible.builtin.env', 'SYN_ABB_WINDOWS_USERNAME') }}
+    windows_winrm_password: >-
+      {{ lookup('ansible.builtin.env', 'SYN_ABB_WINDOWS_PASSWORD') }}
+    ansible_user: "{{ windows_winrm_username }}"
+    ansible_password: "{{ windows_winrm_password }}"
+    windows_winrm_firewall_rule_name: Homelab-WinRM-HTTP-In
+    windows_winrm_allowed_remote_addresses:
+      - 192.168.1.0/24
+      - 192.168.16.0/24
+
+  tasks:
+    - name: Validate WinRM credentials and allowed networks
+      ansible.builtin.assert:
+        that:
+          - windows_winrm_username | length > 0
+          - windows_winrm_password | length > 0
+          - windows_winrm_allowed_remote_addresses | length > 0
+        fail_msg: >-
+          Populate the Windows credentials from Vault and define at least one
+          trusted WinRM management network.
+      no_log: true
+      tags: [always, preflight]
+
+    - name: Ensure WinRM is enabled and running
+      ansible.windows.win_service:
+        name: WinRM
+        start_mode: auto
+        state: started
+      tags: [configure]
+
+    - name: Verify an HTTP WinRM listener exists
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $listener = Get-ChildItem WSMan:\localhost\Listener |
+              Where-Object {
+                  (Get-Item "$($_.PSPath)\Transport").Value -eq 'HTTP' -and
+                  (Get-Item "$($_.PSPath)\Enabled").Value -eq 'true'
+              } |
+              Select-Object -First 1
+          if (-not $listener) {
+              throw 'No enabled HTTP WinRM listener is configured.'
+          }
+
+          [pscustomobject]@{
+              Address = (Get-Item "$($listener.PSPath)\Address").Value
+              Port = (Get-Item "$($listener.PSPath)\Port").Value
+              Transport = (Get-Item "$($listener.PSPath)\Transport").Value
+          }
+      changed_when: false
+      register: windows_winrm_listener
+      tags: [preflight, verify]
+
+    - name: Configure the scoped WinRM firewall rule
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $name = {{ windows_winrm_firewall_rule_name | to_json }}
+          $displayName = 'Homelab WinRM (HTTP-In)'
+          $group = 'Homelab Management'
+          $desiredAddresses = @(
+          {% for address in windows_winrm_allowed_remote_addresses %}
+              {{ address | to_json }}{% if not loop.last %},{% endif %}
+          {% endfor %}
+          )
+          function ConvertTo-FirewallAddress {
+              param([string]$Address)
+              if ($Address -notmatch '^([^/]+)/(\d+)$') {
+                  return $Address
+              }
+              $ipAddress = $matches[1]
+              $prefixLength = [int]$matches[2]
+              if ($ipAddress -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+                  return $Address
+              }
+              $maskOctets = for ($index = 0; $index -lt 4; $index++) {
+                  $bits = [math]::Min(
+                      8, [math]::Max(0, $prefixLength - ($index * 8)))
+                  if ($bits -eq 0) { 0 }
+                  else { 256 - [math]::Pow(2, 8 - $bits) }
+              }
+              return "$ipAddress/$($maskOctets -join '.')"
+          }
+          $normalizedDesiredAddresses = @($desiredAddresses |
+              ForEach-Object { ConvertTo-FirewallAddress $_ } |
+              Sort-Object)
+          $rule = Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue
+          $changed = $false
+
+          if (-not $rule) {
+              New-NetFirewallRule -Name $name -DisplayName $displayName `
+                  -Group $group -Direction Inbound -Action Allow -Enabled True `
+                  -Profile Any -Protocol TCP -LocalPort 5985 `
+                  -RemoteAddress $desiredAddresses | Out-Null
+              $changed = $true
+          }
+          else {
+              $portFilter = $rule | Get-NetFirewallPortFilter
+              $addressFilter = $rule | Get-NetFirewallAddressFilter
+              $currentAddresses = @($addressFilter.RemoteAddress | Sort-Object)
+              $addressesDiffer = [bool](Compare-Object `
+                  -ReferenceObject $currentAddresses `
+                  -DifferenceObject $normalizedDesiredAddresses)
+              $settingsDiffer = (
+                  [string]$rule.Enabled -ne 'True' -or
+                  [string]$rule.Profile -ne 'Any' -or
+                  [string]$rule.Direction -ne 'Inbound' -or
+                  [string]$rule.Action -ne 'Allow' -or
+                  [string]$portFilter.Protocol -ne 'TCP' -or
+                  [string]$portFilter.LocalPort -ne '5985' -or
+                  $addressesDiffer
+              )
+
+              if ($settingsDiffer) {
+                  Set-NetFirewallRule -Name $name -Direction Inbound `
+                      -Action Allow -Enabled True -Profile Any
+                  $rule | Get-NetFirewallPortFilter |
+                      Set-NetFirewallPortFilter -Protocol TCP -LocalPort 5985
+                  $rule | Get-NetFirewallAddressFilter |
+                      Set-NetFirewallAddressFilter `
+                          -RemoteAddress $desiredAddresses
+                  $changed = $true
+              }
+          }
+
+          $Ansible.Changed = $changed
+          [pscustomobject]@{
+              RuleName = $name
+              RemoteAddresses = $desiredAddresses
+          }
+      tags: [configure]
+
+    - name: Verify the effective WinRM firewall rule and network profile
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $name = {{ windows_winrm_firewall_rule_name | to_json }}
+          $expectedAddresses = @(
+          {% for address in windows_winrm_allowed_remote_addresses %}
+              {{ address | to_json }}{% if not loop.last %},{% endif %}
+          {% endfor %}
+          )
+          function ConvertTo-FirewallAddress {
+              param([string]$Address)
+              if ($Address -notmatch '^([^/]+)/(\d+)$') {
+                  return $Address
+              }
+              $ipAddress = $matches[1]
+              $prefixLength = [int]$matches[2]
+              if ($ipAddress -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+                  return $Address
+              }
+              $maskOctets = for ($index = 0; $index -lt 4; $index++) {
+                  $bits = [math]::Min(
+                      8, [math]::Max(0, $prefixLength - ($index * 8)))
+                  if ($bits -eq 0) { 0 }
+                  else { 256 - [math]::Pow(2, 8 - $bits) }
+              }
+              return "$ipAddress/$($maskOctets -join '.')"
+          }
+          $normalizedExpectedAddresses = @($expectedAddresses |
+              ForEach-Object { ConvertTo-FirewallAddress $_ } |
+              Sort-Object)
+          $rule = Get-NetFirewallRule -PolicyStore ActiveStore -Name $name `
+              -ErrorAction Stop
+          $portFilter = $rule | Get-NetFirewallPortFilter
+          $addressFilter = $rule | Get-NetFirewallAddressFilter
+          $addressDifference = Compare-Object `
+              -ReferenceObject @($addressFilter.RemoteAddress | Sort-Object) `
+              -DifferenceObject $normalizedExpectedAddresses
+
+          if ([string]$rule.Enabled -ne 'True' -or
+              [string]$rule.Action -ne 'Allow' -or
+              [string]$rule.Direction -ne 'Inbound' -or
+              [string]$portFilter.Protocol -ne 'TCP' -or
+              [string]$portFilter.LocalPort -ne '5985' -or
+              $addressDifference) {
+              throw 'The effective scoped WinRM firewall rule is incorrect.'
+          }
+
+          [pscustomobject]@{
+              RuleName = $rule.Name
+              RemoteAddresses = @($addressFilter.RemoteAddress)
+              NetworkProfiles = @(Get-NetConnectionProfile |
+                  Select-Object InterfaceAlias, Name, NetworkCategory)
+          }
+      changed_when: false
+      tags: [verify]
+
+    - name: Confirm WinRM responds locally
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          Test-WSMan -ComputerName localhost -ErrorAction Stop | Out-Null
+          [pscustomobject]@{
+              Host = $env:COMPUTERNAME
+              WinRM = 'Available'
+          }
+      changed_when: false
+      tags: [verify]

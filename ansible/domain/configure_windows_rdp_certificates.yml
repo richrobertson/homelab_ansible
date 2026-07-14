@@ -1,0 +1,404 @@
+---
+- name: Configure durable AD CS certificates for Windows RDP listeners
+  hosts: "{{ windows_rdp_certificate_hosts | default('rdp_servers_windows') }}"
+  gather_facts: false
+  serial: 1
+
+  vars:
+    windows_rdp_certificate_username: >-
+      {{ lookup('ansible.builtin.env', 'SYN_ABB_WINDOWS_USERNAME') }}
+    windows_rdp_certificate_password: >-
+      {{ lookup('ansible.builtin.env', 'SYN_ABB_WINDOWS_PASSWORD') }}
+    ansible_user: "{{ windows_rdp_certificate_username }}"
+    ansible_password: "{{ windows_rdp_certificate_password }}"
+    windows_rdp_gpo_management_host: >-
+      {{ groups['domain_controllers_windows'] | first }}
+    windows_rdp_base_gpo_name: Windows RDP Certificate Autoenrollment
+    windows_rdp_domain_controller_gpo_name: >-
+      Windows RDP Certificate Autoenrollment - Domain Controllers
+    windows_rdp_member_certificate_template: Machine
+    windows_rdp_domain_controller_certificate_template: DomainController
+    windows_rdp_certificate_minimum_remaining_days: 30
+    windows_rdp_certificate_enrollment_retries: 12
+    windows_rdp_certificate_enrollment_delay: 10
+    windows_rdp_certificate_restart_service: true
+
+  tasks:
+    - name: Validate Windows RDP certificate credentials
+      ansible.builtin.assert:
+        that:
+          - windows_rdp_certificate_username | length > 0
+          - windows_rdp_certificate_password | length > 0
+        fail_msg: >-
+          Populate SYN_ABB_WINDOWS_USERNAME and SYN_ABB_WINDOWS_PASSWORD from
+          Vault before running this playbook.
+      no_log: true
+      tags: [always, preflight]
+
+    - name: Validate RDP certificate settings
+      ansible.builtin.assert:
+        that:
+          - windows_rdp_gpo_management_host | length > 0
+          - windows_rdp_base_gpo_name | length > 0
+          - windows_rdp_domain_controller_gpo_name | length > 0
+          - windows_rdp_member_certificate_template | length > 0
+          - windows_rdp_domain_controller_certificate_template | length > 0
+          - windows_rdp_certificate_minimum_remaining_days | int >= 1
+          - windows_rdp_certificate_enrollment_retries | int >= 1
+          - windows_rdp_certificate_enrollment_delay | int >= 1
+        fail_msg: >-
+          Set a certificate template and positive enrollment timing values.
+      tags: [always, preflight]
+
+    - name: Confirm the target is a domain-joined Windows Server
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          $system = Get-CimInstance Win32_ComputerSystem
+          $os = Get-CimInstance Win32_OperatingSystem
+
+          if ($os.ProductType -eq 1) {
+              throw "$env:COMPUTERNAME is a workstation, not Windows Server."
+          }
+          if (-not $system.PartOfDomain) {
+              throw "$env:COMPUTERNAME is not joined to an Active Directory domain."
+          }
+
+          [pscustomobject]@{
+              ComputerName = $system.Name
+              Domain = $system.Domain
+              DomainRole = $system.DomainRole
+              Fqdn = "$($system.Name).$($system.Domain)".ToLowerInvariant()
+              OperatingSystem = $os.Caption
+          }
+      changed_when: false
+      register: windows_rdp_certificate_server
+      tags: [always, preflight]
+
+    - name: Select the certificate template from the Windows domain role
+      ansible.builtin.set_fact:
+        windows_rdp_certificate_effective_template: >-
+          {{ windows_rdp_domain_controller_certificate_template
+             if windows_rdp_certificate_server.output[0].DomainRole | int
+                in [4, 5]
+             else windows_rdp_member_certificate_template }}
+      tags: [always, preflight]
+
+    - name: Configure central RDP certificate Group Policies
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+          Import-Module GroupPolicy
+
+          $domain = Get-ADDomain
+          $domainName = $domain.DNSRoot
+          $domainDn = $domain.DistinguishedName
+          $domainControllersOu = $domain.DomainControllersContainer
+          $server = {{ windows_rdp_gpo_management_host | to_json }}
+          $baseGpoName = {{ windows_rdp_base_gpo_name | to_json }}
+          $dcGpoName = {{ windows_rdp_domain_controller_gpo_name | to_json }}
+          $memberTemplate = {{ windows_rdp_member_certificate_template | to_json }}
+          $dcTemplate = {{ windows_rdp_domain_controller_certificate_template | to_json }}
+          $terminalServicesKey = 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+          $autoEnrollmentKey = 'HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment'
+          $changed = $false
+
+          function Get-OrCreateGpo {
+              param([string]$Name)
+              $gpo = Get-GPO -Name $Name -Domain $domainName -Server $server `
+                  -ErrorAction SilentlyContinue
+              if (-not $gpo) {
+                  $gpo = New-GPO -Name $Name -Domain $domainName -Server $server
+                  $script:changed = $true
+              }
+              return $gpo
+          }
+
+          function Set-GpoValue {
+              param(
+                  [Guid]$GpoId,
+                  [string]$Key,
+                  [string]$ValueName,
+                  [Microsoft.Win32.RegistryValueKind]$Type,
+                  [object]$Value
+              )
+              $current = Get-GPRegistryValue -Guid $GpoId -Domain $domainName `
+                  -Server $server -Key $Key -ValueName $ValueName `
+                  -ErrorAction SilentlyContinue
+              if (-not $current -or $current.Value -ne $Value) {
+                  Set-GPRegistryValue -Guid $GpoId -Domain $domainName `
+                      -Server $server -Key $Key -ValueName $ValueName `
+                      -Type $Type -Value $Value | Out-Null
+                  $script:changed = $true
+              }
+          }
+
+          function Ensure-GpoLink {
+              param(
+                  [Guid]$GpoId,
+                  [string]$Target,
+                  [int]$Order = 0
+              )
+              $link = Get-GPInheritance -Target $Target -Domain $domainName `
+                  -Server $server | Select-Object -ExpandProperty GpoLinks |
+                  Where-Object { $_.GpoId -eq $GpoId }
+              if (-not $link) {
+                  $params = @{
+                      Guid = $GpoId
+                      Target = $Target
+                      Domain = $domainName
+                      Server = $server
+                      LinkEnabled = 'Yes'
+                  }
+                  if ($Order -gt 0) {
+                      $params.Order = $Order
+                  }
+                  New-GPLink @params | Out-Null
+                  $script:changed = $true
+              }
+              elseif (-not $link.Enabled -or
+                      ($Order -gt 0 -and $link.Order -ne $Order)) {
+                  $params = @{
+                      Guid = $GpoId
+                      Target = $Target
+                      Domain = $domainName
+                      Server = $server
+                      LinkEnabled = 'Yes'
+                  }
+                  if ($Order -gt 0) {
+                      $params.Order = $Order
+                  }
+                  Set-GPLink @params | Out-Null
+                  $script:changed = $true
+              }
+          }
+
+          $baseGpo = Get-OrCreateGpo -Name $baseGpoName
+          Set-GpoValue -GpoId $baseGpo.Id -Key $terminalServicesKey `
+              -ValueName 'CertTemplateName' -Type String -Value $memberTemplate
+          Set-GpoValue -GpoId $baseGpo.Id -Key $terminalServicesKey `
+              -ValueName 'SecurityLayer' -Type DWord -Value 2
+          Set-GpoValue -GpoId $baseGpo.Id -Key $terminalServicesKey `
+              -ValueName 'UserAuthentication' -Type DWord -Value 1
+          Set-GpoValue -GpoId $baseGpo.Id -Key $autoEnrollmentKey `
+              -ValueName 'AEPolicy' -Type DWord -Value 7
+          Ensure-GpoLink -GpoId $baseGpo.Id -Target $domainDn
+
+          $dcGpo = Get-OrCreateGpo -Name $dcGpoName
+          Set-GpoValue -GpoId $dcGpo.Id -Key $terminalServicesKey `
+              -ValueName 'CertTemplateName' -Type String -Value $dcTemplate
+          Ensure-GpoLink -GpoId $dcGpo.Id -Target $domainControllersOu -Order 1
+
+          $Ansible.Changed = $changed
+          [pscustomobject]@{
+              Domain = $domainName
+              BaseGpo = $baseGpo.DisplayName
+              BaseTemplate = $memberTemplate
+              DomainControllerGpo = $dcGpo.DisplayName
+              DomainControllerTemplate = $dcTemplate
+              DomainControllersOu = $domainControllersOu
+          }
+      delegate_to: "{{ windows_rdp_gpo_management_host }}"
+      run_once: true
+      tags: [configure]
+
+    - name: Apply computer Group Policy
+      ansible.windows.win_powershell:
+        script: |
+          $process = Start-Process gpupdate.exe `
+              -ArgumentList '/target:computer', '/force', '/wait:120' `
+              -PassThru -WindowStyle Hidden
+          $Ansible.Changed = $false
+          [pscustomobject]@{
+              ProcessId = $process.Id
+          }
+      changed_when: false
+      when: not ansible_check_mode
+      tags: [configure]
+
+    - name: Wait for the effective RDP certificate template policy
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $expected = {{ windows_rdp_certificate_effective_template | to_json }}
+          $path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+          $actual = (Get-ItemProperty -Path $path -Name CertTemplateName `
+              -ErrorAction SilentlyContinue).CertTemplateName
+          if ($actual -ne $expected) {
+              throw "Effective RDP template is '$actual'; waiting for '$expected'."
+          }
+          [pscustomobject]@{
+              Template = $actual
+          }
+      changed_when: false
+      register: windows_rdp_certificate_effective_policy
+      retries: 24
+      delay: 5
+      until: windows_rdp_certificate_effective_policy is succeeded
+      when: not ansible_check_mode
+      tags: [configure, verify]
+
+    - name: Trigger computer certificate auto-enrollment
+      ansible.windows.win_command: certutil.exe -pulse
+      changed_when: false
+      when: not ansible_check_mode
+      tags: [configure]
+
+    - name: Wait for a valid template-issued RDP certificate
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $templateName = {{ windows_rdp_certificate_effective_template | to_json }}
+          $minimumNotAfter = (Get-Date).AddDays(
+              {{ windows_rdp_certificate_minimum_remaining_days | int }})
+          $fqdn = {{ windows_rdp_certificate_server.output[0].Fqdn | to_json }}
+          $serverAuthenticationOid = '1.3.6.1.5.5.7.3.1'
+          $templateExtensionOids = @(
+              '1.3.6.1.4.1.311.20.2',
+              '1.3.6.1.4.1.311.21.7'
+          )
+
+          $certificate = Get-ChildItem Cert:\LocalMachine\My |
+              Where-Object {
+                  if (-not $_.HasPrivateKey -or
+                      $_.NotAfter -le $minimumNotAfter -or
+                      $_.Issuer -eq $_.Subject) {
+                      return $false
+                  }
+
+                  $dnsNames = @($_.DnsNameList | ForEach-Object {
+                      $_.Unicode.ToLowerInvariant()
+                  })
+                  if ($dnsNames -notcontains $fqdn) {
+                      return $false
+                  }
+
+                  $eku = $_.Extensions | Where-Object {
+                      $_.Oid.Value -eq '2.5.29.37'
+                  }
+                  if (-not $eku -or -not ($eku.EnhancedKeyUsages | Where-Object {
+                      $_.Value -eq $serverAuthenticationOid
+                  })) {
+                      return $false
+                  }
+
+                  $templateValues = @($_.Extensions |
+                      Where-Object {
+                          $_.Oid.Value -in $templateExtensionOids
+                      } | ForEach-Object { $_.Format($false) })
+                  $escapedTemplate = [regex]::Escape($templateName)
+                  return [bool]($templateValues | Where-Object {
+                      $_ -ieq $templateName -or
+                      $_ -match "(^|[=\s])$escapedTemplate([\s\(,]|$)"
+                  })
+              } |
+              Sort-Object NotAfter -Descending |
+              Select-Object -First 1
+
+          if (-not $certificate) {
+              throw "No valid $templateName certificate for $fqdn is available."
+          }
+
+          [pscustomobject]@{
+              Fqdn = $fqdn
+              Template = $templateName
+              Subject = $certificate.Subject
+              Issuer = $certificate.Issuer
+              Thumbprint = $certificate.Thumbprint
+              NotAfter = $certificate.NotAfter.ToString('o')
+          }
+      changed_when: false
+      register: windows_rdp_certificate_candidate
+      retries: "{{ windows_rdp_certificate_enrollment_retries }}"
+      delay: "{{ windows_rdp_certificate_enrollment_delay }}"
+      until: windows_rdp_certificate_candidate is succeeded
+      when: not ansible_check_mode
+      tags: [configure, verify]
+
+    - name: Read the current RDP listener certificate selection
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $listener = Get-CimInstance `
+              -Namespace root/cimv2/terminalservices `
+              -ClassName Win32_TSGeneralSetting |
+              Where-Object TerminalName -eq 'RDP-tcp'
+          if (-not $listener) {
+              throw 'The RDP-tcp listener was not found.'
+          }
+
+          [pscustomobject]@{
+              Thumbprint = $listener.SSLCertificateSHA1Hash
+              HashType = $listener.SSLCertificateSHA1HashType
+          }
+      changed_when: false
+      register: windows_rdp_certificate_listener_before
+      when: not ansible_check_mode
+      tags: [configure, verify]
+
+    - name: Refresh RDP certificate policy selection
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          & certutil.exe -pulse | Out-Null
+          Restart-Service -Name TermService -Force
+          $Ansible.Changed = $true
+      when:
+        - not ansible_check_mode
+        - windows_rdp_certificate_restart_service | bool
+        - >-
+          windows_rdp_certificate_listener_before.output[0].HashType | int != 2
+          or
+          windows_rdp_certificate_listener_before.output[0].Thumbprint | upper
+          != windows_rdp_certificate_candidate.output[0].Thumbprint | upper
+      tags: [configure]
+
+    - name: Wait for RDP to use the policy-selected certificate
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $listener = Get-CimInstance `
+              -Namespace root/cimv2/terminalservices `
+              -ClassName Win32_TSGeneralSetting |
+              Where-Object TerminalName -eq 'RDP-tcp'
+          if (-not $listener) {
+              throw 'The RDP-tcp listener was not found.'
+          }
+
+          [pscustomobject]@{
+              Thumbprint = $listener.SSLCertificateSHA1Hash
+              HashType = $listener.SSLCertificateSHA1HashType
+          }
+      changed_when: false
+      register: windows_rdp_certificate_listener_after
+      retries: 12
+      delay: 5
+      until:
+        - windows_rdp_certificate_listener_after.output[0].HashType | int == 2
+        - >-
+          windows_rdp_certificate_listener_after.output[0].Thumbprint | upper
+          == windows_rdp_certificate_candidate.output[0].Thumbprint | upper
+      when: not ansible_check_mode
+      tags: [verify]
+
+    - name: Verify durable RDP certificate configuration
+      ansible.builtin.assert:
+        that:
+          - windows_rdp_certificate_listener_after.output[0].HashType | int == 2
+          - >-
+            windows_rdp_certificate_listener_after.output[0].Thumbprint | upper
+            == windows_rdp_certificate_candidate.output[0].Thumbprint | upper
+        fail_msg: >-
+          {{ inventory_hostname }} is not using the policy-selected
+          {{ windows_rdp_certificate_effective_template }} certificate. Set
+          windows_rdp_certificate_restart_service=true or schedule a service
+          restart, then rerun the playbook.
+        success_msg: >-
+          {{ inventory_hostname }} uses the policy-selected
+          {{ windows_rdp_certificate_effective_template }} certificate issued by
+          {{ windows_rdp_certificate_candidate.output[0].Issuer }}, valid until
+          {{ windows_rdp_certificate_candidate.output[0].NotAfter }}.
+      when: not ansible_check_mode
+      tags: [verify]
