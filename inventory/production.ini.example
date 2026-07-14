@@ -22,6 +22,24 @@ dns02.example.com
 [powerdns-recurse]
 resolver01.example.com
 
+[domain_controllers_windows]
+dc01.example.com
+dc02.example.com
+
+[rdp_member_servers_windows]
+app01.example.com
+
+[rdp_servers_windows:children]
+domain_controllers_windows
+rdp_member_servers_windows
+
+[rdp_servers_windows:vars]
+ansible_connection=winrm
+ansible_port=5985
+ansible_winrm_scheme=http
+ansible_winrm_transport=ntlm
+ansible_user=administrator@example.com
+
 [proxmox_nodes]
 pve01.example.com
 pve02.example.com
