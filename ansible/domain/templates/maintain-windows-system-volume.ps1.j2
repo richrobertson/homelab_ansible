@@ -1,0 +1,182 @@
+$ErrorActionPreference = 'Stop'
+
+$MinimumFreeBytes = [int64]{{ windows_domain_maintenance_minimum_free_bytes }}
+$MinimumFreePercent = [double]{{ windows_domain_maintenance_minimum_free_percent }}
+$SystemDrive = '{{ windows_domain_maintenance_system_drive }}'
+$CachePath = Join-Path $env:SystemRoot 'SoftwareDistribution\Download'
+$StalePath = "$CachePath.ansible-cleanup"
+$StatusPath = '{{ windows_domain_maintenance_status_path }}'
+$EventSource = 'HomelabWindowsMaintenance'
+$AbbServiceName = 'Synology Active Backup for Business Service'
+
+function Remove-DirectoryRobust {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    $emptyPath = Join-Path $env:ProgramData 'Homelab\Maintenance\empty-cache-tree'
+    New-Item -ItemType Directory -Path $emptyPath -Force | Out-Null
+    & robocopy.exe $emptyPath $Path /MIR /R:1 /W:1 /NFL /NDL /NJH /NJS /NP |
+        Out-Null
+    if ($LASTEXITCODE -ge 8) {
+        throw "Robocopy could not empty $Path (exit $LASTEXITCODE)."
+    }
+
+    & cmd.exe /d /c "rd /s /q `"$Path`""
+    if (Test-Path -LiteralPath $Path) {
+        throw "Directory cleanup did not remove $Path."
+    }
+    Remove-Item -LiteralPath $emptyPath -Force -ErrorAction SilentlyContinue
+}
+
+function Write-MaintenanceEvent {
+    param(
+        [Parameter(Mandatory = $true)][int]$EventId,
+        [Parameter(Mandatory = $true)][string]$EntryType,
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+
+    try {
+        if (-not [System.Diagnostics.EventLog]::SourceExists($EventSource)) {
+            New-EventLog -LogName Application -Source $EventSource
+        }
+        Write-EventLog -LogName Application -Source $EventSource `
+            -EventId $EventId -EntryType $EntryType -Message $Message
+    }
+    catch {
+        # The JSON status file remains authoritative if event-log registration
+        # is unavailable for any reason.
+    }
+}
+
+$result = [ordered]@{
+    ComputerName = $env:COMPUTERNAME
+    CollectedAt = (Get-Date).ToUniversalTime().ToString('o')
+    Status = 'running'
+    CleanedCache = $false
+    ExtendedSystemVolume = $false
+    FreeBytesBefore = 0L
+    FreeBytesAfter = 0L
+    RequiredFreeBytes = 0L
+    FreePercentAfter = 0.0
+    AbbServiceStatus = 'unknown'
+    AbbEndpointReachable = $false
+    VssWritersHealthy = $false
+    Error = $null
+}
+
+try {
+    $volume = Get-Volume -DriveLetter $SystemDrive
+    $result.FreeBytesBefore = [int64]$volume.SizeRemaining
+    $percentThresholdBytes = [int64](
+        $volume.Size * ($MinimumFreePercent / 100.0))
+    $result.RequiredFreeBytes = [math]::Max(
+        $MinimumFreeBytes, $percentThresholdBytes)
+
+    if ($volume.SizeRemaining -lt $result.RequiredFreeBytes) {
+        $partition = Get-Partition -DriveLetter $SystemDrive
+        $supportedSize = $partition | Get-PartitionSupportedSize
+        $extendableBytes = [int64]($supportedSize.SizeMax - $partition.Size)
+        if ($extendableBytes -ge 1073741824) {
+            Resize-Partition -DriveLetter $SystemDrive `
+                -Size $supportedSize.SizeMax
+            $result.ExtendedSystemVolume = $true
+            $volume = Get-Volume -DriveLetter $SystemDrive
+            $percentThresholdBytes = [int64](
+                $volume.Size * ($MinimumFreePercent / 100.0))
+            $result.RequiredFreeBytes = [math]::Max(
+                $MinimumFreeBytes, $percentThresholdBytes)
+        }
+    }
+
+    if ($volume.SizeRemaining -lt $result.RequiredFreeBytes) {
+        $serviceNames = @('bits', 'dosvc', 'wuauserv')
+        $services = Get-Service -Name $serviceNames -ErrorAction SilentlyContinue
+        $runningServices = @($services | Where-Object Status -eq 'Running' |
+            Select-Object -ExpandProperty Name)
+
+        # Finish an interrupted cleanup before rotating the active cache.
+        Remove-DirectoryRobust -Path $StalePath
+
+        try {
+            foreach ($service in $services) {
+                if ($service.Status -ne 'Stopped') {
+                    Stop-Service -Name $service.Name -Force
+                }
+            }
+
+            if (Test-Path -LiteralPath $CachePath) {
+                Rename-Item -LiteralPath $CachePath `
+                    -NewName (Split-Path -Leaf $StalePath)
+            }
+            New-Item -ItemType Directory -Path $CachePath -Force | Out-Null
+        }
+        finally {
+            foreach ($serviceName in $runningServices) {
+                Start-Service -Name $serviceName -ErrorAction Continue
+            }
+        }
+
+        Remove-DirectoryRobust -Path $StalePath
+        $result.CleanedCache = $true
+        $volume = Get-Volume -DriveLetter $SystemDrive
+    }
+
+    $result.FreeBytesAfter = [int64]$volume.SizeRemaining
+    $result.FreePercentAfter = [math]::Round(
+        (100.0 * $volume.SizeRemaining / $volume.Size), 2)
+    if ($volume.SizeRemaining -lt $result.RequiredFreeBytes) {
+        throw "$SystemDrive`: has $($volume.SizeRemaining) free bytes; " +
+            "$($result.RequiredFreeBytes) are required."
+    }
+
+    $abbService = Get-Service -Name $AbbServiceName -ErrorAction Stop
+    if ($abbService.Status -ne 'Running') {
+        Start-Service -Name $AbbServiceName
+        $abbService = Get-Service -Name $AbbServiceName
+    }
+    $result.AbbServiceStatus = [string]$abbService.Status
+    if ($abbService.Status -ne 'Running') {
+        throw "The Active Backup agent service is not running."
+    }
+
+    $result.AbbEndpointReachable = Test-NetConnection `
+        -ComputerName '{{ windows_domain_maintenance_abb_server }}' `
+        -Port {{ windows_domain_maintenance_abb_port }} `
+        -InformationLevel Quiet
+    if (-not $result.AbbEndpointReachable) {
+        throw 'The Active Backup server endpoint is not reachable.'
+    }
+
+    $vssOutput = (& vssadmin.exe list writers 2>&1 | Out-String)
+    $failedState = $vssOutput -match 'State:\s+\[(?!1\])'
+    $writerError = $vssOutput -match 'Last error:\s+(?!No error)'
+    $result.VssWritersHealthy = -not ($failedState -or $writerError)
+    if (-not $result.VssWritersHealthy) {
+        throw 'One or more VSS writers are not stable.'
+    }
+
+    $result.Status = 'healthy'
+    $eventId = if ($result.CleanedCache) { 1001 } else { 1000 }
+    Write-MaintenanceEvent -EventId $eventId -EntryType Information `
+        -Message ($result | ConvertTo-Json -Compress)
+}
+catch {
+    $result.Status = 'failed'
+    $result.Error = $_.Exception.Message
+    Write-MaintenanceEvent -EventId 2000 -EntryType Error `
+        -Message ($result | ConvertTo-Json -Compress)
+}
+finally {
+    $statusDirectory = Split-Path -Parent $StatusPath
+    New-Item -ItemType Directory -Path $statusDirectory -Force | Out-Null
+    $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $StatusPath `
+        -Encoding UTF8
+}
+
+$result | ConvertTo-Json -Compress
+if ($result.Status -ne 'healthy') {
+    exit 1
+}

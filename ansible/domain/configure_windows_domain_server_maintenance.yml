@@ -1,0 +1,187 @@
+---
+- name: Configure preventative maintenance on Windows domain servers
+  hosts: >-
+    {{ windows_domain_maintenance_hosts | default('rdp_servers_windows') }}
+  gather_facts: false
+  serial: 1
+
+  vars:
+    windows_domain_maintenance_username: >-
+      {{ lookup('ansible.builtin.env', 'SYN_ABB_WINDOWS_USERNAME') }}
+    windows_domain_maintenance_password: >-
+      {{ lookup('ansible.builtin.env', 'SYN_ABB_WINDOWS_PASSWORD') }}
+    ansible_user: "{{ windows_domain_maintenance_username }}"
+    ansible_password: "{{ windows_domain_maintenance_password }}"
+    windows_domain_maintenance_root: C:\ProgramData\Homelab\Maintenance
+    windows_domain_maintenance_script_path: >-
+      {{ windows_domain_maintenance_root }}\Maintain-SystemVolume.ps1
+    windows_domain_maintenance_status_path: >-
+      {{ windows_domain_maintenance_root }}\system-volume-status.json
+    windows_domain_maintenance_task_name: Homelab-System-Volume-Maintenance
+    windows_domain_maintenance_system_drive: C
+    windows_domain_maintenance_minimum_free_bytes: 5368709120
+    windows_domain_maintenance_minimum_free_percent: 15
+    windows_domain_maintenance_schedule_hour: 1
+    windows_domain_maintenance_schedule_minute: 30
+    windows_domain_maintenance_abb_server: kermit.myrobertson.net
+    windows_domain_maintenance_abb_port: 5510
+    windows_domain_maintenance_powershell_arguments: >-
+      -NoProfile -NonInteractive -ExecutionPolicy Bypass
+      -File "{{ windows_domain_maintenance_script_path }}"
+
+  tasks:
+    - name: Validate Windows maintenance credentials
+      ansible.builtin.assert:
+        that:
+          - windows_domain_maintenance_username | length > 0
+          - windows_domain_maintenance_password | length > 0
+        fail_msg: >-
+          Populate SYN_ABB_WINDOWS_USERNAME and SYN_ABB_WINDOWS_PASSWORD from
+          Vault before running this playbook.
+      no_log: true
+      tags: [preflight]
+
+    - name: Confirm the target is Windows Server
+      ansible.windows.win_powershell:
+        script: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          if ($os.ProductType -eq 1) {
+              throw "$env:COMPUTERNAME is a workstation, not Windows Server"
+          }
+          [pscustomobject]@{
+              ComputerName = $env:COMPUTERNAME
+              Caption = $os.Caption
+              Version = $os.Version
+          }
+      changed_when: false
+      tags: [preflight]
+
+    - name: Create the maintenance directory
+      ansible.windows.win_file:
+        path: "{{ windows_domain_maintenance_root }}"
+        state: directory
+      tags: [configure]
+
+    - name: Install the preventative maintenance script
+      ansible.windows.win_template:
+        src: templates/maintain-windows-system-volume.ps1.j2
+        dest: "{{ windows_domain_maintenance_script_path }}"
+      tags: [configure]
+
+    - name: Register the daily maintenance task
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $taskName = '{{ windows_domain_maintenance_task_name }}'
+          $arguments = '{{ windows_domain_maintenance_powershell_arguments }}'
+          $schedule = [timespan]::FromHours(
+              {{ windows_domain_maintenance_schedule_hour }}) +
+              [timespan]::FromMinutes(
+                  {{ windows_domain_maintenance_schedule_minute }})
+          $existing = Get-ScheduledTask -TaskName $taskName `
+              -ErrorAction SilentlyContinue
+
+          $matches = $false
+          if ($existing) {
+              $trigger = @($existing.Triggers)[0]
+              $triggerTime = ([datetime]$trigger.StartBoundary).TimeOfDay
+              $matches = (
+                  @($existing.Actions).Count -eq 1 -and
+                  $existing.Actions[0].Execute -ieq 'PowerShell.exe' -and
+                  $existing.Actions[0].Arguments -eq $arguments -and
+                  $trigger.CimClass.CimClassName -eq 'MSFT_TaskDailyTrigger' -and
+                  $triggerTime -eq $schedule -and
+                  $existing.Principal.UserId -match '^(SYSTEM|S-1-5-18)$' -and
+                  $existing.Settings.Enabled
+              )
+          }
+
+          if (-not $matches) {
+              $action = New-ScheduledTaskAction -Execute 'PowerShell.exe' `
+                  -Argument $arguments
+              $start = [datetime]::Today.Add($schedule)
+              $trigger = New-ScheduledTaskTrigger -Daily -At $start
+              $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' `
+                  -LogonType ServiceAccount -RunLevel Highest
+              $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
+                  -ExecutionTimeLimit ([timespan]::FromHours(1)) `
+                  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+              Register-ScheduledTask -TaskName $taskName -Action $action `
+                  -Trigger $trigger -Principal $principal -Settings $settings `
+                  -Description 'Maintains disk headroom and verifies VSS/ABB before backups.' `
+                  -Force | Out-Null
+              $Ansible.Changed = $true
+          }
+          else {
+              $Ansible.Changed = $false
+          }
+      tags: [configure]
+
+    - name: Run maintenance immediately
+      ansible.windows.win_command: >-
+        PowerShell.exe
+        {{ windows_domain_maintenance_powershell_arguments }}
+      async: 1800
+      poll: 15
+      changed_when: >-
+        ((windows_domain_maintenance_run.stdout_lines | last |
+        from_json).CleanedCache | bool)
+        or
+        ((windows_domain_maintenance_run.stdout_lines | last |
+        from_json).ExtendedSystemVolume | bool)
+      register: windows_domain_maintenance_run
+      tags: [run, verify]
+
+    - name: Verify the maintenance result
+      ansible.builtin.assert:
+        that:
+          - >-
+            (windows_domain_maintenance_run.stdout_lines | last |
+            from_json).Status == 'healthy'
+          - >-
+            (windows_domain_maintenance_run.stdout_lines | last |
+            from_json).FreeBytesAfter | int >=
+            (windows_domain_maintenance_run.stdout_lines | last |
+            from_json).RequiredFreeBytes | int
+          - >-
+            (windows_domain_maintenance_run.stdout_lines | last |
+            from_json).VssWritersHealthy | bool
+          - >-
+            (windows_domain_maintenance_run.stdout_lines | last |
+            from_json).AbbEndpointReachable | bool
+          - >-
+            (windows_domain_maintenance_run.stdout_lines | last |
+            from_json).AbbServiceStatus == 'Running'
+        fail_msg: >-
+          Preventative maintenance failed on {{ inventory_hostname }}:
+          {{ windows_domain_maintenance_run.stdout }}
+        success_msg: >-
+          {{ inventory_hostname }} passed disk, VSS, and Active Backup checks.
+      tags: [verify]
+
+    - name: Verify the scheduled task is ready
+      ansible.windows.win_powershell:
+        script: |
+          $task = Get-ScheduledTask `
+              -TaskName '{{ windows_domain_maintenance_task_name }}'
+          $info = Get-ScheduledTaskInfo `
+              -TaskName '{{ windows_domain_maintenance_task_name }}'
+          [pscustomobject]@{
+              State = [string]$task.State
+              Enabled = $task.Settings.Enabled
+              LastTaskResult = $info.LastTaskResult
+              NextRunTime = $info.NextRunTime
+          }
+      changed_when: false
+      register: windows_domain_maintenance_task_status
+      tags: [verify]
+
+    - name: Confirm the scheduled task is enabled
+      ansible.builtin.assert:
+        that:
+          - windows_domain_maintenance_task_status.output[0].Enabled | bool
+          - windows_domain_maintenance_task_status.output[0].State != 'Disabled'
+        fail_msg: >-
+          {{ windows_domain_maintenance_task_name }} is not enabled on
+          {{ inventory_hostname }}.
+      tags: [verify]

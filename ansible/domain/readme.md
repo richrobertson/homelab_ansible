@@ -140,6 +140,42 @@ Override `windows_system_volume_hosts` or
 does not uninstall applied updates; Windows Update downloads missing packages
 again if they are still required.
 
+### Preventative maintenance on all domain servers
+
+Use `configure_windows_domain_server_maintenance.yml` to deploy the same
+guardrails to the `rdp_servers_windows` inventory group (DC1, RHONDA, DNS01,
+and JANICE). It installs a local PowerShell maintenance script and an enabled
+scheduled task named `Homelab-System-Volume-Maintenance` that runs daily at
+01:30, before the 03:00 Active Backup window.
+
+The host-local task runs as `SYSTEM` and does not store credentials. It:
+
+- requires the greater of 5 GiB or 15 percent free on `C:`;
+- safely consumes contiguous unallocated capacity when Windows can extend
+  `C:` online;
+- otherwise rotates and removes stale Windows Update downloads only when the
+  free-space threshold is breached;
+- restores the prior Windows Update service state;
+- ensures the Synology Active Backup agent service is running;
+- verifies `kermit.myrobertson.net:5510` and all VSS writers; and
+- writes its latest result to
+  `C:\ProgramData\Homelab\Maintenance\system-volume-status.json` and the
+  Windows Application event log.
+
+Run or reconcile it with the same Vault environment variables shown above:
+
+```sh
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 \
+  .venv/bin/ansible-playbook \
+  -i inventory/environments/production.ini \
+  ansible/domain/configure_windows_domain_server_maintenance.yml
+```
+
+The playbook runs the maintenance script immediately after deployment and
+fails unless every selected host passes its disk, VSS, ABB service, endpoint,
+and scheduled-task checks. Override `windows_domain_maintenance_hosts`, the
+free-space variables, or the schedule variables when needed.
+
 ## Domain Account Provisioning
 
 Use `provision_domain_accounts.yml` to create or update family domain accounts in Active Directory.
