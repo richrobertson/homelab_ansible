@@ -9,6 +9,9 @@ This repository is the Ansible layer for non-Kubernetes infrastructure operation
 - PowerDNS authoritative and recursor configuration
 - Vault host configuration and service management
 - Proxmox and Ceph host workflows
+- Ceph admin gateway: a VIP-backed, LAN-only endpoint for the mgr dashboard
+- Ceph BlueStore fragmentation auditing and guarded compaction
+- Proxmox MCP server deployment for AI-assisted, read-only cluster inspection
 - NetBox data-model and IPAM population automation
 - SSH/sudo helper scripts for onboarding and remote access hygiene
 

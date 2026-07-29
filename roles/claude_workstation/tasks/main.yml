@@ -1,0 +1,72 @@
+---
+# Ordering here is not cosmetic. CA trust and time sync are both hard
+# prerequisites for the Kerberos exchange in the realm join, so they run first;
+# sssd is configured only after a successful join, because realmd rewrites
+# sssd.conf as part of joining and would clobber anything written earlier.
+- name: Validate inputs
+  ansible.builtin.import_tasks: assert.yml
+  tags:
+    - claude_workstation_assert
+    - claude_workstation_ca
+    - claude_workstation_claude
+    - claude_workstation_domain
+
+# Tagged with every stage that consumes a Vault value, so that a targeted run
+# such as `--tags claude_workstation_ca` still has its secrets fetched instead
+# of silently looping over an empty list.
+- name: Read secrets from Vault
+  ansible.builtin.import_tasks: vault.yml
+  tags:
+    - claude_workstation_vault
+    - claude_workstation_ca
+    - claude_workstation_claude
+    - claude_workstation_domain
+
+- name: Install base packages and the Node runtime
+  ansible.builtin.import_tasks: packages.yml
+  tags:
+    - claude_workstation_packages
+
+- name: Install domain certificate authorities into the system trust store
+  ansible.builtin.import_tasks: ca_trust.yml
+  when: claude_workstation_manage_ca_trust | bool
+  tags:
+    - claude_workstation_ca
+
+- name: Synchronise time with the domain controllers
+  ansible.builtin.import_tasks: time.yml
+  when: claude_workstation_manage_chrony | bool
+  tags:
+    - claude_workstation_time
+
+- name: Join the Active Directory domain
+  ansible.builtin.import_tasks: domain_join.yml
+  when: claude_workstation_ad_join | bool
+  tags:
+    - claude_workstation_domain
+
+- name: Grant sudo to domain principals
+  ansible.builtin.import_tasks: sudo.yml
+  tags:
+    - claude_workstation_sudo
+
+- name: Configure the local break-glass account
+  ansible.builtin.import_tasks: user.yml
+  tags:
+    - claude_workstation_user
+
+- name: Install and configure Claude Code
+  ansible.builtin.import_tasks: claude_code.yml
+  tags:
+    - claude_workstation_claude
+
+- name: Harden SSH
+  ansible.builtin.import_tasks: ssh.yml
+  tags:
+    - claude_workstation_ssh
+
+- name: Install the optional XFCE desktop and XRDP
+  ansible.builtin.import_tasks: desktop.yml
+  when: claude_workstation_desktop | bool
+  tags:
+    - claude_workstation_desktop

@@ -1,0 +1,37 @@
+---
+# update-ca-certificates only reads files with a .crt extension holding PEM
+# data, and silently ignores anything else in this directory.
+- name: Install the KV-sourced certificate authorities
+  ansible.builtin.copy:
+    content: "{{ item.secret[item.item.vault_field] | trim }}\n"
+    dest: "{{ claude_workstation_ca_dir }}/{{ item.item.name }}.crt"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ claude_workstation_ca_secrets.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name | default('') }}"
+  when:
+    - not (item.skipped | default(false))
+    - item.secret[item.item.vault_field] | default('') | length > 0
+  notify: Update CA trust
+
+- name: Install the Vault PKI certificate authorities
+  ansible.builtin.copy:
+    content: "{{ item.content | trim }}\n"
+    dest: "{{ claude_workstation_ca_dir }}/vault-{{ item.item }}.crt"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ claude_workstation_pki_cas.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('') }}"
+  when:
+    - not (item.skipped | default(false))
+    - item.content | default('') | length > 0
+  notify: Update CA trust
+
+# The realm join that follows may need this trust, so the handler cannot wait
+# until the end of the play.
+- name: Rebuild the trust store before it is used
+  ansible.builtin.meta: flush_handlers

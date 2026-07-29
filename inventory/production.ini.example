@@ -45,6 +45,25 @@ pve01.example.com
 pve02.example.com
 pve03.example.com
 
+[mcp_servers]
+# Container that hosts the Proxmox MCP server. Created by
+# ansible/proxmox/proxmox_mcp.yml; the address here must match
+# proxmox_mcp_lxc_ipv4_cidr.
+mcp0.example.com ansible_host=192.168.1.60 ansible_user=root
+
+[mcp_servers:vars]
+ansible_python_interpreter=/usr/bin/python3
+
+[claude_workstation]
+# Domain-joined container that hosts the Claude Code CLI, reached through
+# Guacamole as an SSH connection. Created by
+# ansible/proxmox/claude_workstation.yml; the address here must match
+# claude_workstation_lxc_ipv4_cidr.
+cwork0.example.com ansible_host=192.168.1.61 ansible_user=root
+
+[claude_workstation:vars]
+ansible_python_interpreter=/usr/bin/python3
+
 [all:vars]
 # Connection settings
 ansible_user=admin

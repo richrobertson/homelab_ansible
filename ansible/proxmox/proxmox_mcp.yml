@@ -1,0 +1,55 @@
+---
+# Deploys the Proxmox MCP server end to end:
+#   1. mints a least-privilege read-only Proxmox API token and stores it in Vault
+#   2. creates the LXC that hosts the server
+#   3. installs the MCP server behind a Streamable HTTP bridge inside that LXC
+#
+# Requires VAULT_ADDR and VAULT_TOKEN in the environment.
+#
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/proxmox_mcp.yml
+
+- name: Provision the read-only Proxmox API token for the MCP server
+  hosts: "{{ proxmox_mcp_token_host | default(groups['proxmox_nodes'][0]) }}"
+  become: true
+  gather_facts: false
+  tags:
+    - proxmox_mcp
+    - proxmox_mcp_token
+  roles:
+    - role: proxmox_mcp_api_token
+
+- name: Provision the MCP server container
+  hosts: "{{ proxmox_mcp_lxc_host | default(groups['proxmox_nodes'][0]) }}"
+  become: true
+  gather_facts: false
+  tags:
+    - proxmox_mcp
+    - proxmox_mcp_lxc
+  roles:
+    - role: proxmox_mcp_lxc
+
+- name: Configure the MCP server
+  hosts: mcp_servers
+  become: true
+  gather_facts: true
+  tags:
+    - proxmox_mcp
+    - proxmox_mcp_service
+  roles:
+    - role: proxmox_mcp
+
+- name: Report the MCP endpoint
+  hosts: mcp_servers
+  become: false
+  gather_facts: false
+  tags:
+    - proxmox_mcp
+  tasks:
+    - name: Show the client connection details
+      ansible.builtin.debug:
+        msg: >-
+          MCP endpoint ready at
+          http://{{ ansible_host | default(inventory_hostname) }}:{{ proxmox_mcp_port }}{{ proxmox_mcp_http_path }}
+          (transport: streamable-http, mode:
+          {{ 'ELEVATED / write enabled' if proxmox_mcp_allow_elevated | bool else 'read-only' }}).

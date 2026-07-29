@@ -1,0 +1,109 @@
+---
+# Installs a node_exporter textfile collector that publishes BlueStore
+# fragmentation metrics, which the Ceph mgr prometheus module does not export.
+#
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/ceph_fragmentation_metrics.yml
+#
+# Pairs with the alert rules in
+# homelab_flux/infrastructure/configs/ceph-fragmentation-alerts.yaml and with
+# the on-demand audit in ansible/proxmox/ceph_bluestore_fragmentation.yml.
+
+- name: Export Ceph BlueStore fragmentation metrics
+  hosts: "{{ ceph_fragmentation_metrics_target_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    # Matches ansible/proxmox/proxmox_transport_metrics.yml so both collectors
+    # land in the directory node_exporter is already reading.
+    ceph_fragmentation_metrics_textfile_dir: /var/lib/prometheus/node-exporter
+    ceph_fragmentation_metrics_script: /usr/local/sbin/ceph-fragmentation-metrics.sh
+    ceph_fragmentation_metrics_lock_file: /run/lock/ceph-fragmentation-metrics.lock
+    # Fragmentation moves over days, not seconds. A long interval keeps the
+    # cluster-wide `ceph tell` sweep from becoming its own source of load.
+    ceph_fragmentation_metrics_interval: 15min
+    ceph_node_exporter_args: "--collector.textfile.directory={{ ceph_fragmentation_metrics_textfile_dir }}"
+
+  handlers:
+    - name: Restart prometheus-node-exporter
+      ansible.builtin.systemd_service:
+        name: prometheus-node-exporter
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    - name: Ensure node exporter textfile directory exists
+      ansible.builtin.file:
+        path: "{{ ceph_fragmentation_metrics_textfile_dir }}"
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: "0755"
+
+    - name: Enable node exporter textfile collector
+      ansible.builtin.lineinfile:
+        path: /etc/default/prometheus-node-exporter
+        regexp: '^ARGS='
+        line: 'ARGS="{{ ceph_node_exporter_args }}"'
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart prometheus-node-exporter
+
+    - name: Install the Ceph fragmentation metrics collector
+      ansible.builtin.template:
+        src: ceph-fragmentation-metrics.sh.j2
+        dest: "{{ ceph_fragmentation_metrics_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the Ceph fragmentation metrics service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ceph-fragmentation-metrics.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Collect Ceph BlueStore fragmentation metrics
+          Wants=network-online.target
+          After=network-online.target pve-cluster.service
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ ceph_fragmentation_metrics_script }}
+      notify: Restart prometheus-node-exporter
+
+    - name: Install the Ceph fragmentation metrics timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ceph-fragmentation-metrics.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run the Ceph fragmentation metrics collector every {{ ceph_fragmentation_metrics_interval }}
+
+          [Timer]
+          OnBootSec=5min
+          OnUnitActiveSec={{ ceph_fragmentation_metrics_interval }}
+          RandomizedDelaySec=60
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: Enable the Ceph fragmentation metrics timer
+      ansible.builtin.systemd_service:
+        name: ceph-fragmentation-metrics.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Run the collector once so metrics exist immediately
+      ansible.builtin.command:
+        argv: ["{{ ceph_fragmentation_metrics_script }}"]
+      changed_when: true

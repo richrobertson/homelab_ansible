@@ -1,0 +1,23 @@
+{#-
+  AD principals routinely contain characters sudo treats as syntax:
+  a backslash in DOMAIN\user, and spaces in group names such as
+  "Domain Admins". sudoers escapes both with a backslash, so a backslash in the
+  name itself has to be doubled first -- doing it in the other order would
+  double the escape characters this macro just added.
+-#}
+{% macro sudo_escape(name) -%}
+{{ name | replace('\\', '\\\\') | replace(' ', '\\ ') }}
+{%- endmacro %}
+# {{ ansible_managed }}
+# Validated with `visudo -cf` before installation.
+{% if claude_workstation_sudo_nopasswd %}
+# NOPASSWD is enabled: a compromised Guacamole session becomes root with no
+# further challenge.
+{% endif %}
+
+{% for group in claude_workstation_sudo_ad_groups %}
+%{{ sudo_escape(group) }} ALL=(ALL:ALL) {{ 'NOPASSWD: ALL' if claude_workstation_sudo_nopasswd else 'ALL' }}
+{% endfor %}
+{% for user in claude_workstation_sudo_ad_users %}
+{{ sudo_escape(user) }} ALL=(ALL:ALL) {{ 'NOPASSWD: ALL' if claude_workstation_sudo_nopasswd else 'ALL' }}
+{% endfor %}

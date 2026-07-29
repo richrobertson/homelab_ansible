@@ -1,0 +1,54 @@
+---
+- name: Create the local workstation group
+  ansible.builtin.group:
+    name: "{{ claude_workstation_group }}"
+    state: present
+
+- name: Create the local workstation account
+  ansible.builtin.user:
+    name: "{{ claude_workstation_user }}"
+    group: "{{ claude_workstation_group }}"
+    home: "{{ claude_workstation_home }}"
+    shell: "{{ claude_workstation_shell }}"
+    create_home: true
+    # No usable password, so this account stays key-only even when
+    # keyboard-interactive auth is enabled for domain users. Locking alone is
+    # used rather than also setting a password hash, which would re-lock an
+    # already-locked account on every run.
+    password_lock: true
+    state: present
+
+- name: Create the SSH directory for the local account
+  ansible.builtin.file:
+    path: "{{ claude_workstation_home }}/.ssh"
+    state: directory
+    owner: "{{ claude_workstation_user }}"
+    group: "{{ claude_workstation_group }}"
+    mode: "0700"
+
+# Written as a whole file rather than merged, so a key removed from inventory is
+# actually revoked here instead of lingering.
+- name: Install the authorized keys for the local account
+  ansible.builtin.copy:
+    content: "{{ claude_workstation_authorized_keys | join('\n') }}\n"
+    dest: "{{ claude_workstation_home }}/.ssh/authorized_keys"
+    owner: "{{ claude_workstation_user }}"
+    group: "{{ claude_workstation_group }}"
+    mode: "0600"
+  when: claude_workstation_authorized_keys | length > 0
+
+- name: Grant sudo to the local account
+  ansible.builtin.copy:
+    content: "{{ claude_workstation_user }} ALL=(ALL:ALL) ALL\n"
+    dest: "/etc/sudoers.d/claude-workstation-local"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  when: claude_workstation_user_sudo | bool
+
+- name: Remove local sudo when disabled
+  ansible.builtin.file:
+    path: /etc/sudoers.d/claude-workstation-local
+    state: absent
+  when: not (claude_workstation_user_sudo | bool)

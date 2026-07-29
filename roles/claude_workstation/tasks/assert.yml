@@ -1,0 +1,54 @@
+---
+- name: Require Vault environment
+  ansible.builtin.assert:
+    that:
+      - claude_workstation_vault_addr | length > 0
+      - claude_workstation_vault_token | length > 0
+    fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running this role.
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+# An empty allowlist would make sssd's simple access provider a no-op and hand
+# a shell on this box to every account in the directory. Failing the run is the
+# correct outcome; there is no safe default for "nobody specified".
+- name: Require a non-empty Active Directory access allowlist
+  ansible.builtin.assert:
+    that:
+      - (claude_workstation_ad_allowed_groups | length > 0) or (claude_workstation_ad_allowed_users | length > 0)
+    fail_msg: >-
+      Set claude_workstation_ad_allowed_groups (preferred) or
+      claude_workstation_ad_allowed_users. Joining the domain without an
+      access filter grants every domain account a login on this host.
+  when: claude_workstation_ad_join | bool
+
+- name: Require SSH key material for the local break-glass account
+  ansible.builtin.assert:
+    that:
+      - claude_workstation_authorized_keys | length > 0
+    fail_msg: >-
+      claude_workstation_authorized_keys is empty. The local account has a
+      locked password, so with no keys it cannot be used to recover the host
+      when AD or DNS is unavailable.
+
+# Facts are needed for the mount check below and for the OS-family branches
+# further on, so fail loudly rather than silently skipping the guard.
+- name: Require gathered facts
+  ansible.builtin.assert:
+    that:
+      - ansible_mounts is defined
+    fail_msg: Run this role with gather_facts enabled.
+  when: claude_workstation_require_separate_home | bool
+
+# A home directory that quietly lands on the root disk defeats the entire point
+# of the separate volume: the next container rebuild takes everyone's work with
+# it.
+- name: Require the home directory to be a separate filesystem
+  ansible.builtin.assert:
+    that:
+      - ansible_mounts | selectattr('mount', 'equalto', claude_workstation_home_mountpoint) | list | length > 0
+    fail_msg: >-
+      {{ claude_workstation_home_mountpoint }} is not a separate mount. The
+      claude_workstation_lxc role attaches it as mp0; check `pct config
+      <vmid>` on the Proxmox node before continuing.
+  when: claude_workstation_require_separate_home | bool

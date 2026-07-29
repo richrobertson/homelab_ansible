@@ -1,0 +1,31 @@
+---
+# Proxmox identity that the MCP server authenticates as.
+proxmox_mcp_token_realm: pve
+proxmox_mcp_token_user: mcp
+proxmox_mcp_token_name: mcpserver
+proxmox_mcp_token_comment: Read-only API token for the Proxmox MCP server
+
+# Custom least-privilege role. Every privilege here is an audit/read privilege;
+# nothing in this list can mutate cluster state. Prefer editing this list over
+# switching to the built-in PVEAuditor role, so the grant stays explicit in git.
+proxmox_mcp_token_role: MCPAudit
+proxmox_mcp_token_privileges:
+  - Datastore.Audit
+  - Mapping.Audit
+  - Pool.Audit
+  - SDN.Audit
+  - Sys.Audit
+  - VM.Audit
+
+# ACL scope for the grant. '/' covers the whole datacenter read-only.
+proxmox_mcp_token_acl_path: /
+
+# Token secrets are only ever displayed by Proxmox at creation time. Setting
+# this to true deletes and recreates the token, which invalidates the old value.
+proxmox_mcp_token_rotate: false
+
+# Vault destination for the generated token id and secret.
+proxmox_mcp_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+proxmox_mcp_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+proxmox_mcp_vault_mount: secret
+proxmox_mcp_vault_path: proxmox/cl0/mcp

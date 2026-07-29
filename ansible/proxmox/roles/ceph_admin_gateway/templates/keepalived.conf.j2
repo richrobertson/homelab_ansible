@@ -1,0 +1,44 @@
+# {{ ansible_managed }}
+# VRRP mastership for the Ceph admin VIP. Managed by the ceph_admin_gateway
+# role; do not edit by hand.
+
+global_defs {
+    router_id {{ inventory_hostname_short | default(inventory_hostname) }}
+    enable_script_security
+    script_user root
+}
+
+# Mastership follows HAProxy, not just node liveness: a node whose HAProxy has
+# died must hand the VIP over rather than blackholing the endpoint.
+vrrp_script check_haproxy {
+    script "/usr/bin/killall -0 haproxy"
+    interval 2
+    weight 20
+    fall 2
+    rise 2
+}
+
+vrrp_instance ceph_admin {
+    state BACKUP
+    interface {{ ceph_admin_gateway_vrrp_interface }}
+    virtual_router_id {{ ceph_admin_gateway_vrrp_id }}
+    priority {{ ceph_admin_gateway_priority }}
+    advert_int 1
+
+    # No preemption: once a node holds the VIP it keeps it until it actually
+    # fails, which avoids flapping the admin endpoint during maintenance.
+    nopreempt
+
+    authentication {
+        auth_type PASS
+        auth_pass {{ ceph_admin_gateway_vrrp_password }}
+    }
+
+    virtual_ipaddress {
+        {{ ceph_admin_gateway_vip }}/{{ ceph_admin_gateway_vip_cidr }} dev {{ ceph_admin_gateway_vrrp_interface }}
+    }
+
+    track_script {
+        check_haproxy
+    }
+}

@@ -1,0 +1,42 @@
+---
+# Opt-in only. Claude Code is a terminal application, so the default access path
+# is a Guacamole SSH connection; this exists for the occasions when something
+# genuinely needs a browser or a graphical diff.
+- name: Install XFCE and XRDP
+  ansible.builtin.apt:
+    name: "{{ claude_workstation_desktop_packages }}"
+    state: present
+    install_recommends: false
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Select the XFCE session for XRDP logins
+  ansible.builtin.copy:
+    content: |
+      # {{ ansible_managed }}
+      startxfce4
+    dest: /etc/xrdp/startwm.sh
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart xrdp
+
+- name: Configure the XRDP listener
+  ansible.builtin.lineinfile:
+    path: /etc/xrdp/xrdp.ini
+    regexp: '^port='
+    line: "port={{ claude_workstation_rdp_port }}"
+  notify: Restart xrdp
+
+# xrdp runs as the xrdp user and needs to read the host key to negotiate TLS.
+- name: Allow xrdp to read its TLS key
+  ansible.builtin.user:
+    name: xrdp
+    groups: ssl-cert
+    append: true
+
+- name: Enable XRDP at boot
+  ansible.builtin.systemd_service:
+    name: xrdp
+    enabled: true
+    state: started

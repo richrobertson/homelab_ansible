@@ -1,0 +1,220 @@
+---
+# Audits BlueStore fragmentation across every OSD in the cluster and, when
+# explicitly asked, compacts the OSDs that need it.
+#
+# Audit only (safe, read-only, the default):
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/ceph_bluestore_fragmentation.yml
+#
+# Audit and remediate:
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/ceph_bluestore_fragmentation.yml \
+#     -e ceph_frag_compact=true
+#
+# There are two distinct problems that both get called "fragmentation":
+#
+#   * Allocator fragmentation - how broken up the free space on the block
+#     device has become. Reported by the allocator score, 0.0 (contiguous) to
+#     1.0 (severe). Compaction does NOT fix this; it is resolved by freeing
+#     space or by draining and refilling the OSD.
+#
+#   * RocksDB/BlueFS fragmentation - accumulated tombstones and dead SST levels
+#     in the OSD metadata store, which inflates BlueFS usage and slows lookups.
+#     This IS what `ceph tell osd.N compact` fixes.
+#
+# The audit reports both. Remediation only performs compaction, and deliberately
+# refuses to touch allocator fragmentation, because the fix for that is a
+# capacity or rebalance decision rather than an automatable one.
+
+- name: Audit and remediate Ceph BlueStore fragmentation
+  hosts: "{{ ceph_frag_hosts | default(groups['proxmox_nodes'][0]) }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+
+  vars:
+    # Remediation is opt-in.
+    ceph_frag_compact: false
+
+    # Allocator score above which an OSD is called out in the report.
+    ceph_frag_alloc_warn: 0.60
+    ceph_frag_alloc_critical: 0.80
+
+    # Compact an OSD when its BlueFS metadata exceeds this fraction of its
+    # total store, which is the usual signal that RocksDB needs a cleanup.
+    ceph_frag_bluefs_ratio_threshold: 0.10
+
+    # Compaction is I/O heavy and briefly slows the OSD. Pause between OSDs and
+    # require the cluster to settle before continuing.
+    ceph_frag_settle_seconds: 30
+    ceph_frag_require_health_ok: true
+
+  tasks:
+    - name: Read cluster health
+      ansible.builtin.command:
+        argv: [ceph, health, detail, --format, json]
+      register: ceph_frag_health
+      changed_when: false
+      check_mode: false
+
+    - name: Read the OSD tree
+      ansible.builtin.command:
+        argv: [ceph, osd, tree, --format, json]
+      register: ceph_frag_osd_tree
+      changed_when: false
+      check_mode: false
+
+    - name: Build the list of up/in OSDs
+      ansible.builtin.set_fact:
+        ceph_frag_osd_ids: >-
+          {{ (ceph_frag_osd_tree.stdout | from_json).nodes
+             | selectattr('type', 'equalto', 'osd')
+             | selectattr('status', 'equalto', 'up')
+             | map(attribute='id') | list | sort }}
+
+    - name: Report the audit scope
+      ansible.builtin.debug:
+        msg: >-
+          Cluster status {{ (ceph_frag_health.stdout | from_json).status }};
+          auditing {{ ceph_frag_osd_ids | length }} OSDs
+          ({{ ceph_frag_osd_ids | join(', ') }}).
+
+    - name: Collect the allocator fragmentation score for each OSD
+      ansible.builtin.command:
+        argv: [ceph, tell, "osd.{{ item }}", bluestore, allocator, score, block]
+      loop: "{{ ceph_frag_osd_ids }}"
+      register: ceph_frag_scores
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # `ceph tell` reaches OSDs cluster-wide; `ceph daemon` would only work for
+    # OSDs whose admin socket is local to the node running this play.
+    - name: Collect BlueFS and store statistics for each OSD
+      ansible.builtin.command:
+        argv: [ceph, tell, "osd.{{ item }}", perf, dump, bluefs]
+      loop: "{{ ceph_frag_osd_ids }}"
+      register: ceph_frag_bluefs
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Assemble the per-OSD fragmentation report
+      ansible.builtin.set_fact:
+        ceph_frag_report: >-
+          {{ ceph_frag_report | default([]) + [{
+               'osd': item.0.item,
+               'alloc_score': (
+                 (item.0.stdout | from_json).fragmentation_rating
+                 if item.0.rc == 0 and item.0.stdout | length > 0 else None
+               ),
+               'bluefs_used_bytes': (
+                 (item.1.stdout | from_json).bluefs.db_used_bytes
+                 if item.1.rc == 0 and item.1.stdout | length > 0 else None
+               ),
+               'bluefs_total_bytes': (
+                 (item.1.stdout | from_json).bluefs.db_total_bytes
+                 if item.1.rc == 0 and item.1.stdout | length > 0 else None
+               )
+             }] }}
+      loop: "{{ ceph_frag_scores.results | zip(ceph_frag_bluefs.results) | list }}"
+      loop_control:
+        label: "osd.{{ item.0.item }}"
+
+    - name: Classify each OSD
+      ansible.builtin.set_fact:
+        ceph_frag_classified: >-
+          {{ ceph_frag_classified | default([]) + [
+               item | combine({
+                 'alloc_state': (
+                   'unknown' if item.alloc_score is none
+                   else ('critical' if item.alloc_score >= ceph_frag_alloc_critical
+                   else ('warn' if item.alloc_score >= ceph_frag_alloc_warn else 'ok'))
+                 ),
+                 'bluefs_ratio': (
+                   (item.bluefs_used_bytes / item.bluefs_total_bytes)
+                   if (item.bluefs_used_bytes is not none
+                       and item.bluefs_total_bytes is not none
+                       and item.bluefs_total_bytes > 0)
+                   else None
+                 )
+               })
+             ] }}
+      loop: "{{ ceph_frag_report }}"
+      loop_control:
+        label: "osd.{{ item.osd }}"
+
+    - name: Select OSDs that would benefit from compaction
+      ansible.builtin.set_fact:
+        ceph_frag_compact_targets: >-
+          {{ ceph_frag_classified
+             | selectattr('bluefs_ratio', 'ne', None)
+             | selectattr('bluefs_ratio', 'ge', ceph_frag_bluefs_ratio_threshold)
+             | map(attribute='osd') | list | sort }}
+
+    - name: Print the fragmentation report
+      ansible.builtin.debug:
+        msg: |-
+          BlueStore fragmentation report
+          ------------------------------
+          {% for o in ceph_frag_classified %}
+          osd.{{ o.osd }}  allocator={{ '%.3f' % o.alloc_score if o.alloc_score is not none else 'n/a' }} ({{ o.alloc_state }})  bluefs={{ '%.1f%%' % (o.bluefs_ratio * 100) if o.bluefs_ratio is not none else 'n/a' }}
+          {% endfor %}
+
+          Allocator warn >= {{ ceph_frag_alloc_warn }}, critical >= {{ ceph_frag_alloc_critical }}.
+          Compaction candidates (bluefs >= {{ '%.0f%%' % (ceph_frag_bluefs_ratio_threshold * 100) }}): {{ ceph_frag_compact_targets | join(', ') | default('none', true) }}
+
+    - name: Warn about OSDs with severe allocator fragmentation
+      ansible.builtin.debug:
+        msg: >-
+          osd.{{ item.osd }} has an allocator score of {{ '%.3f' % item.alloc_score }}.
+          Compaction will not help this. Free capacity in the pool, or drain and
+          refill the OSD to rebuild contiguous free space.
+      loop: "{{ ceph_frag_classified | selectattr('alloc_state', 'in', ['warn', 'critical']) | list }}"
+      loop_control:
+        label: "osd.{{ item.osd }}"
+
+    - name: Stop here when remediation was not requested
+      ansible.builtin.meta: end_play
+      when: not (ceph_frag_compact | bool)
+
+    - name: Refuse to compact an unhealthy cluster
+      ansible.builtin.assert:
+        that:
+          - (ceph_frag_health.stdout | from_json).status == 'HEALTH_OK'
+        fail_msg: >-
+          Cluster status is {{ (ceph_frag_health.stdout | from_json).status }}.
+          Compaction adds I/O load and is unsafe while the cluster is already
+          degraded. Resolve the health issue first, or override with
+          ceph_frag_require_health_ok=false if you accept the risk.
+      when: ceph_frag_require_health_ok | bool
+
+    - name: Report that nothing needs compaction
+      ansible.builtin.debug:
+        msg: No OSD exceeded the BlueFS threshold; nothing to compact.
+      when: ceph_frag_compact_targets | length == 0
+
+    # Serialised deliberately: compacting several OSDs at once on a three-node
+    # cluster can push enough PGs into a slow state to affect running guests.
+    - name: Compact OSDs one at a time
+      ansible.builtin.include_tasks: tasks/ceph_compact_one_osd.yml
+      loop: "{{ ceph_frag_compact_targets }}"
+      loop_control:
+        loop_var: ceph_frag_osd_id
+      when: ceph_frag_compact_targets | length > 0
+
+    - name: Read cluster health after compaction
+      ansible.builtin.command:
+        argv: [ceph, health, detail, --format, json]
+      register: ceph_frag_health_after
+      changed_when: false
+      check_mode: false
+      when: ceph_frag_compact_targets | length > 0
+
+    - name: Report the post-compaction state
+      ansible.builtin.debug:
+        msg: >-
+          Compacted osd.{{ ceph_frag_compact_targets | join(', osd.') }}.
+          Cluster status is now
+          {{ (ceph_frag_health_after.stdout | from_json).status }}.
+      when: ceph_frag_compact_targets | length > 0

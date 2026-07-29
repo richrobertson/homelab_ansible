@@ -1,0 +1,162 @@
+---
+# Installs node_exporter and a textfile collector on the Proxmox Backup Server
+# so backup job outcomes become Prometheus series.
+#
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/pbs_metrics.yml
+#
+# PBS was not scraped at all: pve3-pve5 have node_exporter, pbs did not, so the
+# one host that knows whether the offsite copies are readable was invisible to
+# monitoring. The collector is modelled on
+# ansible/proxmox/ceph_fragmentation_metrics.yml and lands in the same textfile
+# directory the Proxmox nodes use.
+#
+# Pairs with the scrape config in
+# homelab_flux/infrastructure/controllers/kube-prometheus-stack/release.yaml
+# (job pbs-node-exporter) and the alert rules in
+# homelab_flux/infrastructure/configs/pbs-alerts.yaml.
+
+- name: Export Proxmox Backup Server job and datastore metrics
+  hosts: "{{ pbs_metrics_target_hosts | default('pbs_servers') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    pbs_metrics_textfile_dir: /var/lib/prometheus/node-exporter
+    pbs_metrics_script: /usr/local/sbin/pbs-metrics.py
+    # `proxmox-backup-manager task list --limit` is capped at 1000 by the API
+    # schema and errors out above it. At this server's ~28 tasks/day that is
+    # roughly five weeks, which still covers the ten-day GC staleness threshold
+    # in homelab_flux/infrastructure/configs/pbs-alerts.yaml.
+    pbs_metrics_task_limit: 1000
+    # Verify and GC move on a daily-to-weekly cadence, and the task archive
+    # walk is not free, so a fast interval would only buy noise.
+    pbs_metrics_interval: 5min
+    pbs_node_exporter_args: "--collector.textfile.directory={{ pbs_metrics_textfile_dir }}"
+
+  handlers:
+    - name: Restart prometheus-node-exporter
+      ansible.builtin.systemd_service:
+        name: prometheus-node-exporter
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    - name: Install node exporter
+      ansible.builtin.apt:
+        name: prometheus-node-exporter
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Ensure node exporter textfile directory exists
+      ansible.builtin.file:
+        path: "{{ pbs_metrics_textfile_dir }}"
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: "0755"
+
+    - name: Enable node exporter textfile collector
+      ansible.builtin.lineinfile:
+        path: /etc/default/prometheus-node-exporter
+        regexp: '^ARGS='
+        line: 'ARGS="{{ pbs_node_exporter_args }}"'
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart prometheus-node-exporter
+
+    - name: Ensure node exporter is enabled and running
+      ansible.builtin.systemd_service:
+        name: prometheus-node-exporter
+        enabled: true
+        state: started
+
+    # The textfile flag only takes effect on restart, and the scrape assertion
+    # at the end of this play reads node_exporter's live output. Without an
+    # explicit flush the handler would not have run yet and a correct first
+    # install would fail its own verification.
+    - name: Apply the node exporter argument change before verifying it
+      ansible.builtin.meta: flush_handlers
+
+    - name: Install the PBS metrics collector
+      ansible.builtin.template:
+        src: pbs-metrics.py.j2
+        dest: "{{ pbs_metrics_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the PBS metrics service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pbs-metrics.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Collect Proxmox Backup Server job and datastore metrics
+          Wants=network-online.target
+          After=network-online.target proxmox-backup-proxy.service
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ pbs_metrics_script }}
+
+    - name: Install the PBS metrics timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pbs-metrics.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run the PBS metrics collector every {{ pbs_metrics_interval }}
+
+          [Timer]
+          OnBootSec=2min
+          OnUnitActiveSec={{ pbs_metrics_interval }}
+          RandomizedDelaySec=30
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: Enable the PBS metrics timer
+      ansible.builtin.systemd_service:
+        name: pbs-metrics.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Run the collector once so metrics exist immediately
+      ansible.builtin.command:
+        argv: ["{{ pbs_metrics_script }}"]
+      changed_when: true
+
+    - name: Read the published metrics
+      ansible.builtin.command: "grep -c '^pbs_' {{ pbs_metrics_textfile_dir }}/pbs_metrics.prom"
+      register: pbs_metrics_sample_count
+      # grep exits 1 on no matches; let the assertion below report that rather
+      # than failing here with no explanation.
+      failed_when: false
+      changed_when: false
+
+    # An empty or partial .prom file still scrapes cleanly, so the alerts would
+    # sit on missing series and report nothing wrong.
+    - name: Assert the collector published a complete scrape
+      ansible.builtin.assert:
+        that:
+          - pbs_metrics_sample_count.stdout | int > 0
+        fail_msg: >-
+          {{ pbs_metrics_textfile_dir }}/pbs_metrics.prom has no pbs_ samples.
+          Check `systemctl status pbs-metrics.service` on {{ inventory_hostname }}.
+
+    - name: Verify node exporter is serving the collector output
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:9100/metrics"
+        return_content: true
+      register: pbs_metrics_scrape
+      failed_when: "'pbs_scrape_success 1' not in pbs_metrics_scrape.content"

@@ -1,0 +1,28 @@
+---
+- name: Update CA trust
+  ansible.builtin.command:
+    argv:
+      - update-ca-certificates
+  changed_when: true
+
+- name: Restart chrony
+  ansible.builtin.systemd_service:
+    name: chrony
+    state: restarted
+
+# sssd caches negative lookups aggressively, so a config change that is not
+# followed by a cache invalidation looks like it did nothing.
+- name: Restart sssd
+  ansible.builtin.systemd_service:
+    name: sssd
+    state: restarted
+
+- name: Restart sshd
+  ansible.builtin.systemd_service:
+    name: "{{ claude_workstation_ssh_service }}"
+    state: restarted
+
+- name: Restart xrdp
+  ansible.builtin.systemd_service:
+    name: xrdp
+    state: restarted

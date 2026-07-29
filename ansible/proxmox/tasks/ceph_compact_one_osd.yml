@@ -1,0 +1,35 @@
+---
+# Compacts a single OSD's RocksDB store and waits for the cluster to settle
+# before the caller moves on to the next one. Included from
+# ceph_bluestore_fragmentation.yml.
+
+- name: "Compact osd.{{ ceph_frag_osd_id }}"
+  ansible.builtin.command:
+    argv: [ceph, tell, "osd.{{ ceph_frag_osd_id }}", compact]
+  register: ceph_frag_compact_result
+  changed_when: ceph_frag_compact_result.rc == 0
+  # Compaction on a large store can take minutes; the default command timeout
+  # is not generous enough.
+  async: 1800
+  poll: 15
+
+- name: "Allow osd.{{ ceph_frag_osd_id }} to settle"
+  ansible.builtin.wait_for:
+    timeout: "{{ ceph_frag_settle_seconds }}"
+
+- name: "Wait for PGs to return to active+clean after osd.{{ ceph_frag_osd_id }}"
+  ansible.builtin.command:
+    argv: [ceph, pg, stat, --format, json]
+  register: ceph_frag_pg_stat
+  changed_when: false
+  check_mode: false
+  retries: 40
+  delay: 15
+  until: >-
+    (ceph_frag_pg_stat.stdout | from_json).num_pg_by_state
+    | selectattr('name', 'equalto', 'active+clean') | map(attribute='num') | sum
+    == (ceph_frag_pg_stat.stdout | from_json).num_pgs
+
+- name: "Report osd.{{ ceph_frag_osd_id }} compaction"
+  ansible.builtin.debug:
+    msg: "osd.{{ ceph_frag_osd_id }} compacted; all PGs are active+clean."

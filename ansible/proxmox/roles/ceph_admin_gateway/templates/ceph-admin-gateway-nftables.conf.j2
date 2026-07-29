@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+# Drops non-LAN traffic to the Ceph admin gateway before it reaches HAProxy.
+
+table inet ceph_admin_gateway {
+  chain input {
+    type filter hook input priority filter; policy accept;
+
+    tcp dport {{ ceph_admin_gateway_port }} ip saddr {
+{% for cidr in ceph_admin_gateway_allowed_cidrs %}
+      {{ cidr }}{{ "," if not loop.last else "" }}
+{% endfor %}
+    } accept
+
+    iif "lo" tcp dport {{ ceph_admin_gateway_port }} accept
+    tcp dport {{ ceph_admin_gateway_port }} drop
+  }
+}

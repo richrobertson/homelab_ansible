@@ -1,0 +1,80 @@
+---
+# All Vault reads happen on the controller, not the target. The workstation
+# never holds a Vault token, so a compromise there does not extend to the rest
+# of the secret store.
+- name: Fetch the domain join account from Vault
+  community.hashi_vault.vault_kv2_get:
+    url: "{{ claude_workstation_vault_addr }}"
+    token: "{{ claude_workstation_vault_token }}"
+    engine_mount_point: "{{ claude_workstation_vault_mount }}"
+    path: "{{ claude_workstation_vault_ad_path }}"
+  register: claude_workstation_ad_secret
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: claude_workstation_ad_join | bool
+
+- name: Assert the domain join secret is complete
+  ansible.builtin.assert:
+    that:
+      - claude_workstation_ad_secret.secret[claude_workstation_vault_ad_user_field] | default('') | length > 0
+      - claude_workstation_ad_secret.secret[claude_workstation_vault_ad_password_field] | default('') | length > 0
+    fail_msg: >-
+      {{ claude_workstation_vault_mount }}/{{ claude_workstation_vault_ad_path }}
+      is missing {{ claude_workstation_vault_ad_user_field }} or
+      {{ claude_workstation_vault_ad_password_field }}. The account needs rights
+      to create computer objects in
+      {{ claude_workstation_ad_computer_ou | default('the default Computers container', true) }}.
+  when: claude_workstation_ad_join | bool
+
+- name: Fetch the Anthropic API key from Vault
+  community.hashi_vault.vault_kv2_get:
+    url: "{{ claude_workstation_vault_addr }}"
+    token: "{{ claude_workstation_vault_token }}"
+    engine_mount_point: "{{ claude_workstation_vault_mount }}"
+    path: "{{ claude_workstation_vault_api_path }}"
+  register: claude_workstation_api_secret
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: claude_workstation_manage_api_key | bool
+
+- name: Assert the Anthropic API key is present
+  ansible.builtin.assert:
+    that:
+      - claude_workstation_api_secret.secret[claude_workstation_vault_api_key_field] | default('') | length > 0
+    fail_msg: >-
+      {{ claude_workstation_vault_mount }}/{{ claude_workstation_vault_api_path }}
+      has no {{ claude_workstation_vault_api_key_field }} field. Write one, or
+      set claude_workstation_manage_api_key=false and use the per-user
+      `claude setup-token` flow instead.
+  when: claude_workstation_manage_api_key | bool
+
+# CA material is not secret, but sourcing it from Vault keeps a certificate
+# rotation from becoming a commit to this repository.
+- name: Fetch certificate authorities from the Vault KV store
+  community.hashi_vault.vault_kv2_get:
+    url: "{{ claude_workstation_vault_addr }}"
+    token: "{{ claude_workstation_vault_token }}"
+    engine_mount_point: "{{ claude_workstation_vault_mount }}"
+    path: "{{ item.vault_path }}"
+  register: claude_workstation_ca_secrets
+  loop: "{{ claude_workstation_ca_certificates }}"
+  loop_control:
+    label: "{{ item.name }}"
+  delegate_to: localhost
+  become: false
+  when: claude_workstation_manage_ca_trust | bool
+
+# Vault PKI mounts publish their CA on an unauthenticated endpoint, which is the
+# same source ansible/proxmox/provision_certificates.yml uses for
+# /etc/vault-agent.d/vault-ca.pem.
+- name: Fetch certificate authorities from the Vault PKI mounts
+  ansible.builtin.uri:
+    url: "{{ claude_workstation_vault_addr | regex_replace('/+$', '') }}/v1/{{ item }}/ca/pem"
+    return_content: true
+  register: claude_workstation_pki_cas
+  loop: "{{ claude_workstation_vault_pki_mounts }}"
+  delegate_to: localhost
+  become: false
+  when: claude_workstation_manage_ca_trust | bool

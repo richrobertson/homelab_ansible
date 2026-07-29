@@ -1,0 +1,70 @@
+# {{ ansible_managed }}
+# Replaces the sssd.conf that realmd writes during the join. The difference that
+# matters is access_provider: realmd's default of `ad` admits every enabled
+# account in the directory, which on a domain of any size is not an access
+# control at all.
+
+[sssd]
+domains = {{ claude_workstation_ad_domain }}
+config_file_version = 2
+services = nss, pam
+
+[domain/{{ claude_workstation_ad_domain }}]
+id_provider = ad
+auth_provider = ad
+access_provider = simple
+ad_domain = {{ claude_workstation_ad_domain }}
+krb5_realm = {{ claude_workstation_ad_realm }}
+realmd_tags = manages-system joined-with-adcli
+
+# Deliberately fail-closed: only these principals get a login. Everyone else in
+# the directory is rejected before a password is ever checked, which is also
+# what keeps keyboard-interactive SSH auth from being a broad exposure.
+{% if claude_workstation_ad_allowed_groups | length > 0 %}
+simple_allow_groups = {{ claude_workstation_ad_allowed_groups | join(', ') }}
+{% endif %}
+{% if claude_workstation_ad_allowed_users | length > 0 %}
+simple_allow_users = {{ claude_workstation_ad_allowed_users | join(', ') }}
+{% endif %}
+
+# POSIX attributes are not maintained in this directory, so uid/gid are derived
+# algorithmically from the object SID.
+ldap_id_mapping = True
+
+# The range is forced under 65536 because an unprivileged LXC maps only that
+# many uids to the host. sssd's default range starts at 200000, which lands
+# outside the map and breaks logins in ways that look like filesystem
+# corruption rather than an identity problem. Consequence: uids here differ
+# from a default-range AD host, so do not share uid-sensitive storage between
+# them without reconciling first.
+ldap_idmap_range_min = {{ claude_workstation_sssd_idmap_range_min }}
+ldap_idmap_range_max = {{ claude_workstation_sssd_idmap_range_max }}
+ldap_idmap_range_size = {{ claude_workstation_sssd_idmap_range_size }}
+
+{% if claude_workstation_sssd_use_fully_qualified_names %}
+use_fully_qualified_names = True
+{% else %}
+# Short names. There is one domain here, so qualification only makes login
+# prompts, sudoers entries, and Guacamole username fields more awkward.
+use_fully_qualified_names = False
+{% endif %}
+
+# Enumeration pulls the whole directory into every getent passwd. Off.
+enumerate = {{ 'True' if claude_workstation_sssd_enumerate | bool else 'False' }}
+fallback_homedir = {{ claude_workstation_sssd_fallback_homedir }}
+default_shell = {{ claude_workstation_sssd_default_shell }}
+
+# Cached credentials let someone already known to the host log in when a DC is
+# unreachable. On a workstation that is worth the offline hash at rest.
+cache_credentials = {{ 'True' if claude_workstation_sssd_cache_credentials | bool else 'False' }}
+krb5_store_password_if_offline = {{ 'True' if claude_workstation_sssd_cache_credentials | bool else 'False' }}
+
+{% if claude_workstation_sssd_ldap_uri | length > 0 %}
+ldap_uri = {{ claude_workstation_sssd_ldap_uri }}
+{% endif %}
+# The AD provider seals LDAP traffic with GSSAPI over port 389 by default, so
+# these only take effect once ldap_uri above points at ldaps://. They are set to
+# validating values regardless, so switching to LDAPS is a one-line change that
+# cannot accidentally land on an unverified connection.
+ldap_tls_reqcert = {{ claude_workstation_sssd_ldap_tls_reqcert }}
+ldap_tls_cacert = {{ claude_workstation_sssd_ldap_tls_cacert }}

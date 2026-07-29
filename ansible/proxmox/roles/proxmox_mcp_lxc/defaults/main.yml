@@ -1,0 +1,35 @@
+---
+# Container identity.
+proxmox_mcp_lxc_vmid: 9010
+proxmox_mcp_lxc_hostname: mcp0
+proxmox_mcp_lxc_description: Proxmox MCP server (managed by homelab_ansible)
+
+# Guest OS template. The role downloads this template with pveam when it is not
+# already present on the node.
+proxmox_mcp_lxc_template_storage: local
+proxmox_mcp_lxc_template: debian-12-standard_12.7-1_amd64.tar.zst
+
+# Sizing. The workload is a Node process plus an HTTP bridge, so this is small
+# on purpose; raise cores/memory only if you enable elevated write tooling.
+proxmox_mcp_lxc_storage: local-lvm
+proxmox_mcp_lxc_rootfs_gb: 8
+proxmox_mcp_lxc_cores: 2
+proxmox_mcp_lxc_memory_mb: 1024
+proxmox_mcp_lxc_swap_mb: 512
+
+# Networking. Static addressing keeps the MCP endpoint stable for clients.
+proxmox_mcp_lxc_bridge: vmbr0
+proxmox_mcp_lxc_ipv4_cidr: 192.168.1.60/24
+proxmox_mcp_lxc_gateway: 192.168.1.1
+proxmox_mcp_lxc_vlan_tag: ""
+proxmox_mcp_lxc_nameserver: 192.168.1.3
+proxmox_mcp_lxc_searchdomain: myrobertson.net
+
+# Runtime behaviour.
+proxmox_mcp_lxc_unprivileged: true
+proxmox_mcp_lxc_onboot: true
+proxmox_mcp_lxc_start: true
+
+# Public key injected so the controller can reach the container over SSH after
+# creation. Defaults to the key of the user running the playbook.
+proxmox_mcp_lxc_ssh_public_key_file: "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519.pub"

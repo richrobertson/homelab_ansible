@@ -1,0 +1,216 @@
+---
+# Provisions the PBS notification target and matcher that carry gc, prune, and
+# verify failures to a human.
+#
+#   export VAULT_ADDR=https://vault.myrobertson.net:8200
+#   export VAULT_TOKEN="$(cat ~/.vault-token)"
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/pbs_notification_targets.yml
+#
+# ansible/proxmox/pbs_datastore_maintenance.yml sets
+# `--notification-mode notification-system --notify gc=error,prune=error,verify=error`
+# on every managed datastore, which is only worth anything if the notification
+# system has somewhere to deliver to. It did not: the only enabled target was a
+# gotify endpoint pointing at http://192.168.1.215:8180, the Synology-hosted
+# gotify that was retired when gotify moved into Kubernetes, and the built-in
+# mail-to-root sendmail target is disabled. Verify failures on the offsite
+# pbs-b2 datastore were emitted into that void for weeks.
+#
+# Pairs with the Prometheus side in ansible/proxmox/pbs_metrics.yml and the
+# alert rules in homelab_flux/infrastructure/configs/pbs-alerts.yaml. The two
+# paths are deliberately independent: this one tells you the moment a job
+# fails, the Prometheus path still tells you when this one stops working.
+
+- name: Provision PBS notification delivery for maintenance job failures
+  hosts: "{{ pbs_notification_hosts | default('pbs_servers') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    pbs_notification_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    pbs_notification_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    pbs_notification_vault_mount: secret
+    # The application token gotify-bridge already uses for Alertmanager. A
+    # dedicated Gotify application would need a client token this repo does not
+    # manage, and PBS sets its own message title, so attribution survives.
+    pbs_notification_vault_path: monitoring/gotify/prod
+    pbs_notification_vault_token_field: token
+
+    pbs_notification_target: homelab-gotify
+    # The public hostname rather than the gateway address 10.31.0.69, because
+    # only the hostname has a certificate the Istio gateway will serve.
+    pbs_notification_gotify_server: https://gotify.myrobertson.com
+    pbs_notification_matcher: homelab-pbs-errors
+    # gc/prune/verify raise error, and PBS raises warning for work that finished
+    # but degraded. Anything below that is routine and would train people to
+    # ignore the channel.
+    pbs_notification_match_severities:
+      - warning
+      - error
+    # Targets that no longer accept deliveries. Stripped from every matcher
+    # before the target itself goes, because PBS refuses to delete a target that
+    # a matcher still references.
+    pbs_notification_retired_targets:
+      - scooter
+
+  tasks:
+    - name: Require Vault environment
+      ansible.builtin.assert:
+        that:
+          - pbs_notification_vault_addr | length > 0
+          - pbs_notification_vault_token | length > 0
+        fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running this playbook.
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Fetch the Gotify application token from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ pbs_notification_vault_addr }}"
+        token: "{{ pbs_notification_vault_token }}"
+        engine_mount_point: "{{ pbs_notification_vault_mount }}"
+        path: "{{ pbs_notification_vault_path }}"
+      register: pbs_notification_vault_secret
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Assert the Gotify token is present
+      ansible.builtin.assert:
+        that:
+          - pbs_notification_vault_secret.secret[pbs_notification_vault_token_field] | default('') | length > 0
+        fail_msg: >-
+          {{ pbs_notification_vault_mount }}/{{ pbs_notification_vault_path }} has no
+          {{ pbs_notification_vault_token_field }} field. PBS cannot post to Gotify without it.
+
+    - name: Read current notification targets
+      ansible.builtin.command: proxmox-backup-manager notification target list --output-format json
+      register: pbs_existing_targets
+      changed_when: false
+
+    - name: Read current notification matchers
+      ansible.builtin.command: proxmox-backup-manager notification matcher list --output-format json
+      register: pbs_existing_matchers
+      changed_when: false
+
+    - name: Reconcile the Gotify notification endpoint
+      ansible.builtin.command:
+        argv:
+          - proxmox-backup-manager
+          - notification
+          - endpoint
+          - gotify
+          - "{{ 'update' if pbs_notification_target in ((pbs_existing_targets.stdout | from_json) | map(attribute='name') | list) else 'create' }}"
+          - "{{ pbs_notification_target }}"
+          - --server
+          - "{{ pbs_notification_gotify_server }}"
+          - --token
+          - "{{ pbs_notification_vault_secret.secret[pbs_notification_vault_token_field] }}"
+          - --comment
+          - PBS gc/prune/verify failures, managed by ansible/proxmox/pbs_notification_targets.yml
+      no_log: true
+      changed_when: true
+
+    - name: Reconcile the failure matcher
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [
+              'proxmox-backup-manager', 'notification', 'matcher',
+              ('update' if pbs_notification_matcher in (pbs_current_matcher_names) else 'create'),
+              pbs_notification_matcher,
+              '--mode', 'any',
+              '--target', pbs_notification_target,
+              '--comment', 'Deliver PBS maintenance failures to Gotify',
+            ]
+            + (
+                (['--match-severity'] * (pbs_notification_match_severities | length))
+                | zip(pbs_notification_match_severities) | flatten | list
+              )
+          }}
+      vars:
+        pbs_current_matcher_names: "{{ (pbs_existing_matchers.stdout | from_json) | map(attribute='name') | list }}"
+      changed_when: true
+
+    # A matcher left pointing only at a dead target keeps reporting as
+    # configured while delivering nothing, so retired targets are rewritten out
+    # rather than left in place alongside the new one.
+    - name: Drop retired targets from every matcher that still references them
+      ansible.builtin.command:
+        argv: >-
+          {{
+            ['proxmox-backup-manager', 'notification', 'matcher', 'update', item.name]
+            + (
+                (['--target'] * (pbs_surviving_targets | length))
+                | zip(pbs_surviving_targets) | flatten | list
+              )
+          }}
+      vars:
+        # Never leave a matcher with an empty target list: falling back to the
+        # managed target keeps whatever that matcher was for still arriving.
+        pbs_surviving_targets: >-
+          {{
+            (item.target | difference(pbs_notification_retired_targets))
+            or [pbs_notification_target]
+          }}
+      loop: "{{ pbs_existing_matchers.stdout | from_json }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: (item.target | default([]) | intersect(pbs_notification_retired_targets)) | length > 0
+      changed_when: true
+
+    - name: Remove retired notification targets
+      ansible.builtin.command: "proxmox-backup-manager notification endpoint {{ item.type }} delete {{ item.name }}"
+      loop: >-
+        {{
+          (pbs_existing_targets.stdout | from_json)
+          | selectattr('name', 'in', pbs_notification_retired_targets)
+          | list
+        }}
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+
+    # A target that exists but silently drops deliveries is the exact failure
+    # this playbook was written to fix, so provisioning is not finished until
+    # PBS has actually pushed a message through it.
+    - name: Send a test notification through the target
+      ansible.builtin.command: "proxmox-backup-manager notification target test {{ pbs_notification_target }}"
+      changed_when: false
+
+    - name: Re-read notification targets and matchers
+      ansible.builtin.command: "proxmox-backup-manager notification {{ item }} list --output-format json"
+      loop:
+        - target
+        - matcher
+      register: pbs_reconciled_notifications
+      changed_when: false
+
+    - name: Assert the delivery path survived reconciliation
+      ansible.builtin.assert:
+        that:
+          - pbs_managed_target | length == 1
+          - (pbs_managed_target | map(attribute='disable', default=false) | select | list | length) == 0
+          - pbs_notification_matcher in (pbs_reconciled_matchers | map(attribute='name') | list)
+          - pbs_notification_target in pbs_managed_matcher_targets
+          - (pbs_reconciled_targets | selectattr('name', 'in', pbs_notification_retired_targets) | list | length) == 0
+        fail_msg: >-
+          PBS has no enabled {{ pbs_notification_target }} target wired to the
+          {{ pbs_notification_matcher }} matcher. gc, prune, and verify failures
+          would be delivered nowhere.
+      vars:
+        pbs_reconciled_targets: "{{ pbs_reconciled_notifications.results[0].stdout | from_json }}"
+        pbs_reconciled_matchers: "{{ pbs_reconciled_notifications.results[1].stdout | from_json }}"
+        pbs_managed_target: "{{ pbs_reconciled_targets | selectattr('name', 'equalto', pbs_notification_target) | list }}"
+        pbs_managed_matcher_targets: >-
+          {{
+            pbs_reconciled_matchers
+            | selectattr('name', 'equalto', pbs_notification_matcher)
+            | map(attribute='target') | flatten | list
+          }}
+
+    - name: Show the reconciled notification configuration
+      ansible.builtin.debug:
+        msg:
+          - "{{ pbs_reconciled_notifications.results[0].stdout }}"
+          - "{{ pbs_reconciled_notifications.results[1].stdout }}"

@@ -1,0 +1,128 @@
+---
+# Written before the join so that adcli and every later kinit use it. The
+# default_ccache_name override is the important line: modern krb5 defaults to a
+# KEYRING ccache, and the kernel keyring is not namespaced into an unprivileged
+# LXC, so ticket storage fails in ways that look like a bad password. A FILE
+# ccache sidesteps the whole problem.
+- name: Write the Kerberos client configuration
+  ansible.builtin.template:
+    src: krb5.conf.j2
+    dest: /etc/krb5.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart sssd
+
+- name: Read the realms this host has already joined
+  ansible.builtin.command:
+    argv:
+      - realm
+      - list
+      - --name-only
+  register: claude_workstation_realm_list
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Join the Active Directory domain
+  ansible.builtin.command:
+    argv: "{{ claude_workstation_realm_join_argv }}"
+    stdin: "{{ claude_workstation_ad_secret.secret[claude_workstation_vault_ad_password_field] }}"
+  vars:
+    # realm join reads the password from stdin when --user is given without a
+    # password, which keeps it off the process command line.
+    claude_workstation_realm_join_argv: >-
+      {{
+        [
+          'realm', 'join',
+          '--user', claude_workstation_ad_secret.secret[claude_workstation_vault_ad_user_field],
+          '--os-name', claude_workstation_ad_os_name,
+          '--membership-software', 'adcli',
+          '--client-software', 'sssd',
+        ]
+        + (['--computer-ou', claude_workstation_ad_computer_ou] if claude_workstation_ad_computer_ou | length > 0 else [])
+        + [claude_workstation_ad_domain]
+      }}
+  when: claude_workstation_ad_domain not in (claude_workstation_realm_list.stdout_lines | map('lower') | list)
+  changed_when: true
+  no_log: true
+  notify: Restart sssd
+
+# realmd writes its own sssd.conf during the join, including
+# `access_provider = ad`, which permits every enabled account in the directory.
+# Overwriting it afterwards with the simple provider is what actually makes the
+# allowlist take effect.
+- name: Write the sssd configuration
+  ansible.builtin.template:
+    src: sssd.conf.j2
+    dest: /etc/sssd/sssd.conf
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart sssd
+
+- name: Enable sssd at boot
+  ansible.builtin.systemd_service:
+    name: sssd
+    enabled: true
+    state: started
+
+- name: Enable the oddjob home directory service
+  ansible.builtin.systemd_service:
+    name: oddjobd
+    enabled: true
+    state: started
+
+# Debian's pam-config for automatic home directory creation is named mkhomedir
+# and ships with libpam-modules; oddjob-mkhomedir is installed because realmd
+# expects it, but PAM stacking still goes through pam-auth-update.
+- name: Check whether PAM creates home directories on first login
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -q
+      - mkhomedir
+      - /etc/pam.d/common-session
+  register: claude_workstation_mkhomedir
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Enable automatic home directory creation
+  ansible.builtin.command:
+    argv:
+      - pam-auth-update
+      - --enable
+      - mkhomedir
+  when: claude_workstation_mkhomedir.rc != 0
+  changed_when: true
+
+- name: Apply the sssd configuration before verifying it
+  ansible.builtin.meta: flush_handlers
+
+# A join that succeeds but resolves nothing is the common failure mode here
+# (usually DNS pointing at a forwarder that does not serve the AD SRV records),
+# and it is far cheaper to catch now than at someone's first login.
+- name: Verify that a domain group resolves
+  ansible.builtin.command:
+    argv:
+      - getent
+      - group
+      - "{{ claude_workstation_ad_allowed_groups | first }}"
+  register: claude_workstation_group_lookup
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: claude_workstation_ad_allowed_groups | length > 0
+
+- name: Warn when the access group does not resolve
+  ansible.builtin.debug:
+    msg: >-
+      sssd cannot resolve the group
+      "{{ claude_workstation_ad_allowed_groups | first }}". Nobody will be able
+      to log in until it exists in {{ claude_workstation_ad_domain }} and
+      `getent group` returns it. Check DNS first: the host must resolve
+      _ldap._tcp.{{ claude_workstation_ad_domain }} SRV records.
+  when:
+    - claude_workstation_ad_allowed_groups | length > 0
+    - claude_workstation_group_lookup.rc | default(1) != 0

@@ -1,0 +1,236 @@
+---
+- name: Require Vault environment
+  ansible.builtin.assert:
+    that:
+      - proxmox_mcp_vault_addr | length > 0
+      - proxmox_mcp_vault_token | length > 0
+    fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running this role.
+  run_once: true
+  delegate_to: localhost
+  become: false
+
+- name: Set derived Proxmox identity facts
+  ansible.builtin.set_fact:
+    proxmox_mcp_userid: "{{ proxmox_mcp_token_user }}@{{ proxmox_mcp_token_realm }}"
+    proxmox_mcp_tokenid: "{{ proxmox_mcp_token_user }}@{{ proxmox_mcp_token_realm }}!{{ proxmox_mcp_token_name }}"
+
+- name: Read existing MCP secret from Vault
+  community.hashi_vault.vault_kv2_get:
+    url: "{{ proxmox_mcp_vault_addr }}"
+    token: "{{ proxmox_mcp_vault_token }}"
+    engine_mount_point: "{{ proxmox_mcp_vault_mount }}"
+    path: "{{ proxmox_mcp_vault_path }}"
+  register: proxmox_mcp_vault_existing
+  failed_when: false
+  no_log: true
+  delegate_to: localhost
+  become: false
+
+- name: Record whether Vault already holds a usable token secret
+  ansible.builtin.set_fact:
+    proxmox_mcp_vault_has_secret: >-
+      {{ (proxmox_mcp_vault_existing.secret.token_secret | default('')) | length > 0 }}
+  no_log: true
+
+- name: List existing Proxmox roles
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - role
+      - list
+      - --output-format
+      - json
+  register: proxmox_mcp_role_list
+  changed_when: false
+  check_mode: false
+
+- name: Determine the current state of the MCP role
+  ansible.builtin.set_fact:
+    proxmox_mcp_role_present: >-
+      {{ proxmox_mcp_token_role in (proxmox_mcp_role_list.stdout | from_json | map(attribute='roleid') | list) }}
+    proxmox_mcp_role_current_privs: >-
+      {{ (proxmox_mcp_role_list.stdout | from_json
+          | selectattr('roleid', 'equalto', proxmox_mcp_token_role)
+          | map(attribute='privs') | first | default(''))
+         | split(',') | map('trim') | reject('equalto', '') | list | sort }}
+
+- name: Create the least-privilege MCP role
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - role
+      - add
+      - "{{ proxmox_mcp_token_role }}"
+      - --privs
+      - "{{ proxmox_mcp_token_privileges | join(',') }}"
+  when: not proxmox_mcp_role_present
+  changed_when: true
+
+- name: Reconcile privileges when the existing MCP role has drifted
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - role
+      - modify
+      - "{{ proxmox_mcp_token_role }}"
+      - --privs
+      - "{{ proxmox_mcp_token_privileges | join(',') }}"
+  when:
+    - proxmox_mcp_role_present
+    - proxmox_mcp_role_current_privs != (proxmox_mcp_token_privileges | sort)
+  changed_when: true
+
+- name: List existing Proxmox users
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - user
+      - list
+      - --output-format
+      - json
+  register: proxmox_mcp_user_list
+  changed_when: false
+  check_mode: false
+
+- name: Create the MCP service user
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - user
+      - add
+      - "{{ proxmox_mcp_userid }}"
+      - --comment
+      - "{{ proxmox_mcp_token_comment }}"
+  when: proxmox_mcp_userid not in (proxmox_mcp_user_list.stdout | from_json | map(attribute='userid') | list)
+  changed_when: true
+
+- name: Read the current ACL table
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - acl
+      - list
+      - --output-format
+      - json
+  register: proxmox_mcp_acl_list
+  changed_when: false
+  check_mode: false
+
+- name: Grant the MCP role to the service user
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - acl
+      - modify
+      - "{{ proxmox_mcp_token_acl_path }}"
+      - --users
+      - "{{ proxmox_mcp_userid }}"
+      - --roles
+      - "{{ proxmox_mcp_token_role }}"
+  vars:
+    proxmox_mcp_acl_present: >-
+      {{ (proxmox_mcp_acl_list.stdout | from_json)
+         | selectattr('path', 'equalto', proxmox_mcp_token_acl_path)
+         | selectattr('ugid', 'equalto', proxmox_mcp_userid)
+         | selectattr('roleid', 'equalto', proxmox_mcp_token_role)
+         | list | length > 0 }}
+  when: not (proxmox_mcp_acl_present | bool)
+  changed_when: true
+
+- name: List existing API tokens for the MCP user
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - user
+      - token
+      - list
+      - "{{ proxmox_mcp_userid }}"
+      - --output-format
+      - json
+  register: proxmox_mcp_token_list
+  changed_when: false
+  check_mode: false
+
+- name: Determine whether the API token already exists
+  ansible.builtin.set_fact:
+    proxmox_mcp_token_present: >-
+      {{ proxmox_mcp_token_name in (proxmox_mcp_token_list.stdout | from_json | map(attribute='tokenid') | list) }}
+
+# A token whose secret is missing from Vault is unusable: Proxmox will not
+# reveal it again. Recreating is the only way back to a known-good state.
+- name: Decide whether the token must be created or recreated
+  ansible.builtin.set_fact:
+    proxmox_mcp_token_needs_create: >-
+      {{ (proxmox_mcp_token_rotate | bool)
+         or (not proxmox_mcp_token_present)
+         or (not (proxmox_mcp_vault_has_secret | bool)) }}
+
+- name: Report why the token is being recreated
+  ansible.builtin.debug:
+    msg: >-
+      Recreating {{ proxmox_mcp_tokenid }} because
+      {{ 'rotation was requested' if proxmox_mcp_token_rotate | bool
+         else ('it does not exist yet' if not proxmox_mcp_token_present
+               else 'its secret is absent from Vault and cannot be recovered') }}.
+  when: proxmox_mcp_token_needs_create | bool
+
+- name: Remove the stale API token before recreating it
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - user
+      - token
+      - remove
+      - "{{ proxmox_mcp_userid }}"
+      - "{{ proxmox_mcp_token_name }}"
+  when:
+    - proxmox_mcp_token_needs_create | bool
+    - proxmox_mcp_token_present | bool
+  changed_when: true
+
+# privsep=0 makes the token inherit the user's ACL rather than requiring a
+# second, separate grant. The user itself only holds the read-only MCP role.
+- name: Create the API token
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - user
+      - token
+      - add
+      - "{{ proxmox_mcp_userid }}"
+      - "{{ proxmox_mcp_token_name }}"
+      - --privsep
+      - "0"
+      - --comment
+      - "{{ proxmox_mcp_token_comment }}"
+      - --output-format
+      - json
+  register: proxmox_mcp_token_created
+  when: proxmox_mcp_token_needs_create | bool
+  changed_when: true
+  no_log: true
+
+- name: Persist the new token secret to Vault
+  community.hashi_vault.vault_kv2_write:
+    url: "{{ proxmox_mcp_vault_addr }}"
+    token: "{{ proxmox_mcp_vault_token }}"
+    engine_mount_point: "{{ proxmox_mcp_vault_mount }}"
+    path: "{{ proxmox_mcp_vault_path }}"
+    data:
+      user: "{{ proxmox_mcp_userid }}"
+      token_name: "{{ proxmox_mcp_token_name }}"
+      token_id: "{{ proxmox_mcp_tokenid }}"
+      token_secret: "{{ (proxmox_mcp_token_created.stdout | from_json).value }}"
+      role: "{{ proxmox_mcp_token_role }}"
+      privileges: "{{ proxmox_mcp_token_privileges | join(',') }}"
+  when: proxmox_mcp_token_needs_create | bool
+  no_log: true
+  delegate_to: localhost
+  become: false
+
+- name: Report the token state
+  ansible.builtin.debug:
+    msg: >-
+      {{ proxmox_mcp_tokenid }} is present with role {{ proxmox_mcp_token_role }}
+      ({{ proxmox_mcp_token_privileges | join(', ') }}); secret stored at
+      {{ proxmox_mcp_vault_mount }}/{{ proxmox_mcp_vault_path }}.

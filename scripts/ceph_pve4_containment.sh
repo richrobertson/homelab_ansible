@@ -91,6 +91,11 @@ print_containment_actions() {
   cat <<'EOF'
 
 ===== Recommended containment actions (manual; not executed) =====
+0) If cluster health is only HEALTH_WARN with BLUESTORE_FREE_FRAGMENTATION,
+   the cause is fragmented BlueStore free space on one or more OSDs. Inspect
+   the affected OSD's allocator score / free-dump, then plan Ceph-side
+   remediation such as deep scrub, compaction, or OSD replacement if the
+   fragmentation is severe.
 1) Freeze placement on pve4 in Proxmox UI (avoid new workloads there).
 2) Keep Ceph control plane on pve3/pve5; do not restart cluster-wide Ceph.
 3) Keep running read-only safety checks from pve3 or pve5:

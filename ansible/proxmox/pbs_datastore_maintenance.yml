@@ -11,6 +11,10 @@
       - /mnt/datastore/pbs-s3-cache
     pbs_datastore_notify: gc=error,prune=error,verify=error
     pbs_datastore_tuning: sync-level=filesystem,gc-atime-safety-check=1,default-verification-readers=1,default-verification-workers=2
+    # Provisioned by ansible/proxmox/pbs_notification_targets.yml. Named here so
+    # that deleting it fails this run instead of quietly turning the notify
+    # settings below into a no-op.
+    pbs_required_notification_target: homelab-gotify
     pbs_managed_datastores:
       - name: pbs-s3
         gc_schedule: "sun 11:30"
@@ -144,6 +148,41 @@
       loop: "{{ pbs_retired_datastore_checks.results }}"
       when: item.rc == 0
       changed_when: true
+
+    - name: Read notification targets and matchers
+      ansible.builtin.command: "proxmox-backup-manager notification {{ item }} list --output-format json"
+      loop:
+        - target
+        - matcher
+      register: pbs_notification_config
+      changed_when: false
+
+    # `--notify gc=error,prune=error,verify=error` below is only worth anything
+    # if the notification system still has a live route. It did not for weeks:
+    # the one enabled target pointed at the retired Synology gotify, so verify
+    # failures on the offsite datastore went nowhere.
+    - name: Assert maintenance failures still have somewhere to be delivered
+      ansible.builtin.assert:
+        that:
+          - pbs_required_target | length == 1
+          - (pbs_required_target | map(attribute='disable', default=false) | select | list | length) == 0
+          - pbs_required_notification_target in pbs_routed_targets
+        fail_msg: >-
+          No enabled {{ pbs_required_notification_target }} notification target is routed
+          by any matcher on {{ inventory_hostname }}. Run
+          ansible/proxmox/pbs_notification_targets.yml before tuning datastore notifications.
+      vars:
+        pbs_required_target: >-
+          {{
+            (pbs_notification_config.results[0].stdout | from_json)
+            | selectattr('name', 'equalto', pbs_required_notification_target) | list
+          }}
+        pbs_routed_targets: >-
+          {{
+            (pbs_notification_config.results[1].stdout | from_json)
+            | rejectattr('disable', 'defined')
+            | map(attribute='target', default=[]) | flatten | list
+          }}
 
     - name: Apply datastore GC, notification, and verification defaults
       ansible.builtin.command:

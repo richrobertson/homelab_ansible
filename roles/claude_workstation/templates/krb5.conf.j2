@@ -1,0 +1,27 @@
+# {{ ansible_managed }}
+
+[libdefaults]
+    default_realm = {{ claude_workstation_ad_realm }}
+    dns_lookup_realm = false
+    dns_lookup_kdc = true
+    rdns = false
+    forwardable = true
+
+    # krb5 defaults to a KEYRING ccache. The kernel keyring is not namespaced
+    # into an unprivileged LXC, so ticket storage there fails in ways that
+    # surface as "password incorrect" rather than as a keyring error. A FILE
+    # ccache avoids the whole class of problem and costs nothing here.
+    default_ccache_name = FILE:/tmp/krb5cc_%{uid}
+
+[realms]
+    {{ claude_workstation_ad_realm }} = {
+{% for dc in claude_workstation_domain_controllers %}
+        kdc = {{ dc }}
+{% endfor %}
+        admin_server = {{ claude_workstation_domain_controllers | first }}
+        default_domain = {{ claude_workstation_ad_domain }}
+    }
+
+[domain_realm]
+    .{{ claude_workstation_ad_domain }} = {{ claude_workstation_ad_realm }}
+    {{ claude_workstation_ad_domain }} = {{ claude_workstation_ad_realm }}

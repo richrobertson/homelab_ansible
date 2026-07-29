@@ -1,0 +1,19 @@
+# {{ ansible_managed }}
+# supergateway performs no inbound authentication, so reachability is the only
+# access control on the MCP endpoint. Anything that can open TCP
+# {{ proxmox_mcp_port }} gets the full read-only tool surface.
+
+table inet proxmox_mcp {
+  chain input {
+    type filter hook input priority filter; policy accept;
+
+    tcp dport {{ proxmox_mcp_port }} ip saddr {
+{% for cidr in proxmox_mcp_allowed_client_cidrs %}
+      {{ cidr }}{{ "," if not loop.last else "" }}
+{% endfor %}
+    } accept
+
+    iif "lo" tcp dport {{ proxmox_mcp_port }} accept
+    tcp dport {{ proxmox_mcp_port }} drop
+  }
+}

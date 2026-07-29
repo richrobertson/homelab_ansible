@@ -10,3 +10,17 @@
     - never
     - ceph_dashboard
     - ceph_admin_portal
+- import_playbook: ../../ansible/proxmox/ceph_admin_gateway.yml
+  tags:
+    - never
+    - ceph_admin_gateway
+# Audit-only by default; pass -e ceph_frag_compact=true to remediate.
+- import_playbook: ../../ansible/proxmox/ceph_bluestore_fragmentation.yml
+  tags:
+    - never
+    - ceph_fragmentation
+- import_playbook: ../../ansible/proxmox/ceph_fragmentation_metrics.yml
+  tags:
+    - never
+    - ceph_fragmentation_metrics
+    - metrics

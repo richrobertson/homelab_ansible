@@ -1,0 +1,52 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Proxmox MCP server (stdio) fronted by a Streamable HTTP bridge
+Documentation=https://github.com/gilby125/mcp-proxmox
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ proxmox_mcp_user }}
+Group={{ proxmox_mcp_group }}
+WorkingDirectory={{ proxmox_mcp_install_dir }}
+EnvironmentFile={{ proxmox_mcp_env_file }}
+
+ExecStart=/usr/bin/supergateway \
+  --stdio "/usr/bin/node {{ proxmox_mcp_install_dir }}/{{ proxmox_mcp_entrypoint }}" \
+  --outputTransport streamableHttp \
+  --port {{ proxmox_mcp_port }} \
+  --streamableHttpPath {{ proxmox_mcp_http_path }} \
+  --healthEndpoint {{ proxmox_mcp_health_path }} \
+  --stateful \
+  --sessionTimeout {{ proxmox_mcp_session_timeout_ms }} \
+  --logLevel {{ proxmox_mcp_log_level }}
+
+Restart=on-failure
+RestartSec=5s
+
+# The service only needs to read its own install tree and talk to the Proxmox
+# API, so everything else is closed off.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

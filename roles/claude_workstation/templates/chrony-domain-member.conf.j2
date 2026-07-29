@@ -1,0 +1,18 @@
+# {{ ansible_managed }}
+# Domain member clock. The sources are the domain controllers rather than a
+# public pool because Kerberos compares this host's clock against the KDC's, not
+# against UTC; following the DCs keeps the skew that matters at zero even if the
+# DCs themselves drift.
+
+{% for server in claude_workstation_ntp_servers %}
+server {{ server }} iburst
+{% endfor %}
+
+# A container can come back from a suspended host with a large offset. Stepping
+# is preferable to slewing here: Kerberos gives up at five minutes of skew long
+# before a slew would close the gap.
+makestep 1.0 3
+rtcsync
+
+driftfile /var/lib/chrony/chrony.drift
+logdir /var/log/chrony

@@ -1,0 +1,49 @@
+---
+# --- Published endpoint ------------------------------------------------------
+# The name operators actually type. This must be a valid RFC 1123 hostname:
+# Vault's PKI role sets enforce_hostnames=true and will refuse to issue a
+# certificate for a label containing an underscore. See the runbook for the
+# override path if an underscore name is genuinely required.
+ceph_admin_gateway_fqdn: ceph-admin.cl0.myrobertson.net
+ceph_admin_gateway_extra_sans:
+  - ceph.cl0.myrobertson.net
+ceph_admin_gateway_port: 443
+
+# Floating address that follows whichever node currently holds VRRP mastership.
+ceph_admin_gateway_vip: 192.168.1.246
+ceph_admin_gateway_vip_cidr: 24
+ceph_admin_gateway_vrrp_interface: vmbr0
+ceph_admin_gateway_vrrp_id: 51
+ceph_admin_gateway_vrrp_base_priority: 100
+
+# --- Upstream Ceph dashboard -------------------------------------------------
+# The dashboard runs on the active mgr only; standbys answer with a 303
+# redirect. Health-checking for a literal 200 is what steers traffic to the
+# active mgr without exposing the redirect to the browser.
+ceph_admin_gateway_dashboard_port: 8089
+ceph_admin_gateway_backend_nodes: "{{ groups['proxmox_nodes'] }}"
+
+# --- Access control ----------------------------------------------------------
+# LAN-only. HAProxy rejects anything outside these ranges before it reaches the
+# dashboard, and nftables drops it before it reaches HAProxy.
+ceph_admin_gateway_allowed_cidrs:
+  - 192.168.1.0/24
+ceph_admin_gateway_manage_firewall: true
+
+# --- TLS via the existing Proxmox Vault Agent AppRole ------------------------
+# These paths are created by ansible/proxmox/provision_certificates.yml. This
+# role reuses that AppRole and PKI role rather than bootstrapping its own.
+ceph_admin_gateway_vault_addr: https://vault.myrobertson.net:8200
+ceph_admin_gateway_vault_ca_file: /etc/vault-agent.d/vault-ca.pem
+ceph_admin_gateway_role_id_file: /etc/vault-agent.d/proxmox-role-id
+ceph_admin_gateway_secret_id_file: /etc/vault-agent.d/proxmox-secret-id
+ceph_admin_gateway_pki_mount: pki_int
+ceph_admin_gateway_pki_role: proxmox-api
+ceph_admin_gateway_cert_ttl: 720h
+
+ceph_admin_gateway_agent_name: vault-agent-ceph-admin
+ceph_admin_gateway_agent_dir: /etc/vault-agent.d
+ceph_admin_gateway_agent_config: /etc/vault-agent.d/ceph-admin-gateway.hcl
+ceph_admin_gateway_agent_runtime_dir: /var/lib/vault-agent/ceph-admin
+ceph_admin_gateway_cert_dir: /etc/haproxy/certs
+ceph_admin_gateway_pem_file: /etc/haproxy/certs/ceph-admin.pem
