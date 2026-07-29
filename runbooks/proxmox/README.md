@@ -16,6 +16,7 @@ This folder contains operational runbooks captured from real maintenance and inc
 - [Proxmox Authelia SSO](./proxmox-authelia-sso.md)
 - [Staging cluster rebuild and SDN investigation (2026-03-31)](./staging-cluster-rebuild-and-sdn-investigation-2026-03-31.md)
 - [Proxmox MCP server](./proxmox-mcp-server.md)
+- [PBS API certificate renewal](./pbs-certificate-renewal.md)
 - [Claude Code workstation (AD-joined, via Guacamole)](./claude-workstation.md)
 
 ## Scope
