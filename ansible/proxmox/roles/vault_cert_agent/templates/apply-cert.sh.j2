@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# Installs the Vault-Agent-issued certificate for {{ vault_cert_agent_service_name }}
+# and reloads the service only when the material actually changed. Invoked by the
+# Vault Agent template `command`; managed by roles/vault_cert_agent.
+set -euo pipefail
+
+BUNDLE="{{ vault_cert_agent_bundle_file }}"
+CERT_FILE="{{ vault_cert_agent_cert_file }}"
+KEY_FILE="{{ vault_cert_agent_key_file }}"
+OWNER="{{ vault_cert_agent_owner }}"
+GROUP="{{ vault_cert_agent_group }}"
+MODE="{{ vault_cert_agent_mode }}"
+
+cert_tmp=$(mktemp)
+key_tmp=$(mktemp)
+combined_tmp=$(mktemp)
+trap 'rm -f "$cert_tmp" "$key_tmp" "$combined_tmp"' EXIT
+
+awk '/^CERT_BEGIN$/{f=1;next} /^CERT_END$/{f=0} f' "$BUNDLE" > "$cert_tmp"
+awk '/^KEY_BEGIN$/{f=1;next} /^KEY_END$/{f=0} f' "$BUNDLE" > "$key_tmp"
+
+if [[ ! -s "$cert_tmp" || ! -s "$key_tmp" ]]; then
+  echo "apply-cert: failed to parse certificate bundle from $BUNDLE" >&2
+  exit 1
+fi
+
+changed=0
+install_if_changed() {  # <src> <dst>
+  local src="$1" dst="$2"
+  if [[ ! -f "$dst" ]] || ! cmp -s "$src" "$dst"; then
+    install -o "$OWNER" -g "$GROUP" -m "$MODE" "$src" "$dst"
+    changed=1
+  fi
+}
+
+if [[ "$CERT_FILE" == "$KEY_FILE" ]]; then
+  # Single combined PEM (leaf + chain + key), e.g. HAProxy.
+  cat "$cert_tmp" "$key_tmp" > "$combined_tmp"
+  install_if_changed "$combined_tmp" "$CERT_FILE"
+else
+  install_if_changed "$cert_tmp" "$CERT_FILE"
+  install_if_changed "$key_tmp" "$KEY_FILE"
+fi
+
+if [[ "$changed" -eq 1 ]]; then
+  {{ vault_cert_agent_reload_command }}
+fi

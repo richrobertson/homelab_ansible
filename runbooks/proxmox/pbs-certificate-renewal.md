@@ -82,10 +82,10 @@ Renewing by hand recreates the original problem: the next expiry is silent too.
 The Proxmox VE nodes solved this with a Vault Agent that re-issues from
 `pki_int` as expiry approaches and reloads the service. PBS should have the same.
 
-Extend `ansible/proxmox/provision_certificates.yml` (or add a sibling
-`ansible/proxmox/pbs_provision_certificate.yml`) targeting `pbs_servers`, reusing
-the same Vault AppRole and PKI role, with these PBS-specific differences from the
-VE version:
+**Implemented** as `ansible/proxmox/pbs_provision_certificate.yml`, which applies
+the reusable `roles/vault_cert_agent` role to `pbs_servers`, reusing the same
+Vault AppRole (`proxmox-api-cert`) and PKI role (`pki_int/issue/proxmox-api`) as
+the VE nodes, with these PBS-specific differences from the VE version:
 
 | Aspect | Proxmox VE | PBS |
 |--------|-----------|-----|
@@ -101,10 +101,29 @@ almost unchanged — only the destination paths, ownership, and reload command
 differ. The apply script is actually simpler on PBS because the target is a
 normal filesystem.
 
-This has not been written yet because it needs validation against the live PBS
-host, which was not reachable from the environment where this runbook was
-authored. Treat it as the immediate next step, and canary it with
-`--limit pbs.myrobertson.net` before trusting it.
+The role and playbook are written and validated offline (syntax-check, template
+render, apply-script bash + marker parsing). Two things gate the first run, both
+by design:
+
+1. **One-time Vault material (operator, once).** The AppRole `secret-id` write is
+   gated from automation, so a human seeds it once:
+   ```bash
+   export VAULT_ADDR=https://vault.myrobertson.net:8200
+   RID=$(vault read  -field=role_id   auth/approle/role/proxmox-api-cert/role-id)
+   SID=$(vault write -f -field=secret_id auth/approle/role/proxmox-api-cert/secret-id)
+   vault kv put secret/proxmox/pbs/cert-approle role_id="$RID" secret_id="$SID"
+   ```
+2. **Canary run (operator).** The playbook only touches the PBS host when run:
+   ```bash
+   VAULT_ADDR=… VAULT_TOKEN=… \
+     ansible-playbook ansible/proxmox/pbs_provision_certificate.yml \
+       --limit pbs.myrobertson.net
+   ```
+   It installs `proxy.pem`/`proxy.key`, reloads `proxmox-backup-proxy`, and
+   verifies port 8007 serves a Vault-issued leaf before reporting success.
+
+Note: PBS's SSH host key changed since this estate was last touched (RSA →
+ED25519); confirm the box was intentionally rebuilt/re-keyed before running.
 
 ## Related
 

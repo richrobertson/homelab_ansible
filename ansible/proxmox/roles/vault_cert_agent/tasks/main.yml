@@ -1,0 +1,172 @@
+---
+- name: Validate service inputs
+  ansible.builtin.assert:
+    that:
+      - vault_cert_agent_service_name | length > 0
+      - vault_cert_agent_common_name | length > 0
+      - vault_cert_agent_cert_file | length > 0
+      - vault_cert_agent_key_file | length > 0
+      - vault_cert_agent_reload_command | length > 0
+      - vault_cert_agent_common_name is match('^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$')
+    fail_msg: >-
+      vault_cert_agent requires service_name, a valid RFC1123 common_name
+      (Vault PKI runs enforce_hostnames=true; underscores are refused),
+      cert_file, key_file and reload_command. See
+      runbooks/security/certificate-management-standard.md.
+
+- name: Validate AppRole material was supplied
+  ansible.builtin.assert:
+    that:
+      - vault_cert_agent_role_id | length > 0
+      - vault_cert_agent_secret_id | length > 0
+    fail_msg: >-
+      vault_cert_agent needs role_id and secret_id. The calling playbook should
+      fetch them from Vault KV (see pbs_provision_certificate.yml).
+  no_log: true
+
+- name: Ensure the Vault CLI is present (Vault Agent runtime)
+  when: vault_cert_agent_install_vault_cli | bool
+  block:
+    - name: Check for the Vault CLI
+      ansible.builtin.shell: command -v vault
+      register: vault_cert_agent_cli_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install the HashiCorp apt signing key
+      ansible.builtin.get_url:
+        url: https://apt.releases.hashicorp.com/gpg
+        dest: /usr/share/keyrings/hashicorp-archive-keyring.asc
+        mode: "0644"
+      when: vault_cert_agent_cli_check.rc != 0
+
+    - name: Add the HashiCorp apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.asc] https://apt.releases.hashicorp.com {{ ansible_distribution_release }} main"
+        filename: hashicorp
+        state: present
+      when: vault_cert_agent_cli_check.rc != 0
+
+    - name: Install the Vault CLI
+      ansible.builtin.apt:
+        name: vault
+        state: present
+        update_cache: true
+      when: vault_cert_agent_cli_check.rc != 0
+
+- name: Resolve the Vault CLI path
+  ansible.builtin.shell: command -v vault
+  register: vault_cert_agent_vault_bin
+  changed_when: false
+
+- name: Ensure vault-agent directories exist
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ vault_cert_agent_dir }}", mode: "0750" }
+    - { path: "{{ vault_cert_agent_runtime_dir }}", mode: "0700" }
+
+- name: Install the AppRole role_id
+  ansible.builtin.copy:
+    dest: "{{ vault_cert_agent_role_id_file }}"
+    content: "{{ vault_cert_agent_role_id }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Install the AppRole secret_id
+  ansible.builtin.copy:
+    dest: "{{ vault_cert_agent_secret_id_file }}"
+    content: "{{ vault_cert_agent_secret_id }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Check for the Vault CA trust file
+  ansible.builtin.stat:
+    path: "{{ vault_cert_agent_vault_ca_file }}"
+  register: vault_cert_agent_ca_stat
+
+- name: Fetch the Vault PKI CA from the public endpoint
+  ansible.builtin.get_url:
+    url: "{{ vault_cert_agent_vault_addr | regex_replace('/+$', '') }}/v1/{{ vault_cert_agent_pki_mount }}/ca/pem"
+    dest: "{{ vault_cert_agent_vault_ca_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate_certs: false
+  when: not vault_cert_agent_ca_stat.stat.exists
+
+- name: Validate the Vault CA certificate is parseable
+  ansible.builtin.command:
+    cmd: openssl x509 -in {{ vault_cert_agent_vault_ca_file }} -noout
+  changed_when: false
+
+- name: Install the certificate apply script
+  ansible.builtin.template:
+    src: apply-cert.sh.j2
+    dest: "{{ vault_cert_agent_apply_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the Vault Agent configuration
+  ansible.builtin.template:
+    src: agent.hcl.j2
+    dest: "{{ vault_cert_agent_config_file }}"
+    owner: root
+    group: root
+    mode: "0640"
+  notify: Restart vault cert agent
+
+- name: Install the Vault Agent systemd unit
+  ansible.builtin.template:
+    src: vault-agent.service.j2
+    dest: "/etc/systemd/system/{{ vault_cert_agent_unit_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart vault cert agent
+
+- name: Enable and start the Vault Agent
+  ansible.builtin.systemd_service:
+    name: "{{ vault_cert_agent_unit_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply pending agent restarts before waiting for issuance
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the certificate bundle to be issued
+  ansible.builtin.wait_for:
+    path: "{{ vault_cert_agent_bundle_file }}"
+    timeout: 120
+
+- name: Verify the service serves a Vault-issued certificate
+  ansible.builtin.shell: |
+    set -euo pipefail
+    openssl s_client -connect {{ vault_cert_agent_verify_host }}:{{ vault_cert_agent_verify_port }} \
+      -servername {{ vault_cert_agent_common_name }} </dev/null 2>/dev/null |
+      openssl x509 -noout -issuer
+  args:
+    executable: /bin/bash
+  register: vault_cert_agent_verify
+  changed_when: false
+  retries: 10
+  delay: 3
+  until:
+    - vault_cert_agent_verify.rc == 0
+    - vault_cert_agent_verify.stdout is search(vault_cert_agent_expected_issuer_pattern)
+  failed_when: vault_cert_agent_verify.stdout is not search(vault_cert_agent_expected_issuer_pattern)
+  when:
+    - vault_cert_agent_verify_host | length > 0
+    - vault_cert_agent_verify_port | string | length > 0

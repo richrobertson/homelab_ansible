@@ -1,0 +1,78 @@
+---
+# Bring the Proxmox Backup Server API certificate (pbs.myrobertson.net:8007)
+# under the estate's standard automated, auto-rotating Vault-Agent process.
+# Closes the gap that left PBS serving an expired leaf for 75+ days
+# (expired 2026-05-15). See:
+#   runbooks/proxmox/pbs-certificate-renewal.md
+#   runbooks/security/certificate-management-standard.md
+#
+# One-time prerequisites (operator with Vault access — the AppRole write is
+# gated from automation, so a human runs it once):
+#   1. The proxmox-api-cert AppRole and pki_int/roles/proxmox-api already exist
+#      (created by provision_certificates.yml's `hosts: vault` bootstrap play).
+#   2. Store a dedicated secret_id for PBS in Vault KV:
+#        export VAULT_ADDR=https://vault.myrobertson.net:8200
+#        RID=$(vault read  -field=role_id   auth/approle/role/proxmox-api-cert/role-id)
+#        SID=$(vault write -f -field=secret_id auth/approle/role/proxmox-api-cert/secret-id)
+#        vault kv put secret/proxmox/pbs/cert-approle role_id="$RID" secret_id="$SID"
+#
+# Run (canary a single host first):
+#   VAULT_ADDR=… VAULT_TOKEN=… \
+#     ansible-playbook ansible/proxmox/pbs_provision_certificate.yml \
+#       --limit pbs.myrobertson.net
+- name: Provision the PBS API certificate via Vault Agent
+  hosts: pbs_servers
+  become: true
+  gather_facts: true
+  serial: 1
+  tags:
+    - certs
+    - pbs_certs
+  vars:
+    pbs_cert_approle_kv_path: proxmox/pbs/cert-approle
+  pre_tasks:
+    - name: Fetch the PBS cert AppRole material from Vault KV
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ lookup('env', 'VAULT_ADDR') }}"
+        token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+        engine_mount_point: secret
+        path: "{{ pbs_cert_approle_kv_path }}"
+      register: pbs_cert_approle
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Require the AppRole material to be present in Vault KV
+      ansible.builtin.assert:
+        that:
+          - pbs_cert_approle.secret.role_id | default('') | length > 0
+          - pbs_cert_approle.secret.secret_id | default('') | length > 0
+        fail_msg: >-
+          secret/{{ pbs_cert_approle_kv_path }} is missing role_id/secret_id.
+          Provision it first — see the prerequisites in this playbook's header.
+
+    - name: Compute the PBS certificate IP SANs
+      ansible.builtin.set_fact:
+        pbs_cert_ip_sans: >-
+          {{ [ansible_host | default('')]
+             | reject('equalto', '')
+             | select('match', '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+             | list }}
+  roles:
+    - role: vault_cert_agent
+      vars:
+        vault_cert_agent_service_name: pbs
+        vault_cert_agent_common_name: "{{ ansible_fqdn | default(inventory_hostname) }}"
+        vault_cert_agent_alt_names:
+          - "{{ ansible_fqdn | default(inventory_hostname) }}"
+        vault_cert_agent_ip_sans: "{{ pbs_cert_ip_sans }}"
+        vault_cert_agent_cert_file: /etc/proxmox-backup/proxy.pem
+        vault_cert_agent_key_file: /etc/proxmox-backup/proxy.key
+        vault_cert_agent_owner: root
+        vault_cert_agent_group: backup
+        vault_cert_agent_mode: "0640"
+        vault_cert_agent_reload_command: systemctl reload proxmox-backup-proxy
+        vault_cert_agent_verify_host: 127.0.0.1
+        vault_cert_agent_verify_port: "8007"
+        vault_cert_agent_role_id: "{{ pbs_cert_approle.secret.role_id }}"
+        vault_cert_agent_secret_id: "{{ pbs_cert_approle.secret.secret_id }}"
