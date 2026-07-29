@@ -1,0 +1,63 @@
+---
+# Provision the internal AD DNS resolvers on the Proxmox-family hosts (Proxmox VE
+# nodes + Proxmox Backup Server) so they resolve the internal myrobertson.net
+# zone (e.g. vault.myrobertson.net).
+#
+# Why this exists: PBS was rebuilt and came back pointing at the UniFi gateway
+# (192.168.1.1) as its resolver, which serves LAN/DHCP names but NOT the internal
+# PowerDNS/AD zone. It therefore could not resolve vault.myrobertson.net, and its
+# Vault-Agent certificate renewal (pbs_provision_certificate.yml) failed. The pve
+# nodes already use the AD DNS servers (192.168.1.244/.245); this codifies that
+# same config for the whole family so the fix is reproducible, not a one-off.
+#
+# resolv.conf on these hosts is a plain static file (no systemd-resolved, no DHCP
+# management), so a templated file is the correct, durable mechanism. The play
+# asserts that before writing, and verifies internal resolution afterwards.
+#
+# Run:  ansible-playbook ansible/proxmox/provision_dns_resolvers.yml \
+#         -i inventory/environments/production.ini
+- name: Provision internal DNS resolvers for Proxmox VE + PBS
+  hosts: proxmox_cert_nodes:pbs_servers
+  become: true
+  gather_facts: false
+  serial: 1
+  tags:
+    - dns
+    - resolvers
+  vars:
+    proxmox_dns_search: myrobertson.net
+    proxmox_dns_nameservers:
+      - 192.168.1.244
+      - 192.168.1.245
+    proxmox_dns_probe_name: vault.myrobertson.net
+  tasks:
+    - name: Stat /etc/resolv.conf
+      ansible.builtin.stat:
+        path: /etc/resolv.conf
+      register: proxmox_resolv_stat
+
+    - name: Require a static resolv.conf (not systemd-resolved / DHCP symlink)
+      ansible.builtin.assert:
+        that:
+          - proxmox_resolv_stat.stat.exists
+          - not (proxmox_resolv_stat.stat.islnk | default(false))
+        fail_msg: >-
+          /etc/resolv.conf on {{ inventory_hostname }} is missing or a symlink
+          (likely systemd-resolved). This play manages a static resolv.conf;
+          adapt it (resolved.conf / per-link DNS) before running here.
+
+    - name: Install the internal-resolver resolv.conf
+      ansible.builtin.template:
+        src: resolv.conf.j2
+        dest: /etc/resolv.conf
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+
+    - name: Verify the internal zone resolves
+      ansible.builtin.command:
+        cmd: getent hosts {{ proxmox_dns_probe_name }}
+      changed_when: false
+      register: proxmox_dns_probe
+      failed_when: proxmox_dns_probe.rc != 0

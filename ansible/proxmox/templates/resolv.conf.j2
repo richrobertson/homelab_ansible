@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+# Internal AD DNS resolvers for the myrobertson.net zone. Managed by
+# ansible/proxmox/provision_dns_resolvers.yml — do not edit by hand.
+{% if proxmox_dns_search | length > 0 %}
+search {{ proxmox_dns_search }}
+{% endif %}
+{% for ns in proxmox_dns_nameservers %}
+nameserver {{ ns }}
+{% endfor %}
