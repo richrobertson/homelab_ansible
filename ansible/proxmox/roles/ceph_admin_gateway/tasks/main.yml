@@ -46,42 +46,52 @@
     group: root
     mode: "0700"
 
-- name: Create the Vault Agent runtime directory
-  ansible.builtin.file:
-    path: "{{ ceph_admin_gateway_agent_runtime_dir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0700"
+# The Vault Agent runtime dir, agent HCL, systemd unit, service enablement, and
+# certificate issuance are now provided by roles/vault_cert_agent in combined-PEM
+# mode (cert_file == key_file), which reuses the shared proxmox AppRole already on
+# the node. The rendered HAProxy PEM (leaf + chain + key at the same path, root:root
+# 0600) and the `systemctl reload haproxy` on rotation are equivalent to the legacy
+# ceph-admin agent; see the convergence notes in the role.
+- name: Manage the Ceph admin gateway certificate via the canonical Vault Agent role
+  ansible.builtin.include_role:
+    name: vault_cert_agent
+  vars:
+    vault_cert_agent_service_name: ceph-admin
+    vault_cert_agent_common_name: "{{ ceph_admin_gateway_fqdn }}"
+    vault_cert_agent_alt_names: "{{ ceph_admin_gateway_extra_sans }}"
+    vault_cert_agent_ip_sans:
+      - "{{ ceph_admin_gateway_vip }}"
+    # HAProxy wants ONE combined PEM (leaf + chain + key). Point key_file at the
+    # same path so the apply script emits a single file (its combined-PEM branch).
+    vault_cert_agent_cert_file: "{{ ceph_admin_gateway_pem_file }}"
+    vault_cert_agent_key_file: "{{ ceph_admin_gateway_pem_file }}"
+    vault_cert_agent_owner: root
+    vault_cert_agent_group: root
+    vault_cert_agent_mode: "0600"
+    vault_cert_agent_reload_command: systemctl reload haproxy
+    # The legacy ceph-admin agent had no template_config stanza; omit it so the
+    # behaviour (exit_on_retry_failure defaults to false) is preserved.
+    vault_cert_agent_exit_on_retry_failure: false
+    # Reuse the shared proxmox AppRole material already on the node (created by
+    # provision_certificates.yml) rather than writing role_id/secret_id here.
+    vault_cert_agent_manage_approle: false
+    vault_cert_agent_install_vault_cli: false
+    vault_cert_agent_vault_addr: "{{ ceph_admin_gateway_vault_addr }}"
+    vault_cert_agent_vault_ca_file: "{{ ceph_admin_gateway_vault_ca_file }}"
+    vault_cert_agent_role_id_file: "{{ ceph_admin_gateway_role_id_file }}"
+    vault_cert_agent_secret_id_file: "{{ ceph_admin_gateway_secret_id_file }}"
+    vault_cert_agent_pki_mount: "{{ ceph_admin_gateway_pki_mount }}"
+    vault_cert_agent_pki_role: "{{ ceph_admin_gateway_pki_role }}"
+    vault_cert_agent_cert_ttl: "{{ ceph_admin_gateway_cert_ttl }}"
+    # Keep the exact legacy config path + runtime dir + unit name (service_name
+    # ceph-admin => unit vault-agent-ceph-admin) for an in-place upgrade.
+    vault_cert_agent_config_file: "{{ ceph_admin_gateway_agent_config }}"
+    vault_cert_agent_runtime_dir: "{{ ceph_admin_gateway_agent_runtime_dir }}"
 
-- name: Install the Vault Agent configuration
-  ansible.builtin.template:
-    src: ceph-admin-gateway.hcl.j2
-    dest: "{{ ceph_admin_gateway_agent_config }}"
-    owner: root
-    group: root
-    mode: "0640"
-  notify: Restart ceph admin vault agent
-
-- name: Install the Vault Agent unit
-  ansible.builtin.template:
-    src: vault-agent-ceph-admin.service.j2
-    dest: "/etc/systemd/system/{{ ceph_admin_gateway_agent_name }}.service"
-    owner: root
-    group: root
-    mode: "0644"
-  notify:
-    - Reload systemd
-    - Restart ceph admin vault agent
-
-- name: Enable and start the Vault Agent
-  ansible.builtin.systemd_service:
-    name: "{{ ceph_admin_gateway_agent_name }}"
-    enabled: true
-    state: started
-    daemon_reload: true
-
-- name: Wait for the gateway certificate to be issued
+# HAProxy refuses to start without a certificate, so the agent must install the
+# PEM before the proxy config is applied. The role above waits for the issue
+# bundle; this waits for the apply script to write the combined PEM itself.
+- name: Wait for the gateway certificate to be installed
   ansible.builtin.wait_for:
     path: "{{ ceph_admin_gateway_pem_file }}"
     timeout: 120

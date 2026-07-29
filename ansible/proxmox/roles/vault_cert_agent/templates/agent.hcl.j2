@@ -28,10 +28,12 @@ auto_auth {
   }
 }
 
+{% if vault_cert_agent_exit_on_retry_failure | bool %}
 template_config {
   exit_on_retry_failure = true
 }
 
+{% endif %}
 # pkiCert only re-issues as the lease approaches expiry, so restarting the agent
 # does not mint a new certificate every time. On change the apply script installs
 # the leaf/key and runs the service reload.

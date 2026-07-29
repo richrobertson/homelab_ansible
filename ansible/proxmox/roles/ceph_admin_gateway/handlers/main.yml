@@ -1,13 +1,7 @@
 ---
-- name: Reload systemd
-  ansible.builtin.systemd_service:
-    daemon_reload: true
-
-- name: Restart ceph admin vault agent
-  ansible.builtin.systemd_service:
-    name: "{{ ceph_admin_gateway_agent_name }}"
-    state: restarted
-
+# The Vault Agent's daemon-reload and restart handlers now come from
+# roles/vault_cert_agent (invoked from tasks/main.yml). The gateway keeps only
+# the HAProxy / keepalived / nftables handlers below.
 - name: Reload haproxy
   ansible.builtin.systemd_service:
     name: haproxy

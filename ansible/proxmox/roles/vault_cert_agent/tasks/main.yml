@@ -23,6 +23,27 @@
       vault_cert_agent needs role_id and secret_id. The calling playbook should
       fetch them from Vault KV (see pbs_provision_certificate.yml).
   no_log: true
+  when: vault_cert_agent_manage_approle | bool
+
+- name: Confirm reused AppRole material is present when not managing it
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ vault_cert_agent_role_id_file }}"
+    - "{{ vault_cert_agent_secret_id_file }}"
+  register: vault_cert_agent_existing_approle
+  when: not (vault_cert_agent_manage_approle | bool)
+
+- name: Require pre-provisioned AppRole files when not managing them
+  ansible.builtin.assert:
+    that:
+      - vault_cert_agent_existing_approle.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      vault_cert_agent_manage_approle is false but {{ vault_cert_agent_role_id_file }}
+      or {{ vault_cert_agent_secret_id_file }} is missing. Provision the shared
+      AppRole first (e.g. ansible/proxmox/provision_certificates.yml) or set
+      vault_cert_agent_manage_approle=true.
+  when: not (vault_cert_agent_manage_approle | bool)
 
 - name: Ensure the Vault CLI is present (Vault Agent runtime)
   when: vault_cert_agent_install_vault_cli | bool
@@ -78,6 +99,7 @@
     group: root
     mode: "0600"
   no_log: true
+  when: vault_cert_agent_manage_approle | bool
 
 - name: Install the AppRole secret_id
   ansible.builtin.copy:
@@ -87,6 +109,7 @@
     group: root
     mode: "0600"
   no_log: true
+  when: vault_cert_agent_manage_approle | bool
 
 - name: Check for the Vault CA trust file
   ansible.builtin.stat:

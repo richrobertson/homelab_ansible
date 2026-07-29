@@ -35,6 +35,30 @@ vault_cert_agent_verify_port: ""         # e.g. "8007"
 vault_cert_agent_expected_issuer_pattern: Vault
 vault_cert_agent_install_vault_cli: true
 
+# pmxcfs target: /etc/pve/local (pveproxy) is a FUSE filesystem (pmxcfs) that
+# REJECTS install(1)'s chown/chmod metadata operations. When true, the apply
+# script installs with a plain `cp` (no install/-o/-g/-m), inheriting the
+# destination's existing owner/mode — exactly as the legacy pveproxy apply
+# script did. Leave false for real filesystems (PBS ext4, HAProxy certs) so the
+# owner/group/mode are enforced with install(1).
+vault_cert_agent_pmxcfs_target: false
+
+# Optional command run *after* reload_command, and only when the certificate
+# material actually changed. Opt-in per service (empty = no-op). Used by the
+# pveproxy caller to refresh the Ceph mgr dashboard config-key store on rotation.
+vault_cert_agent_post_reload_command: ""
+
+# When false, the role does NOT write role_id/secret_id; it reuses AppRole files
+# already on the node (e.g. the shared proxmox AppRole the ceph-admin gateway
+# borrows) and only asserts they exist. Leave true for services that own their
+# AppRole material (PBS, pveproxy).
+vault_cert_agent_manage_approle: true
+
+# Emit `template_config { exit_on_retry_failure = true }`. Set false to omit the
+# block entirely (Vault Agent then defaults to false) to preserve the legacy
+# ceph-admin-gateway agent, which had no template_config stanza.
+vault_cert_agent_exit_on_retry_failure: true
+
 # --- Vault PKI + AppRole (shared estate defaults) ----------------------------
 vault_cert_agent_vault_addr: https://vault.myrobertson.net:8200
 vault_cert_agent_pki_mount: pki_int
