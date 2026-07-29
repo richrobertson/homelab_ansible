@@ -5,6 +5,8 @@ This folder contains operational runbooks captured from real maintenance and inc
 ## Runbooks
 - [SFP28 interface cutover (cl0)](./network-sfp28-cutover-cl0.md)
 - [Ceph dashboard bind fix after network/IP change](./ceph-dashboard-bind-fix.md)
+- [Ceph admin gateway (stable LAN-only dashboard endpoint)](./ceph-admin-gateway.md)
+- [Ceph BlueStore fragmentation audit and remediation](./ceph-bluestore-fragmentation.md)
 - [HA rule recovery and ha-manager CLI stabilization](./ha-rule-and-cli-recovery.md)
 - [CephFS storage activation and mountpoint recovery](./cephfs-storage-recovery.md)
 - [Vault connectivity and Proxmox cert-agent recovery](./vault-connectivity-and-cert-agent-recovery.md)
@@ -13,6 +15,9 @@ This folder contains operational runbooks captured from real maintenance and inc
 - [PBS Authelia SSO](./pbs-authelia-sso.md)
 - [Proxmox Authelia SSO](./proxmox-authelia-sso.md)
 - [Staging cluster rebuild and SDN investigation (2026-03-31)](./staging-cluster-rebuild-and-sdn-investigation-2026-03-31.md)
+- [Proxmox MCP server](./proxmox-mcp-server.md)
+- [PBS API certificate renewal](./pbs-certificate-renewal.md)
+- [Claude Code workstation (AD-joined, via Guacamole)](./claude-workstation.md)
 
 ## Scope
 - Cluster: `cl0`

@@ -1,0 +1,75 @@
+---
+# Publishes the Ceph mgr dashboard at a stable, LAN-only HTTPS name backed by a
+# VIP, so the admin console survives mgr failover instead of moving with it.
+#
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/ceph_admin_gateway.yml
+#
+# Requires VAULT_ADDR and VAULT_TOKEN, and requires
+# ansible/proxmox/provision_certificates.yml to have run at least once.
+
+- name: Seed the Ceph admin gateway VRRP secret
+  hosts: localhost
+  become: false
+  gather_facts: false
+  tags:
+    - ceph_admin_gateway
+  vars:
+    ceph_admin_gateway_vault_mount: secret
+    ceph_admin_gateway_vault_path: proxmox/cl0/ceph-admin-gateway
+  tasks:
+    - name: Require Vault environment
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'VAULT_ADDR') | length > 0
+          - lookup('env', 'VAULT_TOKEN') | length > 0
+        fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running this playbook.
+
+    - name: Read the existing gateway secret
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ lookup('env', 'VAULT_ADDR') }}"
+        token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+        engine_mount_point: "{{ ceph_admin_gateway_vault_mount }}"
+        path: "{{ ceph_admin_gateway_vault_path }}"
+      register: ceph_admin_gateway_existing
+      failed_when: false
+      no_log: true
+
+    # VRRP's shared password is truncated to 8 bytes by the protocol, so a
+    # longer value buys nothing.
+    - name: Generate a VRRP authentication password when absent
+      community.hashi_vault.vault_kv2_write:
+        url: "{{ lookup('env', 'VAULT_ADDR') }}"
+        token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+        engine_mount_point: "{{ ceph_admin_gateway_vault_mount }}"
+        path: "{{ ceph_admin_gateway_vault_path }}"
+        data:
+          vrrp_password: >-
+            {{ lookup('ansible.builtin.password', '/dev/null', chars='ascii_letters,digits', length=8) }}
+      when: (ceph_admin_gateway_existing.secret.vrrp_password | default('')) | length == 0
+      no_log: true
+
+- name: Configure the Ceph admin gateway
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: true
+  serial: 1
+  tags:
+    - ceph_admin_gateway
+  roles:
+    - role: ceph_admin_gateway
+
+- name: Report the Ceph admin endpoint
+  hosts: proxmox_nodes
+  become: false
+  gather_facts: false
+  run_once: true
+  tags:
+    - ceph_admin_gateway
+  tasks:
+    - name: Show the published endpoint
+      ansible.builtin.debug:
+        msg: >-
+          Ceph admin console published at https://{{ ceph_admin_gateway_fqdn }}/
+          via VIP {{ ceph_admin_gateway_vip }}. Ensure a DNS A record maps
+          {{ ceph_admin_gateway_fqdn }} to {{ ceph_admin_gateway_vip }}.

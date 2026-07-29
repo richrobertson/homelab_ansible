@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+# {{ ansible_managed }}
+#
+# Exports Proxmox Backup Server job outcomes, datastore cache usage, and
+# notification-delivery health as node_exporter textfile metrics.
+#
+# PBS only speaks JSON: /status/metrics returns host and datastore gauges in
+# Proxmox's own format and says nothing about whether jobs succeeded, so there
+# is no endpoint Prometheus can scrape directly. Everything that matters for
+# backup safety - did the verify job find corrupt chunks, did GC run, is there
+# still a live notification target - has to be derived from the task archive
+# and the notification config.
+#
+# Written in Python rather than the shell the other collectors in this
+# directory use, because every input here is JSON and every output is a derived
+# aggregate; shelling out to python3 per field would be the same tools, worse.
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+TEXTFILE_DIR = "{{ pbs_metrics_textfile_dir }}"
+OUT = os.path.join(TEXTFILE_DIR, "pbs_metrics.prom")
+TASK_LIMIT = {{ pbs_metrics_task_limit }}
+
+# Job kinds whose absence is itself a finding. A datastore that has never had a
+# successful verify is reported with a zero timestamp so the staleness alerts
+# fire, rather than the series simply not existing and nothing evaluating.
+TRACKED_TYPES = ("backup", "verificationjob", "prunejob", "garbage_collection")
+
+FAILURE_WINDOW_SECONDS = 86400
+
+
+def manager(*args):
+    """Run proxmox-backup-manager and return parsed JSON, or None on failure."""
+    cmd = ["proxmox-backup-manager", *args, "--output-format", "json"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, check=True, timeout=120).stdout
+    except (subprocess.SubprocessError, OSError):
+        return None
+    try:
+        return json.loads(out)
+    except ValueError:
+        return None
+
+
+def task_list():
+    """Read the finished-task archive.
+
+    There is deliberately no fallback that drops --all: without it the CLI lists
+    only *running* tasks, which would read as "no job has ever finished" and get
+    published as fact. Failing outright leaves pbs_scrape_success at 0 instead.
+    """
+    return manager("task", "list", "--all", "--limit", str(TASK_LIMIT))
+
+
+def datastore_of(worker_id):
+    # backup "store:vm/101", verificationjob "store:job-id", prunejob "store",
+    # garbage_collection "store". The datastore is always the leading segment.
+    return (worker_id or "").split(":", 1)[0]
+
+
+def usage(path):
+    # Deliberately the same arithmetic PBS itself uses: used counts free blocks,
+    # available counts *unprivileged* free blocks. Deriving used as total-avail
+    # instead would charge ext4's 5% root reserve to the datastore and report
+    # pbs-b2 five points fuller than the PBS UI does for the same filesystem.
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return None
+    total = st.f_blocks * st.f_frsize
+    used = (st.f_blocks - st.f_bfree) * st.f_frsize
+    avail = st.f_bavail * st.f_frsize
+    return total, used, avail
+
+
+def quote(value):
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def series(name, labels, value):
+    """Render one sample. Labels are pre-rendered `k="v"` pairs, or empty."""
+    braces = "{" + labels + "}" if labels else ""
+    return "%s%s %d" % (name, braces, value)
+
+
+def main():
+    now = time.time()
+    lines = []
+    healthy = True
+
+    datastores = manager("datastore", "list") or []
+    if not datastores:
+        healthy = False
+
+    lines.append("# HELP pbs_datastore_size_bytes Size of the filesystem backing the datastore.")
+    lines.append("# TYPE pbs_datastore_size_bytes gauge")
+    lines.append("# HELP pbs_datastore_used_bytes Used space on the filesystem backing the datastore.")
+    lines.append("# TYPE pbs_datastore_used_bytes gauge")
+    lines.append("# HELP pbs_datastore_available_bytes Space available on the filesystem backing the datastore.")
+    lines.append("# TYPE pbs_datastore_available_bytes gauge")
+
+    # For the S3-backed datastores this measures the local object cache, not the
+    # bucket. That is the number worth alerting on: the bucket is effectively
+    # unbounded, whereas a full cache stops backups and verifies outright.
+    for store in datastores:
+        name = store.get("name")
+        path = store.get("path")
+        if not name or not path:
+            healthy = False
+            continue
+        measured = usage(path)
+        if measured is None:
+            healthy = False
+            continue
+        total, used, avail = measured
+        store_labels = 'datastore="%s"' % quote(name)
+        lines.append(series("pbs_datastore_size_bytes", store_labels, total))
+        lines.append(series("pbs_datastore_used_bytes", store_labels, used))
+        lines.append(series("pbs_datastore_available_bytes", store_labels, avail))
+
+    # An empty archive is not a real state on a server that runs backups hourly,
+    # so treat it the same as a failed read rather than publishing "never ran".
+    tasks = task_list()
+    if not tasks:
+        healthy = False
+        tasks = tasks or []
+
+    latest = {}
+    succeeded = {}
+    failures = {}
+    for task in tasks:
+        worker_type = task.get("worker_type") or task.get("type")
+        status = task.get("status")
+        endtime = task.get("endtime")
+        # A task with no status is still running and has not yet said anything
+        # about whether it succeeded.
+        if worker_type not in TRACKED_TYPES or status is None or endtime is None:
+            continue
+        key = (datastore_of(task.get("worker_id") or task.get("id")), worker_type)
+        ok = status == "OK"
+        if endtime > latest.get(key, (-1, False))[0]:
+            latest[key] = (endtime, ok)
+        if ok:
+            succeeded[key] = max(succeeded.get(key, 0), endtime)
+        elif now - endtime <= FAILURE_WINDOW_SECONDS:
+            failures[key] = failures.get(key, 0) + 1
+
+    lines.append("# HELP pbs_task_last_status Whether the most recent finished task of this kind succeeded.")
+    lines.append("# TYPE pbs_task_last_status gauge")
+    lines.append("# HELP pbs_task_last_end_timestamp_seconds When the most recent finished task of this kind ended.")
+    lines.append("# TYPE pbs_task_last_end_timestamp_seconds gauge")
+    lines.append("# HELP pbs_task_last_success_timestamp_seconds When this kind of task last succeeded, 0 if never.")
+    lines.append("# TYPE pbs_task_last_success_timestamp_seconds gauge")
+    lines.append("# HELP pbs_task_failures_24h Finished tasks of this kind that failed in the last 24h.")
+    lines.append("# TYPE pbs_task_failures_24h gauge")
+
+    for store in datastores:
+        name = store.get("name")
+        if not name:
+            continue
+        for worker_type in TRACKED_TYPES:
+            key = (name, worker_type)
+            endtime, ok = latest.get(key, (0, False))
+            task_labels = 'datastore="%s",type="%s"' % (quote(name), quote(worker_type))
+            lines.append(series("pbs_task_last_status", task_labels, 1 if ok else 0))
+            lines.append(series("pbs_task_last_end_timestamp_seconds", task_labels, endtime))
+            lines.append(series("pbs_task_last_success_timestamp_seconds", task_labels, succeeded.get(key, 0)))
+            lines.append(series("pbs_task_failures_24h", task_labels, failures.get(key, 0)))
+
+    targets = manager("notification", "target", "list")
+    matchers = manager("notification", "matcher", "list")
+    if targets is None or matchers is None:
+        healthy = False
+        targets, matchers = targets or [], matchers or []
+
+    # A target nothing routes to is as good as absent, which is precisely how
+    # PBS came to be posting verify failures at a decommissioned Gotify: the
+    # target existed, so every surface reported "notifications are configured".
+    routed = set()
+    for matcher in matchers:
+        if matcher.get("disable"):
+            continue
+        for target in matcher.get("target") or []:
+            routed.add(target)
+
+    lines.append("# HELP pbs_notification_target_enabled Whether this notification target is enabled.")
+    lines.append("# TYPE pbs_notification_target_enabled gauge")
+    deliverable = 0
+    for target in targets:
+        name = target.get("name")
+        if not name:
+            continue
+        enabled = 0 if target.get("disable") else 1
+        target_labels = 'target="%s",type="%s"' % (quote(name), quote(target.get("type", "unknown")))
+        lines.append(series("pbs_notification_target_enabled", target_labels, enabled))
+        if enabled and name in routed:
+            deliverable += 1
+
+    lines.append("# HELP pbs_notification_deliverable_targets Enabled targets that an enabled matcher routes to.")
+    lines.append("# TYPE pbs_notification_deliverable_targets gauge")
+    lines.append(series("pbs_notification_deliverable_targets", "", deliverable))
+
+    lines.append("# HELP pbs_scrape_success Whether this collector gathered every metric it was asked for.")
+    lines.append("# TYPE pbs_scrape_success gauge")
+    lines.append(series("pbs_scrape_success", "", 1 if healthy else 0))
+    lines.append("# HELP pbs_scrape_timestamp_seconds When this collector last ran.")
+    lines.append("# TYPE pbs_scrape_timestamp_seconds gauge")
+    lines.append(series("pbs_scrape_timestamp_seconds", "", now))
+
+    tmp = "%s.%d" % (OUT, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, OUT)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

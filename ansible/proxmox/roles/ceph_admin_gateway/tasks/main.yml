@@ -1,0 +1,203 @@
+---
+- name: Validate the published hostname
+  ansible.builtin.assert:
+    that:
+      - ceph_admin_gateway_fqdn is match('^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$')
+    fail_msg: >-
+      ceph_admin_gateway_fqdn ({{ ceph_admin_gateway_fqdn }}) is not a valid RFC 1123
+      hostname. Vault's PKI role runs with enforce_hostnames=true and will refuse to
+      issue a certificate for it. Underscores are the usual cause; see
+      runbooks/proxmox/ceph-admin-gateway.md.
+  run_once: true
+
+- name: Confirm the Proxmox Vault Agent AppRole material is present
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ ceph_admin_gateway_role_id_file }}"
+    - "{{ ceph_admin_gateway_secret_id_file }}"
+    - "{{ ceph_admin_gateway_vault_ca_file }}"
+  register: ceph_admin_gateway_approle_files
+
+- name: Require the certificate playbook to have run first
+  ansible.builtin.assert:
+    that:
+      - ceph_admin_gateway_approle_files.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Vault AppRole material is missing on {{ inventory_hostname }}. Run
+      ansible/proxmox/provision_certificates.yml before this role; it creates the
+      AppRole and CA files that the gateway certificate reuses.
+
+- name: Install gateway packages
+  ansible.builtin.apt:
+    name:
+      - haproxy
+      - keepalived
+      - psmisc
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the certificate directory
+  ansible.builtin.file:
+    path: "{{ ceph_admin_gateway_cert_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# The Vault Agent runtime dir, agent HCL, systemd unit, service enablement, and
+# certificate issuance are now provided by roles/vault_cert_agent in combined-PEM
+# mode (cert_file == key_file), which reuses the shared proxmox AppRole already on
+# the node. The rendered HAProxy PEM (leaf + chain + key at the same path, root:root
+# 0600) and the `systemctl reload haproxy` on rotation are equivalent to the legacy
+# ceph-admin agent; see the convergence notes in the role.
+- name: Manage the Ceph admin gateway certificate via the canonical Vault Agent role
+  ansible.builtin.include_role:
+    name: vault_cert_agent
+  vars:
+    vault_cert_agent_service_name: ceph-admin
+    vault_cert_agent_common_name: "{{ ceph_admin_gateway_fqdn }}"
+    vault_cert_agent_alt_names: "{{ ceph_admin_gateway_extra_sans }}"
+    vault_cert_agent_ip_sans:
+      - "{{ ceph_admin_gateway_vip }}"
+    # HAProxy wants ONE combined PEM (leaf + chain + key). Point key_file at the
+    # same path so the apply script emits a single file (its combined-PEM branch).
+    vault_cert_agent_cert_file: "{{ ceph_admin_gateway_pem_file }}"
+    vault_cert_agent_key_file: "{{ ceph_admin_gateway_pem_file }}"
+    vault_cert_agent_owner: root
+    vault_cert_agent_group: root
+    vault_cert_agent_mode: "0600"
+    vault_cert_agent_reload_command: systemctl reload haproxy
+    # The legacy ceph-admin agent had no template_config stanza; omit it so the
+    # behaviour (exit_on_retry_failure defaults to false) is preserved.
+    vault_cert_agent_exit_on_retry_failure: false
+    # Reuse the shared proxmox AppRole material already on the node (created by
+    # provision_certificates.yml) rather than writing role_id/secret_id here.
+    vault_cert_agent_manage_approle: false
+    vault_cert_agent_install_vault_cli: false
+    vault_cert_agent_vault_addr: "{{ ceph_admin_gateway_vault_addr }}"
+    vault_cert_agent_vault_ca_file: "{{ ceph_admin_gateway_vault_ca_file }}"
+    vault_cert_agent_role_id_file: "{{ ceph_admin_gateway_role_id_file }}"
+    vault_cert_agent_secret_id_file: "{{ ceph_admin_gateway_secret_id_file }}"
+    vault_cert_agent_pki_mount: "{{ ceph_admin_gateway_pki_mount }}"
+    vault_cert_agent_pki_role: "{{ ceph_admin_gateway_pki_role }}"
+    vault_cert_agent_cert_ttl: "{{ ceph_admin_gateway_cert_ttl }}"
+    # Keep the exact legacy config path + runtime dir + unit name (service_name
+    # ceph-admin => unit vault-agent-ceph-admin) for an in-place upgrade.
+    vault_cert_agent_config_file: "{{ ceph_admin_gateway_agent_config }}"
+    vault_cert_agent_runtime_dir: "{{ ceph_admin_gateway_agent_runtime_dir }}"
+
+# HAProxy refuses to start without a certificate, so the agent must install the
+# PEM before the proxy config is applied. The role above waits for the issue
+# bundle; this waits for the apply script to write the combined PEM itself.
+- name: Wait for the gateway certificate to be installed
+  ansible.builtin.wait_for:
+    path: "{{ ceph_admin_gateway_pem_file }}"
+    timeout: 120
+
+# HAProxy refuses to start without a certificate, so the agent has to win the
+# race above before the proxy config is applied.
+- name: Install the HAProxy configuration
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: root
+    mode: "0644"
+    validate: haproxy -c -f %s
+  notify: Reload haproxy
+
+- name: Compute this node's VRRP priority
+  ansible.builtin.set_fact:
+    ceph_admin_gateway_priority: >-
+      {{ ceph_admin_gateway_vrrp_base_priority - (ceph_admin_gateway_backend_nodes.index(inventory_hostname) * 10) }}
+
+- name: Fetch the VRRP authentication password from Vault
+  community.hashi_vault.vault_kv2_get:
+    url: "{{ lookup('env', 'VAULT_ADDR') }}"
+    token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    engine_mount_point: secret
+    path: proxmox/cl0/ceph-admin-gateway
+  register: ceph_admin_gateway_vault
+  delegate_to: localhost
+  become: false
+  run_once: true
+  no_log: true
+
+- name: Set the VRRP authentication password
+  ansible.builtin.set_fact:
+    ceph_admin_gateway_vrrp_password: "{{ ceph_admin_gateway_vault.secret.vrrp_password }}"
+  no_log: true
+
+- name: Install the keepalived configuration
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart keepalived
+
+- name: Install nftables for endpoint filtering
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+  when: ceph_admin_gateway_manage_firewall | bool
+
+- name: Create the nftables drop-in directory
+  ansible.builtin.file:
+    path: /etc/nftables.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: ceph_admin_gateway_manage_firewall | bool
+
+- name: Source the drop-in directory from the main nftables config
+  ansible.builtin.lineinfile:
+    path: /etc/nftables.conf
+    line: 'include "/etc/nftables.d/*.conf"'
+    insertafter: EOF
+    create: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: ceph_admin_gateway_manage_firewall | bool
+  notify: Reload nftables
+
+- name: Restrict the gateway to LAN clients
+  ansible.builtin.template:
+    src: ceph-admin-gateway-nftables.conf.j2
+    dest: /etc/nftables.d/ceph-admin-gateway.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: ceph_admin_gateway_manage_firewall | bool
+  notify: Reload nftables
+
+- name: Enable and start HAProxy
+  ansible.builtin.systemd_service:
+    name: haproxy
+    enabled: true
+    state: started
+
+- name: Enable and start keepalived
+  ansible.builtin.systemd_service:
+    name: keepalived
+    enabled: true
+    state: started
+
+- name: Flush handlers before verifying the endpoint
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the gateway serves the Ceph dashboard
+  ansible.builtin.uri:
+    url: "https://{{ ceph_admin_gateway_vip }}:{{ ceph_admin_gateway_port }}/"
+    validate_certs: false
+    status_code: 200
+  register: ceph_admin_gateway_probe
+  retries: 10
+  delay: 5
+  until: ceph_admin_gateway_probe is succeeded
+  run_once: true

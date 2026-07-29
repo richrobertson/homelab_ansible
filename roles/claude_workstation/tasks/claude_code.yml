@@ -1,0 +1,85 @@
+---
+- name: Read the installed Claude Code version
+  ansible.builtin.command:
+    argv:
+      - npm
+      - list
+      - --global
+      - --depth=0
+      - --json
+  register: claude_workstation_global_npm
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# `latest` has to be resolved to a concrete version before it can be compared,
+# otherwise every run reinstalls and reports changed.
+- name: Resolve the target Claude Code version
+  ansible.builtin.command:
+    argv:
+      - npm
+      - view
+      - "{{ claude_workstation_claude_package }}@{{ claude_workstation_claude_version }}"
+      - version
+  register: claude_workstation_target_version
+  changed_when: false
+  check_mode: false
+
+- name: Install Claude Code globally
+  ansible.builtin.command:
+    argv:
+      - npm
+      - install
+      - --global
+      - --no-audit
+      - --no-fund
+      - "{{ claude_workstation_claude_package }}@{{ claude_workstation_target_version.stdout | trim }}"
+  vars:
+    claude_workstation_installed_version: >-
+      {{ (claude_workstation_global_npm.stdout | from_json).dependencies[claude_workstation_claude_package].version | default('') }}
+  when: claude_workstation_installed_version != (claude_workstation_target_version.stdout | trim)
+  changed_when: true
+
+- name: Create the Claude Code configuration directory
+  ansible.builtin.file:
+    path: "{{ claude_workstation_env_file | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ claude_workstation_env_group }}"
+    mode: "0750"
+
+# Root-owned and group-readable: the key is never written into a home directory,
+# so it survives no matter what a user does to their own dotfiles, and it is not
+# readable by domain users outside the group.
+- name: Write the Anthropic credentials file
+  ansible.builtin.template:
+    src: claude-code.env.j2
+    dest: "{{ claude_workstation_env_file }}"
+    owner: root
+    group: "{{ claude_workstation_env_group }}"
+    mode: "0640"
+  no_log: true
+  when: claude_workstation_manage_api_key | bool
+
+- name: Remove the Anthropic credentials file when unmanaged
+  ansible.builtin.file:
+    path: "{{ claude_workstation_env_file }}"
+    state: absent
+  when: not (claude_workstation_manage_api_key | bool)
+
+- name: Install the shell environment for Claude Code
+  ansible.builtin.template:
+    src: claude-code.sh.j2
+    dest: "{{ claude_workstation_profile_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Verify the Claude Code CLI runs
+  ansible.builtin.command:
+    argv:
+      - claude
+      - --version
+  register: claude_workstation_version_check
+  changed_when: false
+  check_mode: false

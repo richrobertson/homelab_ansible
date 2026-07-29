@@ -1,0 +1,6 @@
+---
+# Filtering only happens when it is both requested and actually given networks
+# to allow. An empty allowlist would otherwise render a ruleset that drops
+# every client, including the operator.
+proxmox_mcp_firewall_enabled: >-
+  {{ (proxmox_mcp_manage_firewall | bool) and (proxmox_mcp_allowed_client_cidrs | length > 0) }}

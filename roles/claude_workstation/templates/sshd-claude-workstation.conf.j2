@@ -1,0 +1,34 @@
+# {{ ansible_managed }}
+# Drop-in read via the Include at the top of Debian's /etc/ssh/sshd_config.
+
+PermitRootLogin {{ claude_workstation_ssh_permit_root_login }}
+PubkeyAuthentication yes
+
+{% if claude_workstation_ssh_auth_mode == 'key' %}
+# Key only. Note that this also blocks AD password logins, so a Guacamole SSH
+# connection has to carry a private key rather than prompting for a password.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+{% elif claude_workstation_ssh_auth_mode == 'password' %}
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+{% else %}
+# domain_password: keyboard-interactive routes the prompt through PAM to sssd,
+# which is what lets a Guacamole SSH connection accept AD credentials. Plain
+# PasswordAuthentication stays off so that authentication cannot bypass the PAM
+# stack, and sssd's simple access provider rejects any account outside the
+# allowlist before a password is evaluated. The local break-glass account has a
+# locked password and so remains key-only either way.
+PasswordAuthentication no
+KbdInteractiveAuthentication yes
+{% endif %}
+UsePAM yes
+
+PermitEmptyPasswords no
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+ClientAliveInterval 300
+ClientAliveCountMax 3
+LoginGraceTime 30
+MaxAuthTries 4

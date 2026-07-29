@@ -1,0 +1,184 @@
+---
+# Remediation for the findings raised by audit_share_access_exposure.yml.
+#
+# Scope is deliberately narrow. Only two findings have a DSM API that is stable
+# across the DSM releases running on Kermit and Scooter and that cannot destroy
+# data or lock the operator out:
+#
+#   1. QuickConnect  — publishes the DSM login page on the public internet
+#                      through Synology's relay, bypassing the UniFi gateway.
+#   2. Auto Block    — the only brute-force control in front of DSM logon, SSH,
+#                      SMB, FTP and rsync.
+#
+# Everything else the audit reports (DSM firewall, rsync daemon, iSCSI default
+# target, NFS export host lists, Synology DDNS) is documented as a manual DSM
+# procedure in runbooks/synology/synology-share-access-audit.md. Those either
+# have no working API on this DSM build (SYNO.Core.FileServ.Rsync returns error
+# 102 on RS1221+ / DSM 7.2) or can strand the operator mid-run, which is not an
+# acceptable failure mode for an unattended playbook.
+#
+# Nothing is written unless the matching *_apply flag is true. The default run
+# is a read-only before/after report, so this playbook is safe to execute for
+# evidence collection.
+- name: Remediate Synology share exposure findings
+  hosts: "{{ synology_remediate_nas_group | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+  become: true
+  become_method: sudo
+
+  vars:
+    # Disable QuickConnect. Confirm no household member relies on the Synology
+    # mobile apps over QuickConnect before enabling this: they will lose remote
+    # access and must move to the Tailscale tailnet or the Istio ingress.
+    synology_quickconnect_disable_apply: false
+
+    # Enable DSM Auto Block. These defaults are deliberately stricter than the
+    # DSM defaults (10 attempts / 5 minutes / never expire) because the NAS is
+    # AD-joined and the domain lockoutThreshold is 0, so DSM Auto Block is the
+    # only thing standing between a guesser and an AD password.
+    synology_autoblock_apply: false
+    synology_autoblock_attempts: 5
+    synology_autoblock_within_mins: 5
+    # 0 means blocked addresses are never released. Keep it at 0 and clear the
+    # block list by hand so a lockout is always a deliberate decision.
+    synology_autoblock_expire_day: 0
+
+    # Auto Block blocks a SOURCE IP, and this playbook reaches DSM over SSH with
+    # a password. With attempts=5 and expire_day=0, five failed authentications
+    # from the Ansible control host - a rotated DSM password, a stale Vault read
+    # - block that host from the NAS permanently, with no automatic release.
+    # Both units are in one inventory group and share one credential, so a bad
+    # credential blocks the control host on BOTH in a single run. Recovery is
+    # from the DSM UI on the LAN, or over Tailscale (running on both units).
+    #
+    # The DSM allow list is UI-only on this build:
+    # SYNO.Core.Security.AutoBlock.Rules method=list version=1 returns error
+    # 5100, so this playbook cannot read or populate it. That makes the allow
+    # list a human precondition, and this flag is the interlock that proves an
+    # operator actually did it. Populate DSM > Control Panel > Security >
+    # Account > Allow/Block List > Allow List on EACH unit with the control host
+    # address, 192.168.1.0/24 and the Tailscale range, then pass
+    # -e synology_autoblock_allowlist_confirmed=true.
+    synology_autoblock_allowlist_confirmed: false
+
+  tasks:
+    - name: Read QuickConnect state before remediation
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.QuickConnect
+        method=get
+        version=1
+        2>&1 || true
+      changed_when: false
+      register: synology_quickconnect_before
+
+    - name: Read Auto Block state before remediation
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Security.AutoBlock
+        method=get
+        version=1
+        2>&1 || true
+      changed_when: false
+      register: synology_autoblock_before
+
+    - name: Report state before remediation
+      ansible.builtin.debug:
+        msg:
+          - "QuickConnect enabled: {{ synology_quickconnect_before.stdout is search('\"enabled\"\\s*:\\s*true') }}"
+          # Folded scalar: single backslashes, and the double quotes need no
+          # escaping here. With `\\s` this pattern never matched and
+          # `regex_search` then raised on the capture-group form, so this task
+          # aborted the play before any state was reported. The outer default()
+          # covers the case where QuickConnect is off and there is no alias.
+          - >-
+            QuickConnect alias:
+            {{ (synology_quickconnect_before.stdout
+                | regex_search('"server_alias"\s*:\s*"([^"]*)"', '\1')
+                | default([''], true) | first) | default('(none)', true) }}
+          - "Auto Block enabled: {{ synology_autoblock_before.stdout is search('\"enable\"\\s*:\\s*true') }}"
+
+    - name: Disable QuickConnect
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.QuickConnect
+        method=set
+        version=1
+        enabled=false
+        2>&1
+      register: synology_quickconnect_set
+      changed_when: true
+      failed_when: "'\"success\" : true' not in synology_quickconnect_set.stdout"
+      when: synology_quickconnect_disable_apply | bool
+
+    - name: Require the DSM Auto Block allow list to be populated first
+      # Fails before any write. See the synology_autoblock_allowlist_confirmed
+      # comment above for why this cannot be checked programmatically.
+      ansible.builtin.assert:
+        that:
+          - synology_autoblock_allowlist_confirmed | bool
+        fail_msg: >-
+          Refusing to enable Auto Block on {{ inventory_hostname }}: the DSM
+          Allow List has not been confirmed. With attempts={{
+          synology_autoblock_attempts }} and expire_day={{
+          synology_autoblock_expire_day }}, a blocked address is never released,
+          so this can permanently lock the Ansible control host out of the NAS.
+          Populate DSM > Control Panel > Security > Account > Allow/Block List,
+          then re-run with -e synology_autoblock_allowlist_confirmed=true.
+        success_msg: >-
+          Auto Block allow list confirmed for {{ inventory_hostname }}.
+      when: synology_autoblock_apply | bool
+
+    - name: Enable DSM Auto Block
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Security.AutoBlock
+        method=set
+        version=1
+        enable=true
+        attempts={{ synology_autoblock_attempts | int }}
+        within_mins={{ synology_autoblock_within_mins | int }}
+        expire_day={{ synology_autoblock_expire_day | int }}
+        2>&1
+      register: synology_autoblock_set
+      changed_when: true
+      failed_when: "'\"success\" : true' not in synology_autoblock_set.stdout"
+      when: synology_autoblock_apply | bool
+
+    - name: Read QuickConnect state after remediation
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.QuickConnect
+        method=get
+        version=1
+        2>&1 || true
+      changed_when: false
+      register: synology_quickconnect_after
+
+    - name: Read Auto Block state after remediation
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Security.AutoBlock
+        method=get
+        version=1
+        2>&1 || true
+      changed_when: false
+      register: synology_autoblock_after
+
+    - name: Assert QuickConnect is disabled
+      ansible.builtin.assert:
+        that:
+          - synology_quickconnect_after.stdout is not search('"enabled"\s*:\s*true')
+        fail_msg: >-
+          QuickConnect is still enabled on {{ inventory_hostname }} after the
+          set call. Disable it manually in DSM > Control Panel > External Access.
+      when: synology_quickconnect_disable_apply | bool
+
+    - name: Assert Auto Block is enabled
+      ansible.builtin.assert:
+        that:
+          - synology_autoblock_after.stdout is search('"enable"\s*:\s*true')
+        fail_msg: >-
+          Auto Block is still disabled on {{ inventory_hostname }} after the set
+          call. Enable it manually in DSM > Control Panel > Security > Protection.
+      when: synology_autoblock_apply | bool

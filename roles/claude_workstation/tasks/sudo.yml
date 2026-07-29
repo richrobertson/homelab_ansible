@@ -1,0 +1,20 @@
+---
+# validate: runs visudo against the candidate file before it is put in place, so
+# a bad escape in an AD principal cannot lock everyone out of sudo.
+- name: Grant sudo to the configured domain principals
+  ansible.builtin.template:
+    src: sudoers-claude-workstation.j2
+    dest: "{{ claude_workstation_sudoers_file }}"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  when: (claude_workstation_sudo_ad_groups | length > 0) or (claude_workstation_sudo_ad_users | length > 0)
+
+- name: Remove the domain sudo grant when no principals are configured
+  ansible.builtin.file:
+    path: "{{ claude_workstation_sudoers_file }}"
+    state: absent
+  when:
+    - claude_workstation_sudo_ad_groups | length == 0
+    - claude_workstation_sudo_ad_users | length == 0

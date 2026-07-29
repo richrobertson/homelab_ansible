@@ -1,0 +1,32 @@
+---
+# Debian 12's stock sshd_config sources this directory from its first line, so a
+# drop-in wins over the shipped defaults without editing a packaged file.
+- name: Check for the sshd drop-in include
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -qE
+      - '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/'
+      - /etc/ssh/sshd_config
+  register: claude_workstation_sshd_include
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Fail when sshd does not read drop-in configuration
+  ansible.builtin.fail:
+    msg: >-
+      /etc/ssh/sshd_config has no Include for /etc/ssh/sshd_config.d/, so
+      {{ claude_workstation_sshd_config_file }} would be written and silently
+      ignored.
+  when: claude_workstation_sshd_include.rc != 0
+
+- name: Harden the SSH daemon
+  ansible.builtin.template:
+    src: sshd-claude-workstation.conf.j2
+    dest: "{{ claude_workstation_sshd_config_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Restart sshd

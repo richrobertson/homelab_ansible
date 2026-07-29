@@ -1,0 +1,57 @@
+---
+# Container identity.
+claude_workstation_lxc_vmid: 9020
+claude_workstation_lxc_hostname: cwork0
+claude_workstation_lxc_description: Claude Code workstation (managed by homelab_ansible)
+
+# Guest OS template. The role downloads this template with pveam when it is not
+# already present on the node.
+claude_workstation_lxc_template_storage: local
+claude_workstation_lxc_template: debian-12-standard_12.7-1_amd64.tar.zst
+
+# Sizing. This is an interactive workstation: Claude Code spawns compilers,
+# language servers, and test runs, so it is deliberately larger than a service
+# container. Raise cores/memory if several people share it.
+claude_workstation_lxc_storage: local-lvm
+claude_workstation_lxc_rootfs_gb: 24
+claude_workstation_lxc_cores: 4
+claude_workstation_lxc_memory_mb: 8192
+claude_workstation_lxc_swap_mb: 2048
+
+# Home directories live on their own volume so a container rebuild does not take
+# work in progress with it. See the runbook for the detach/reattach sequence
+# that actually makes that survival property real -- `pct destroy` deletes
+# referenced mount point volumes unless mp0 is removed from the config first.
+claude_workstation_lxc_home_storage: local-lvm
+claude_workstation_lxc_home_gb: 64
+claude_workstation_lxc_home_mountpoint: /home
+# Set to an existing volume id (for example `local-lvm:vm-9020-disk-1`) to
+# re-attach a home volume preserved from a previous container instead of
+# allocating a fresh empty one.
+claude_workstation_lxc_home_volume: ""
+
+# Networking. Static addressing keeps the Guacamole connection target stable.
+claude_workstation_lxc_bridge: vmbr0
+claude_workstation_lxc_ipv4_cidr: 192.168.1.61/24
+claude_workstation_lxc_gateway: 192.168.1.1
+claude_workstation_lxc_vlan_tag: ""
+# Domain members must resolve the AD DNS zone (_ldap._tcp SRV records) or the
+# realm join fails, so the nameserver is a domain controller, not a forwarder.
+claude_workstation_lxc_nameserver: 192.168.1.3
+claude_workstation_lxc_searchdomain: myrobertson.net
+
+# Runtime behaviour.
+claude_workstation_lxc_unprivileged: true
+claude_workstation_lxc_onboot: true
+claude_workstation_lxc_start: true
+
+# nesting=1 gives the guest its own /sys/fs/cgroup and working dbus, which
+# sssd/oddjob need under systemd. keyctl=1 is the important one: unprivileged
+# containers block keyctl() by default, and both sssd's credential cache and
+# Kerberos keyring ccaches fail closed without it. The role also forces a FILE
+# ccache inside the guest as a second line of defence.
+claude_workstation_lxc_features: nesting=1,keyctl=1
+
+# Public key injected so the controller can reach the container over SSH after
+# creation. Defaults to the key of the user running the playbook.
+claude_workstation_lxc_ssh_public_key_file: "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519.pub"

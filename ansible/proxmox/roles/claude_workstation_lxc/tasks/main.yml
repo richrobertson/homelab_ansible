@@ -1,0 +1,136 @@
+---
+# /etc/pve is the clustered config filesystem, so this check sees containers
+# owned by any node in the cluster, not just the one we are connected to.
+- name: Look for an existing container with the target VMID
+  ansible.builtin.stat:
+    path: "/etc/pve/lxc/{{ claude_workstation_lxc_vmid }}.conf"
+  register: claude_workstation_lxc_conf
+
+- name: Read the injected SSH public key
+  ansible.builtin.set_fact:
+    claude_workstation_lxc_ssh_public_key: "{{ lookup('ansible.builtin.file', claude_workstation_lxc_ssh_public_key_file) }}"
+  delegate_to: localhost
+  become: false
+  when: not claude_workstation_lxc_conf.stat.exists
+
+- name: Check whether the guest template is already downloaded
+  ansible.builtin.stat:
+    path: "/var/lib/vz/template/cache/{{ claude_workstation_lxc_template }}"
+  register: claude_workstation_lxc_template_file
+  when: not claude_workstation_lxc_conf.stat.exists
+
+- name: Refresh the appliance template index
+  ansible.builtin.command:
+    argv:
+      - pveam
+      - update
+  when:
+    - not claude_workstation_lxc_conf.stat.exists
+    - not claude_workstation_lxc_template_file.stat.exists
+  changed_when: true
+
+- name: Download the guest template
+  ansible.builtin.command:
+    argv:
+      - pveam
+      - download
+      - "{{ claude_workstation_lxc_template_storage }}"
+      - "{{ claude_workstation_lxc_template }}"
+  when:
+    - not claude_workstation_lxc_conf.stat.exists
+    - not claude_workstation_lxc_template_file.stat.exists
+  changed_when: true
+
+- name: Stage the SSH public key for injection
+  ansible.builtin.copy:
+    content: "{{ claude_workstation_lxc_ssh_public_key }}\n"
+    dest: "/tmp/claude-workstation-{{ claude_workstation_lxc_vmid }}.pub"
+    owner: root
+    group: root
+    mode: "0600"
+  when: not claude_workstation_lxc_conf.stat.exists
+
+- name: Create the workstation container
+  ansible.builtin.command:
+    argv:
+      - pct
+      - create
+      - "{{ claude_workstation_lxc_vmid }}"
+      - "{{ claude_workstation_lxc_template_storage }}:vztmpl/{{ claude_workstation_lxc_template }}"
+      - --hostname
+      - "{{ claude_workstation_lxc_hostname }}"
+      - --description
+      - "{{ claude_workstation_lxc_description }}"
+      - --cores
+      - "{{ claude_workstation_lxc_cores }}"
+      - --memory
+      - "{{ claude_workstation_lxc_memory_mb }}"
+      - --swap
+      - "{{ claude_workstation_lxc_swap_mb }}"
+      - --rootfs
+      - "{{ claude_workstation_lxc_storage }}:{{ claude_workstation_lxc_rootfs_gb }}"
+      - --mp0
+      - "{{ claude_workstation_lxc_mp0 }}"
+      - --net0
+      - "{{ claude_workstation_lxc_net0 }}"
+      - --nameserver
+      - "{{ claude_workstation_lxc_nameserver }}"
+      - --searchdomain
+      - "{{ claude_workstation_lxc_searchdomain }}"
+      - --features
+      - "{{ claude_workstation_lxc_features }}"
+      - --onboot
+      - "{{ 1 if claude_workstation_lxc_onboot | bool else 0 }}"
+      - --unprivileged
+      - "{{ 1 if claude_workstation_lxc_unprivileged | bool else 0 }}"
+      - --ssh-public-keys
+      - "/tmp/claude-workstation-{{ claude_workstation_lxc_vmid }}.pub"
+  vars:
+    # A bare size allocates a new volume; a volume id re-attaches one that was
+    # detached from a previous instance of this container.
+    claude_workstation_lxc_mp0: >-
+      {{
+        claude_workstation_lxc_home_volume
+        if claude_workstation_lxc_home_volume | length > 0
+        else claude_workstation_lxc_home_storage ~ ':' ~ claude_workstation_lxc_home_gb
+      }},mp={{ claude_workstation_lxc_home_mountpoint }},backup=1
+    claude_workstation_lxc_net0: >-
+      name=eth0,bridge={{ claude_workstation_lxc_bridge }},ip={{ claude_workstation_lxc_ipv4_cidr }},gw={{ claude_workstation_lxc_gateway }}{{
+        ',tag=' ~ claude_workstation_lxc_vlan_tag if claude_workstation_lxc_vlan_tag | length > 0 else ''
+      }}
+  when: not claude_workstation_lxc_conf.stat.exists
+  changed_when: true
+
+- name: Remove the staged SSH public key
+  ansible.builtin.file:
+    path: "/tmp/claude-workstation-{{ claude_workstation_lxc_vmid }}.pub"
+    state: absent
+  when: not claude_workstation_lxc_conf.stat.exists
+
+- name: Read the current container status
+  ansible.builtin.command:
+    argv:
+      - pct
+      - status
+      - "{{ claude_workstation_lxc_vmid }}"
+  register: claude_workstation_lxc_status
+  changed_when: false
+  check_mode: false
+
+- name: Start the container
+  ansible.builtin.command:
+    argv:
+      - pct
+      - start
+      - "{{ claude_workstation_lxc_vmid }}"
+  when:
+    - claude_workstation_lxc_start | bool
+    - "'status: running' not in claude_workstation_lxc_status.stdout"
+  changed_when: true
+
+- name: Wait for the container SSH endpoint to accept connections
+  ansible.builtin.wait_for:
+    host: "{{ claude_workstation_lxc_ipv4_cidr | split('/') | first }}"
+    port: 22
+    timeout: 180
+  when: claude_workstation_lxc_start | bool

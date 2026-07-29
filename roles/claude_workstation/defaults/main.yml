@@ -1,0 +1,224 @@
+---
+# --- Vault access ------------------------------------------------------------
+# Every secret this role consumes is read from Vault on the controller. Nothing
+# secret is ever templated from inventory or defaults.
+claude_workstation_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+claude_workstation_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+claude_workstation_vault_mount: secret
+
+# --- Workstation user --------------------------------------------------------
+# A local account still exists even when the box is domain joined: it is the
+# break-glass path when AD, DNS, or Kerberos is down, which is exactly when you
+# most need a shell here. Its password is locked, so it is key-only.
+claude_workstation_user: workstation
+claude_workstation_group: workstation
+claude_workstation_shell: /bin/bash
+claude_workstation_home: /home/workstation
+claude_workstation_authorized_keys: []
+# Local sudo for the break-glass account. AD-based sudo is configured further
+# down and is the normal path.
+claude_workstation_user_sudo: true
+
+# --- Node runtime ------------------------------------------------------------
+# Claude Code requires Node 22+, and 22.15+ specifically for reading the OS
+# trust store, which is what makes the domain CA work without per-user config.
+claude_workstation_nodejs_major: 22
+claude_workstation_manage_nodesource_repo: true
+
+# --- Claude Code CLI ---------------------------------------------------------
+# Installed globally from npm rather than via the per-user native installer at
+# https://claude.ai/install.sh, because a shared box should present one
+# audited version to every AD user instead of N self-updating copies in N home
+# directories. Set to "latest" to always take the newest release.
+claude_workstation_claude_package: "@anthropic-ai/claude-code"
+claude_workstation_claude_version: latest
+# The global install is root-owned, so the in-place updater cannot write to it.
+# Disabling it turns a confusing permission error into a no-op; upgrades happen
+# by re-running this role.
+claude_workstation_disable_autoupdater: true
+
+# Extra tooling Claude Code leans on: ripgrep for search, tmux so a session
+# survives a dropped Guacamole tab, build-essential for native npm modules.
+claude_workstation_packages:
+  - build-essential
+  - curl
+  - git
+  - jq
+  - less
+  - ripgrep
+  - tmux
+  - unzip
+
+# --- Anthropic authentication ------------------------------------------------
+# The API key is written to a root-owned, group-readable env file that the
+# workstation shell sources. See the role README for the interactive
+# `claude setup-token` alternative, which is usually the better fit for a
+# human-operated box.
+claude_workstation_manage_api_key: true
+claude_workstation_vault_api_path: claude-code/workstation
+claude_workstation_vault_api_key_field: api_key
+claude_workstation_env_file: /etc/claude-code/claude-code.env
+claude_workstation_profile_file: /etc/profile.d/claude-code.sh
+# Group allowed to read the key. Set this to an AD group name to share one
+# billing identity across domain users; leaving it local means AD users
+# authenticate individually with `claude setup-token`, which is the better
+# default because it keeps usage attributable to a person.
+claude_workstation_env_group: "{{ claude_workstation_group }}"
+
+# --- Home persistence --------------------------------------------------------
+# The container role puts /home on its own volume. This asserts that it really
+# is a separate filesystem, because silently landing on the root disk is how a
+# rebuild eats someone's work.
+claude_workstation_require_separate_home: true
+claude_workstation_home_mountpoint: /home
+
+# --- Active Directory --------------------------------------------------------
+claude_workstation_ad_join: true
+claude_workstation_ad_domain: myrobertson.net
+claude_workstation_ad_realm: MYROBERTSON.NET
+claude_workstation_ad_workgroup: MYROBERTSON
+# Computer object placement. Leaving this empty drops the host in the default
+# Computers container.
+claude_workstation_ad_computer_ou: ""
+claude_workstation_ad_os_name: Debian GNU/Linux
+
+# Join credentials come from Vault, following the secret/windows/domain/...
+# layout the rest of this repo already uses for AD service accounts.
+claude_workstation_vault_ad_path: windows/domain/service-accounts/linux-realm-join
+claude_workstation_vault_ad_user_field: username
+claude_workstation_vault_ad_password_field: password
+
+# Domain controllers, also used as the Kerberos KDCs and the time sources.
+claude_workstation_domain_controllers:
+  - dc1.myrobertson.net
+  - rhonda.myrobertson.net
+
+claude_workstation_ad_packages:
+  - adcli
+  - krb5-user
+  - libnss-sss
+  - libpam-sss
+  - oddjob
+  - oddjob-mkhomedir
+  - packagekit
+  - realmd
+  - samba-common-bin
+  - sssd
+  - sssd-tools
+
+# --- AD access control -------------------------------------------------------
+# THIS IS THE IMPORTANT ONE. Joining a domain otherwise hands a shell on this
+# box to every account in the directory. sssd's simple access provider is
+# fail-closed: only members of these groups can authenticate at all. The role
+# asserts the list is non-empty rather than letting an empty value mean "open".
+claude_workstation_ad_allowed_groups:
+  - claude-workstation-users
+# Individual accounts that should be allowed without being in one of the groups
+# above. Prefer the group.
+claude_workstation_ad_allowed_users: []
+
+# sssd derives POSIX uids from the object SID, and its stock range starts at
+# 200000 and runs to 2000200000. An unprivileged LXC maps only 65536 container
+# uids onto the host, so a default-range AD uid falls straight off the end of
+# the map and the login fails with unownable files and permission errors that
+# point nowhere near the real cause. Squeezing the range under 65536 is what
+# makes AD work in an unprivileged container at all.
+#
+# The cost is that uids here will NOT match an AD-joined host using the stock
+# range. Do not share NFS or any other uid-sensitive filesystem between this
+# container and such a host without reconciling the ranges first.
+claude_workstation_sssd_idmap_range_min: 10000
+claude_workstation_sssd_idmap_range_max: 60000
+# One domain occupies one slice, so this is sized to the whole usable window.
+claude_workstation_sssd_idmap_range_size: 50000
+
+# Short names (rich) rather than rich@myrobertson.net. There is exactly one
+# domain here, so qualification buys nothing and costs every operator an
+# awkward login prompt, sudoers entry, and Guacamole username field. Flip this
+# to true if a second domain or a forest trust is ever joined.
+claude_workstation_sssd_use_fully_qualified_names: false
+# Enumeration walks the entire directory into every getent passwd; it is off by
+# default upstream for good reason on anything larger than a lab.
+claude_workstation_sssd_enumerate: false
+claude_workstation_sssd_default_shell: /bin/bash
+claude_workstation_sssd_fallback_homedir: /home/%u
+claude_workstation_sssd_cache_credentials: true
+
+# The AD provider talks LDAP over 389 with GSSAPI sealing by default, so the
+# TLS settings below only take effect when this is pointed at ldaps://. They
+# are still set correctly so that switching is a one-variable change rather
+# than a security regression waiting to happen.
+claude_workstation_sssd_ldap_uri: ""
+claude_workstation_sssd_ldap_tls_reqcert: demand
+claude_workstation_sssd_ldap_tls_cacert: /etc/ssl/certs/ca-certificates.crt
+
+# --- AD sudo -----------------------------------------------------------------
+# Group-granted by default. Individual principals are supported but should stay
+# the exception.
+claude_workstation_sudo_ad_groups:
+  - claude-workstation-admins
+claude_workstation_sudo_ad_users: []
+claude_workstation_sudo_nopasswd: false
+claude_workstation_sudoers_file: /etc/sudoers.d/claude-workstation
+
+# --- Certificate authorities -------------------------------------------------
+# Two distinct trust chains exist in this homelab: the AD Certificate Services
+# root that signs domain controller LDAPS certificates, and the Vault pki_int
+# intermediate that signs Proxmox and other service certificates. Both are
+# installed; neither validates the other unless someone cross-signs them.
+claude_workstation_manage_ca_trust: true
+claude_workstation_ca_dir: /usr/local/share/ca-certificates
+
+# KV-sourced certificates. Add entries here rather than editing tasks.
+claude_workstation_ca_certificates:
+  - name: myrobertson-ad-root-ca
+    vault_path: windows/domain/ca/root
+    vault_field: certificate
+
+# Vault PKI mounts whose CA is fetched from the PKI endpoint itself rather than
+# from KV, matching how ansible/proxmox/provision_certificates.yml sources
+# /etc/vault-agent.d/vault-ca.pem.
+claude_workstation_vault_pki_mounts:
+  - pki_int
+
+# Node reads the OS trust store only on 22.15+, and only for some code paths.
+# Pointing NODE_EXTRA_CA_CERTS at the merged bundle makes Claude Code trust the
+# domain CA regardless of which runtime path it takes.
+claude_workstation_node_extra_ca_certs: /etc/ssl/certs/ca-certificates.crt
+
+# --- Time --------------------------------------------------------------------
+# Kerberos rejects tickets outside a five-minute skew, so this is a hard
+# prerequisite for the domain join, not a nicety.
+claude_workstation_manage_chrony: true
+claude_workstation_chrony_config: /etc/chrony/chrony.conf
+claude_workstation_ntp_servers: "{{ claude_workstation_domain_controllers }}"
+
+# --- SSH ---------------------------------------------------------------------
+# Modes:
+#   key             - public key only. Locks out AD password logins entirely.
+#   domain_password - keys, plus keyboard-interactive so PAM/sssd can accept AD
+#                     credentials. This is the default because it is the only
+#                     mode in which a Guacamole SSH connection prompting for a
+#                     domain password works at all.
+#   password        - additionally enables plain PasswordAuthentication.
+# In domain_password mode the local account cannot be password-attacked: its
+# password is locked, and sssd's simple access provider rejects every AD user
+# outside claude_workstation_ad_allowed_groups before a password is even
+# checked.
+claude_workstation_ssh_auth_mode: domain_password
+claude_workstation_ssh_permit_root_login: "no"
+claude_workstation_sshd_config_file: /etc/ssh/sshd_config.d/claude-workstation.conf
+claude_workstation_ssh_service: ssh
+
+# --- Optional desktop --------------------------------------------------------
+# Claude Code is a terminal application, so the default access path is a
+# Guacamole SSH connection and no desktop is installed. Turn this on only when
+# something genuinely needs a GUI; it pulls in several hundred packages.
+claude_workstation_desktop: false
+claude_workstation_desktop_packages:
+  - dbus-x11
+  - xfce4
+  - xfce4-terminal
+  - xorgxrdp
+  - xrdp
+claude_workstation_rdp_port: 3389

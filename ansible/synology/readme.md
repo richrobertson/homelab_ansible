@@ -1,7 +1,8 @@
 # Synology LUN Cleanup Runbook
 
 This folder includes playbooks to discover and clean likely orphaned iSCSI LUNs on Synology NAS 192.168.1.215.
-The playbooks target the inventory group `synology_nas` and use host vars from `inventory/environments/synology.ini`.
+The playbooks target the inventory group `synology_snapshot_replication_nas` in `inventory/environments/production.ini`,
+which carries the `ansible_user=admin` / `ansible_port=5022` host vars for both NAS units.
 
 Disaster recovery for Kermit and Scooter—including Snapshot Replication,
 Hyper Backup, and Active Backup for Business—is documented in
@@ -11,6 +12,8 @@ Hyper Backup, and Active Backup for Business—is documented in
 
 - `preflight_nas_connectivity.yml`: Verifies SSH reachability, API auth, and LUN endpoint shape.
 - `audit_snapshot_replication.yml`: Audits Snapshot Replication package status, configured replica count, schedules, local share snapshot config, retention policy coverage, required Nextcloud share snapshot counts, and DSM notification email settings. It can also apply the desired DSM notification email settings when explicitly enabled.
+- `audit_share_access_exposure.yml`: Read-only audit of every shared folder on both NAS units for access by unauthenticated or guest users — DSM guest account state, per-share guest ACEs, SMB1/NTLMv1/signing, NFS export host restrictions and squash flags, pre-auth rsync module disclosure, iSCSI targets without CHAP, AFP/FTP/WebDAV, and internet reachability via QuickConnect. Asserts on every finding so it can run as a recurring control check. Procedure and current findings: [Synology share access audit](../../runbooks/synology/synology-share-access-audit.md).
+- `remediate_share_access_exposure.yml`: Disables QuickConnect and enables DSM Auto Block, the two `audit_share_access_exposure.yml` findings with a DSM API that is safe to drive unattended. Both are gated behind explicit `*_apply` flags and the default run only reports before/after state. The remaining findings are DSM UI procedures documented in the same runbook — except the internet-facing `kermit.myrobertson.com` gateway route, which is a `homelab_flux` change and is written up in the runbook under "Close the Kermit gateway route".
 - `configure_authelia_sso.yml`: Seeds per-NAS Authelia OIDC client secrets in Vault and configures DSM OIDC SSO for scooter and kermit.
 - `sync_drive_certificate.yml`: Syncs the cert-manager managed `drive.myrobertson.com` certificate to Kermit, assigns it to DSM Desktop Service and Synology Drive Server, and restarts the affected services.
 - `provision_nextcloud_nfs_share.yml`: Creates separate `nextcloud-data-stage` and `nextcloud-data-prod` Btrfs shared folders, keeps recycle bin disabled, verifies data checksumming is not disabled, and applies Kubernetes-worker-only NFS privileges.
@@ -334,21 +337,21 @@ snapshots or shared folders.
 
 ```bash
 ansible-playbook ansible/synology/preflight_nas_connectivity.yml \
-  -i inventory/environments/synology.ini
+  -i inventory/environments/production.ini
 ```
 
 ## 2) Discovery-only
 
 ```bash
 ansible-playbook ansible/synology/discover_orphaned_luns.yml \
-  -i inventory/environments/synology.ini
+  -i inventory/environments/production.ini
 ```
 
 Optionally exclude known-safe names by regex pattern list:
 
 ```bash
 ansible-playbook ansible/synology/discover_orphaned_luns.yml \
-  -i inventory/environments/synology.ini \
+  -i inventory/environments/production.ini \
   -e 'synology_lun_name_exclude_patterns=["prod","backup"]'
 ```
 
@@ -357,7 +360,7 @@ Enable strict non-empty behavior if your automation requires it:
 
 ```bash
 ansible-playbook ansible/synology/discover_orphaned_luns.yml \
-  -i inventory/environments/synology.ini \
+  -i inventory/environments/production.ini \
   -e synology_fail_when_none_found=true
 ```
 
@@ -367,7 +370,7 @@ Dry-run preview:
 
 ```bash
 ansible-playbook ansible/synology/cleanup_orphaned_luns.yml \
-  -i inventory/environments/synology.ini \
+  -i inventory/environments/production.ini \
   -e 'orphan_lun_uuids=["uuid-1","uuid-2"]'
 ```
 
@@ -375,7 +378,7 @@ Actual deletion:
 
 ```bash
 ansible-playbook ansible/synology/cleanup_orphaned_luns.yml \
-  -i inventory/environments/synology.ini \
+  -i inventory/environments/production.ini \
   -e 'orphan_lun_uuids=["uuid-1","uuid-2"]' \
   -e perform_cleanup=true
 ```
@@ -386,7 +389,7 @@ Discovery and preview only:
 
 ```bash
 ansible-playbook ansible/synology/discover_and_cleanup_orphaned_luns.yml \
-  -i inventory/environments/synology.ini
+  -i inventory/environments/production.ini
 ```
 
 The one-shot playbook also succeeds by default when no candidates are found.
@@ -394,7 +397,7 @@ To force a non-zero exit when discovery returns no orphan UUIDs:
 
 ```bash
 ansible-playbook ansible/synology/discover_and_cleanup_orphaned_luns.yml \
-  -i inventory/environments/synology.ini \
+  -i inventory/environments/production.ini \
   -e synology_fail_when_none_found=true
 ```
 
@@ -402,7 +405,7 @@ Actual cleanup (requires explicit confirmation gate):
 
 ```bash
 ansible-playbook ansible/synology/discover_and_cleanup_orphaned_luns.yml \
-  -i inventory/environments/synology.ini \
+  -i inventory/environments/production.ini \
   -e perform_cleanup=true \
   -e cleanup_confirmation=I_UNDERSTAND_DELETE_IS_DESTRUCTIVE
 ```

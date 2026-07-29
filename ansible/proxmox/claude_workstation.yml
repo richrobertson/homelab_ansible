@@ -1,0 +1,156 @@
+---
+# Deploys the Claude Code workstation end to end:
+#   1. creates the LXC, with /home on its own volume so a rebuild is survivable
+#   2. joins it to the myrobertson.net AD domain and configures Claude Code
+#   3. optionally registers an SSH connection in Guacamole over its REST API
+#
+# Access is a Guacamole SSH connection at https://rdp.myrobertson.com. Claude
+# Code is a terminal application, so a browser terminal fits it better than a
+# full desktop; set claude_workstation_desktop=true for the XFCE/XRDP path.
+#
+# Requires VAULT_ADDR and VAULT_TOKEN in the environment.
+#
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/claude_workstation.yml
+
+- name: Provision the workstation container
+  hosts: "{{ claude_workstation_lxc_host | default(groups['proxmox_nodes'][0]) }}"
+  become: true
+  gather_facts: false
+  tags:
+    - claude_workstation
+    - claude_workstation_lxc
+  roles:
+    - role: claude_workstation_lxc
+
+- name: Configure the workstation
+  hosts: claude_workstation
+  become: true
+  gather_facts: true
+  tags:
+    - claude_workstation
+    - claude_workstation_config
+  roles:
+    - role: claude_workstation
+
+# Guacamole 1.6.0 keeps connections in its CloudNativePG Postgres database, not
+# in the flux repository, so nothing in Git describes this connection. This play
+# is the only way to create it without clicking through the admin UI, and it is
+# off by default because it needs a Guacamole account that can authenticate with
+# a username and password -- the deployment's primary auth is Keycloak OIDC.
+# See runbooks/proxmox/claude-workstation.md for the full picture.
+- name: Register the workstation as a Guacamole SSH connection
+  hosts: claude_workstation
+  become: false
+  gather_facts: false
+  tags:
+    - claude_workstation
+    - claude_workstation_guacamole
+  vars:
+    claude_workstation_guacamole_manage_connection: false
+    claude_workstation_guacamole_url: https://rdp.myrobertson.com
+    claude_workstation_guacamole_datasource: postgresql
+    claude_workstation_guacamole_connection_name: Claude Code workstation
+    claude_workstation_guacamole_parent_identifier: "ROOT"
+    # Credentials for the Guacamole admin account, read from Vault rather than
+    # passed on the command line.
+    claude_workstation_guacamole_vault_path: guacamole/admin
+    # This play applies no role, so role defaults are not in scope here and the
+    # Vault coordinates have to be restated.
+    claude_workstation_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    claude_workstation_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    claude_workstation_vault_mount: secret
+    claude_workstation_ssh_target_port: 22
+    claude_workstation_sftp_root: /home
+  tasks:
+    - name: Skip Guacamole registration unless explicitly enabled
+      ansible.builtin.meta: end_play
+      when: not (claude_workstation_guacamole_manage_connection | bool)
+
+    - name: Fetch the Guacamole admin credentials from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ claude_workstation_vault_addr }}"
+        token: "{{ claude_workstation_vault_token }}"
+        engine_mount_point: "{{ claude_workstation_vault_mount }}"
+        path: "{{ claude_workstation_guacamole_vault_path }}"
+      register: claude_workstation_guacamole_secret
+      delegate_to: localhost
+      run_once: true
+      no_log: true
+
+    - name: Obtain a Guacamole API token
+      ansible.builtin.uri:
+        url: "{{ claude_workstation_guacamole_url }}/api/tokens"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          username: "{{ claude_workstation_guacamole_secret.secret.username }}"
+          password: "{{ claude_workstation_guacamole_secret.secret.password }}"
+        status_code: 200
+      register: claude_workstation_guacamole_token
+      delegate_to: localhost
+      run_once: true
+      no_log: true
+
+    - name: List the existing connections
+      ansible.builtin.uri:
+        url: >-
+          {{ claude_workstation_guacamole_url }}/api/session/data/{{ claude_workstation_guacamole_datasource }}/connections?token={{
+            claude_workstation_guacamole_token.json.authToken }}
+        method: GET
+        status_code: 200
+      register: claude_workstation_guacamole_connections
+      delegate_to: localhost
+      run_once: true
+      no_log: true
+
+    # Guacamole has no upsert and generates its own identifiers, so a POST of an
+    # existing name silently creates a duplicate. Matching on the name first is
+    # what keeps re-runs idempotent.
+    - name: Create the SSH connection
+      ansible.builtin.uri:
+        url: >-
+          {{ claude_workstation_guacamole_url }}/api/session/data/{{ claude_workstation_guacamole_datasource }}/connections?token={{
+            claude_workstation_guacamole_token.json.authToken }}
+        method: POST
+        body_format: json
+        body:
+          parentIdentifier: "{{ claude_workstation_guacamole_parent_identifier }}"
+          name: "{{ claude_workstation_guacamole_connection_name }}"
+          protocol: ssh
+          parameters:
+            hostname: "{{ ansible_host | default(inventory_hostname) }}"
+            port: "{{ claude_workstation_ssh_target_port }}"
+            # Deliberately no username or password. Guacamole prompts the user
+            # at connect time, so AD credentials are never stored in the
+            # Guacamole database.
+            "enable-sftp": "true"
+            "sftp-root-directory": "{{ claude_workstation_sftp_root }}"
+          attributes:
+            "max-connections": "2"
+            "max-connections-per-user": "1"
+        status_code: 200
+      delegate_to: localhost
+      run_once: true
+      when: >-
+        claude_workstation_guacamole_connection_name not in
+        (claude_workstation_guacamole_connections.json.values() | map(attribute='name') | list)
+
+- name: Report how to reach the workstation
+  hosts: claude_workstation
+  become: false
+  gather_facts: false
+  tags:
+    - claude_workstation
+  vars:
+    claude_workstation_ad_domain: myrobertson.net
+  tasks:
+    - name: Show the connection details
+      ansible.builtin.debug:
+        msg: >-
+          Workstation ready at {{ ansible_host | default(inventory_hostname) }}.
+          Reach it through Guacamole at https://rdp.myrobertson.com using an SSH
+          connection to port 22 and your {{ claude_workstation_ad_domain }}
+          credentials. The Guacamole connection itself is not created by this
+          playbook unless claude_workstation_guacamole_manage_connection=true;
+          see runbooks/proxmox/claude-workstation.md.

@@ -1,0 +1,43 @@
+---
+- name: Install base packages
+  ansible.builtin.apt:
+    name: "{{ ['ca-certificates', 'gnupg'] + claude_workstation_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install the NodeSource signing key
+  ansible.builtin.get_url:
+    url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+    dest: /etc/apt/keyrings/nodesource.asc
+    owner: root
+    group: root
+    mode: "0644"
+  when: claude_workstation_manage_nodesource_repo | bool
+
+- name: Configure the NodeSource apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/nodesource.asc]
+      https://deb.nodesource.com/node_{{ claude_workstation_nodejs_major }}.x nodistro main
+    filename: nodesource
+    state: present
+  when: claude_workstation_manage_nodesource_repo | bool
+  register: claude_workstation_nodesource_repo
+
+- name: Install Node.js
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+    update_cache: "{{ claude_workstation_nodesource_repo.changed | default(false) }}"
+
+- name: Install the Active Directory client stack
+  ansible.builtin.apt:
+    name: "{{ claude_workstation_ad_packages }}"
+    state: present
+  when: claude_workstation_ad_join | bool
+  # krb5-user's postinst asks for a default realm interactively and would hang
+  # the play. The prompt is suppressed here and the resulting placeholder
+  # krb5.conf is replaced wholesale by the domain join tasks.
+  environment:
+    DEBIAN_FRONTEND: noninteractive

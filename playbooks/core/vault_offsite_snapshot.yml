@@ -1,0 +1,553 @@
+---
+# Encrypted offsite snapshots of the Vault data directory, on a systemd timer.
+#
+#   ansible-playbook -i inventory/environments/production.ini \
+#     playbooks/core/vault_offsite_snapshot.yml
+#
+# Vault is the trust root for the whole estate: the PBS client-side encryption
+# key, the Proxmox API credentials, and every application secret live in it.
+# Losing it is not a service outage, it is an estate rebuild. This playbook adds
+# a small, restorable, independently-encrypted copy of just the Vault barrier,
+# alongside (not instead of) the VM-level `vault-vm-119-nightly` vzdump job.
+#
+# WHY A COLD COPY AND NOT `vault operator raft snapshot save`
+# ------------------------------------------------------------------
+# Verified 2026-07-29 against the live server: `sys/seal-status` reports
+# `"storage_type":"file"` and `sys/storage/raft/configuration` returns
+# "unsupported path". The raft snapshot API is a raft-backend feature; it does
+# not exist for the file backend and returns 404. The file backend has no online
+# snapshot API of any kind, so the only method that guarantees a consistent copy
+# is to stop the service and copy the tree. That costs a few seconds of downtime
+# per run. See runbooks/security/vault-backup-and-raft-migration.md for the
+# migration that removes the downtime.
+#
+# The script below detects the live backend every run and switches to the
+# zero-downtime raft snapshot automatically once the migration is done, so this
+# playbook does not need editing at cutover.
+#
+# Pairs with the alert rules in
+# homelab_flux/infrastructure/configs/vault-alerts.yaml.
+
+- name: Configure encrypted offsite Vault snapshots
+  hosts: "{{ vault_backup_target_hosts | default('vault') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    vault_backup_data_dir: /opt/vault/data
+    vault_backup_service: vault
+    vault_backup_unseal_service: vault-unseal
+    vault_backup_addr: https://127.0.0.1:8200
+    vault_backup_root_token_file: /root/.vault-token
+
+    vault_backup_conf_dir: /etc/vault-snapshot
+    vault_backup_env_file: /etc/vault-snapshot/offsite.env
+    vault_backup_script: /usr/local/sbin/vault-offsite-snapshot.sh
+    vault_backup_stage_dir: /var/backups/vault-snapshots
+
+    # Daily, ahead of the 04:30 vzdump run so a failure here is visible before
+    # the VM-level backup is taken.
+    vault_backup_schedule: "*-*-* 03:00:00"
+    # Local copies are the fast restore path; offsite is the disaster path.
+    vault_backup_keep_local: 7
+    vault_backup_keep_offsite_days: 90
+
+    # Offsite credentials and the encryption recipient. Read from Vault at
+    # configure time only: Vault is up when we configure and when we back up, so
+    # there is no circularity in *writing* backups. Restoring is a different
+    # story and is why the private key must be escrowed offline: see the runbook.
+    vault_backup_vault_addr: "{{ lookup('ansible.builtin.env', 'VAULT_ADDR') | default('https://vault.myrobertson.net:8200', true) }}"
+    vault_backup_vault_token: "{{ lookup('ansible.builtin.env', 'VAULT_TOKEN') | default(lookup('ansible.builtin.file', '~/.vault-token', errors='ignore'), true) }}"
+    vault_backup_vault_mount: secret
+    vault_backup_vault_path: vault/backup/offsite
+
+    # Matches ansible/proxmox/proxmox_transport_metrics.yml so the snapshot
+    # freshness metrics land where node_exporter is already told to look.
+    vault_backup_textfile_dir: /var/lib/prometheus/node-exporter
+    vault_backup_node_exporter_args: "--collector.textfile.directory={{ vault_backup_textfile_dir }}"
+    # Vault VM 119 is the single most critical host in the estate and currently
+    # has no scrape target at all, so install the exporter here too.
+    vault_backup_manage_node_exporter: true
+
+    # The seeding run below stops Vault on the file backend. Set false to
+    # install the timer during business hours and let it fire on schedule.
+    vault_backup_run_now: true
+
+  handlers:
+    - name: Restart prometheus-node-exporter
+      ansible.builtin.systemd_service:
+        name: prometheus-node-exporter
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    - name: Confirm the live Vault storage backend
+      ansible.builtin.uri:
+        url: "{{ vault_backup_addr }}/v1/sys/seal-status"
+        validate_certs: false
+        return_content: true
+      register: vault_backup_seal_status
+      changed_when: false
+      check_mode: false
+
+    # Recorded rather than asserted: the script handles both backends, but a
+    # surprise here means the runbook's migration state is out of date.
+    - name: Report the storage backend the snapshot script will use
+      ansible.builtin.debug:
+        msg: >-
+          Vault storage backend is
+          '{{ vault_backup_seal_status.json.storage_type }}';
+          snapshots will use
+          {{ (vault_backup_seal_status.json.storage_type == 'raft')
+             | ternary('the online raft snapshot API (no downtime)',
+                       'a cold copy of ' ~ vault_backup_data_dir ~ ' (brief downtime)') }}.
+
+    - name: Fetch the offsite snapshot credentials from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ vault_backup_vault_addr }}"
+        token: "{{ vault_backup_vault_token }}"
+        engine_mount_point: "{{ vault_backup_vault_mount }}"
+        path: "{{ vault_backup_vault_path }}"
+      register: vault_backup_offsite_secret
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Assert the offsite snapshot secret is complete
+      ansible.builtin.assert:
+        that:
+          - vault_backup_offsite_secret.secret.AWS_ACCESS_KEY_ID | default('') | length > 0
+          - vault_backup_offsite_secret.secret.AWS_SECRET_ACCESS_KEY | default('') | length > 0
+          - vault_backup_offsite_secret.secret.AWS_DEFAULT_REGION | default('') | length > 0
+          - vault_backup_offsite_secret.secret.S3_BUCKET | default('') | length > 0
+          - vault_backup_offsite_secret.secret.S3_PREFIX | default('') | length > 0
+          - vault_backup_offsite_secret.secret.GPG_RECIPIENT | default('') | length > 0
+          - vault_backup_offsite_secret.secret.GPG_PUBLIC_KEY | default('') | length > 0
+        fail_msg: >-
+          {{ vault_backup_vault_mount }}/{{ vault_backup_vault_path }} must hold
+          AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION,
+          S3_BUCKET, S3_PREFIX, GPG_RECIPIENT and GPG_PUBLIC_KEY.
+
+    - name: Ensure snapshot tooling is present
+      ansible.builtin.package:
+        name:
+          - gnupg
+          - awscli
+          - zstd
+        state: present
+
+    - name: Ensure the snapshot configuration directory exists
+      ansible.builtin.file:
+        path: "{{ vault_backup_conf_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Ensure the snapshot staging directory exists
+      ansible.builtin.file:
+        path: "{{ vault_backup_stage_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    # Public key only. The matching private key must never exist on this host:
+    # a snapshot host that can decrypt its own snapshots gives an attacker who
+    # owns the host both the ciphertext and the key.
+    - name: Install the offsite encryption public key
+      ansible.builtin.copy:
+        dest: "{{ vault_backup_conf_dir }}/recipient.asc"
+        content: "{{ vault_backup_offsite_secret.secret.GPG_PUBLIC_KEY }}"
+        owner: root
+        group: root
+        mode: "0600"
+      register: vault_backup_recipient_key
+
+    - name: Import the offsite encryption public key into the root keyring
+      ansible.builtin.command:
+        argv:
+          - gpg
+          - --batch
+          - --yes
+          - --import
+          - "{{ vault_backup_conf_dir }}/recipient.asc"
+      register: vault_backup_gpg_import
+      changed_when: "'imported' in vault_backup_gpg_import.stderr"
+
+    # Encrypting to an untrusted key fails without this; setting ultimate trust
+    # on a key we deliberately hold no private half of is safe.
+    - name: Mark the offsite encryption key as trusted
+      ansible.builtin.shell: |
+        set -euo pipefail
+        printf '%s:6:\n' "{{ vault_backup_offsite_secret.secret.GPG_RECIPIENT }}" \
+          | gpg --batch --import-ownertrust
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Write the offsite snapshot environment file
+      ansible.builtin.copy:
+        dest: "{{ vault_backup_env_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          AWS_ACCESS_KEY_ID={{ vault_backup_offsite_secret.secret.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY={{ vault_backup_offsite_secret.secret.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION={{ vault_backup_offsite_secret.secret.AWS_DEFAULT_REGION }}
+          S3_BUCKET={{ vault_backup_offsite_secret.secret.S3_BUCKET }}
+          S3_PREFIX={{ vault_backup_offsite_secret.secret.S3_PREFIX }}
+          GPG_RECIPIENT={{ vault_backup_offsite_secret.secret.GPG_RECIPIENT }}
+          {% if vault_backup_offsite_secret.secret.S3_ENDPOINT_URL | default('') | length > 0 %}
+          S3_ENDPOINT_URL={{ vault_backup_offsite_secret.secret.S3_ENDPOINT_URL }}
+          {% endif %}
+      no_log: true
+
+    - name: Ensure the node exporter textfile directory exists
+      ansible.builtin.file:
+        path: "{{ vault_backup_textfile_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the Vault offsite snapshot script
+      ansible.builtin.copy:
+        dest: "{{ vault_backup_script }}"
+        owner: root
+        group: root
+        mode: "0750"
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          # Managed by playbooks/core/vault_offsite_snapshot.yml. Do not edit.
+
+          DATA_DIR="{{ vault_backup_data_dir }}"
+          STAGE_DIR="{{ vault_backup_stage_dir }}"
+          ENV_FILE="{{ vault_backup_env_file }}"
+          TEXTFILE_DIR="{{ vault_backup_textfile_dir }}"
+          METRICS_FILE="${TEXTFILE_DIR}/vault_backup.prom"
+          KEEP_LOCAL="{{ vault_backup_keep_local }}"
+          KEEP_OFFSITE_DAYS="{{ vault_backup_keep_offsite_days }}"
+          SERVICE="{{ vault_backup_service }}"
+          UNSEAL_SERVICE="{{ vault_backup_unseal_service }}"
+          ROOT_TOKEN_FILE="{{ vault_backup_root_token_file }}"
+
+          export VAULT_ADDR="{{ vault_backup_addr }}"
+          export VAULT_SKIP_VERIFY=true
+
+          # shellcheck disable=SC1090
+          . "$ENV_FILE"
+          export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
+
+          # Applies the optional endpoint override uniformly. Written as a
+          # function rather than an argument array because expanding an empty
+          # array is an "unbound variable" error under `set -u` on bash < 4.4.
+          s3() {
+            if [ -n "${S3_ENDPOINT_URL:-}" ]; then
+              aws --endpoint-url "${S3_ENDPOINT_URL}" s3 "$@"
+            else
+              aws s3 "$@"
+            fi
+          }
+
+          started_at=$(date +%s)
+          stamp=$(date -u +%Y%m%dT%H%M%SZ)
+          success=0
+          offsite_success=0
+          downtime=0
+          size_bytes=0
+          is_raft=0
+          stop_at=0
+          vault_stopped=0
+          unsealed=0
+
+          seal_status() {
+            curl -sk --max-time 10 "${VAULT_ADDR}/v1/sys/seal-status" || true
+          }
+
+          publish_metrics() {
+            local finished_at duration local_copies tmp last_success
+            finished_at=$(date +%s)
+            duration=$(( finished_at - started_at ))
+            local_copies=$(find "$STAGE_DIR" -maxdepth 1 -name 'vault-*.gpg' -type f | wc -l)
+            tmp=$(mktemp "${TEXTFILE_DIR}/vault_backup.prom.XXXXXX")
+            {
+              echo '# HELP vault_backup_success Whether the last Vault snapshot run completed.'
+              echo '# TYPE vault_backup_success gauge'
+              echo "vault_backup_success ${success}"
+              echo '# HELP vault_backup_offsite_success Whether the last snapshot reached offsite storage.'
+              echo '# TYPE vault_backup_offsite_success gauge'
+              echo "vault_backup_offsite_success ${offsite_success}"
+              echo '# HELP vault_backup_last_attempt_timestamp_seconds Unix time of the last snapshot attempt.'
+              echo '# TYPE vault_backup_last_attempt_timestamp_seconds gauge'
+              echo "vault_backup_last_attempt_timestamp_seconds ${started_at}"
+              # Carry the previous success timestamp forward when this run
+              # failed. The textfile is rewritten in full every run, so simply
+              # omitting the series would delete it — and VaultBackupStale
+              # would then evaluate an empty vector and go silent at exactly
+              # the moment it is supposed to fire.
+              if [ "$success" -eq 1 ]; then
+                last_success="$finished_at"
+              else
+                last_success=$(awk \
+                  '$1 == "vault_backup_last_success_timestamp_seconds" {print $2}' \
+                  "$METRICS_FILE" 2>/dev/null | tail -n1) || last_success=""
+              fi
+              if [ -n "${last_success:-}" ]; then
+                echo '# HELP vault_backup_last_success_timestamp_seconds Unix time of the last successful offsite snapshot.'
+                echo '# TYPE vault_backup_last_success_timestamp_seconds gauge'
+                echo "vault_backup_last_success_timestamp_seconds ${last_success}"
+              fi
+              echo '# HELP vault_backup_duration_seconds Wall time of the last snapshot run.'
+              echo '# TYPE vault_backup_duration_seconds gauge'
+              echo "vault_backup_duration_seconds ${duration}"
+              echo '# HELP vault_backup_downtime_seconds Seconds Vault was stopped for the last snapshot.'
+              echo '# TYPE vault_backup_downtime_seconds gauge'
+              echo "vault_backup_downtime_seconds ${downtime}"
+              echo '# HELP vault_backup_size_bytes Size of the last encrypted snapshot.'
+              echo '# TYPE vault_backup_size_bytes gauge'
+              echo "vault_backup_size_bytes ${size_bytes}"
+              echo '# HELP vault_backup_local_copies Encrypted snapshots retained on the Vault host.'
+              echo '# TYPE vault_backup_local_copies gauge'
+              echo "vault_backup_local_copies ${local_copies}"
+              echo '# HELP vault_backup_storage_backend_is_raft Whether Vault is on the raft backend.'
+              echo '# TYPE vault_backup_storage_backend_is_raft gauge'
+              echo "vault_backup_storage_backend_is_raft ${is_raft}"
+            } > "$tmp"
+            chmod 0644 "$tmp"
+            mv "$tmp" "$METRICS_FILE"
+          }
+
+          # Bringing Vault back must never be conditional on the snapshot
+          # having succeeded. Under `set -e` any failure between the stop and
+          # the start — a full staging filesystem is the likely one — aborts
+          # the script silently and would otherwise leave the estate's trust
+          # root down until a human noticed. So the restart lives in the exit
+          # path, not in the happy path, and runs before metrics are published.
+          restore_vault() {
+            [ "$vault_stopped" -eq 1 ] || return 0
+            vault_stopped=0
+            systemctl start "$SERVICE" || true
+            systemctl start "$UNSEAL_SERVICE" || true
+            for _ in $(seq 1 60); do
+              if printf '%s' "$(seal_status)" | grep -q '"sealed":false'; then
+                unsealed=1
+                break
+              fi
+              sleep 2
+            done
+            downtime=$(( $(date +%s) - stop_at ))
+            if [ "$unsealed" -ne 1 ]; then
+              echo "Vault did not unseal after snapshot; manual unseal required" >&2
+            fi
+            return 0
+          }
+
+          on_exit() {
+            restore_vault
+            publish_metrics
+          }
+          trap on_exit EXIT
+
+          # Preflight. Never stop Vault we are not confident we can start again:
+          # a failed unseal here takes the entire estate down until a human
+          # arrives with the key shares.
+          preflight_unseal_material() {
+            local passphrase_file keys_file
+            passphrase_file="/root/.gpg_passphrase"
+            keys_file="/root/.vault_unseal_keys.gpg"
+            [ -r "$passphrase_file" ] || return 1
+            [ -r "$keys_file" ] || return 1
+            gpg --quiet --batch --yes --decrypt \
+              --passphrase-file "$passphrase_file" "$keys_file" >/dev/null 2>&1 || return 1
+            return 0
+          }
+
+          # A snapshot the staging filesystem cannot hold is not worth an
+          # outage window. KEEP_LOCAL copies accumulate here and pruning only
+          # happens after a successful run, so running out of room is the
+          # expected long-run failure rather than an exotic one.
+          preflight_free_space() {
+            local need_kb avail_kb
+            need_kb=$(du -sk "$DATA_DIR" | awk '{print $1}')
+            avail_kb=$(df -Pk "$STAGE_DIR" | awk 'NR == 2 {print $4}')
+            # Fail closed. An unreadable data dir or staging mount is not a
+            # reason to proceed to `systemctl stop vault`.
+            [ -n "$need_kb" ] && [ "$need_kb" -gt 0 ] || return 1
+            [ -n "$avail_kb" ] || return 1
+            [ "$avail_kb" -ge "$(( need_kb * 2 ))" ]
+          }
+
+          raw_status="$(seal_status)"
+          backend=$(printf '%s' "$raw_status" | sed -n 's/.*"storage_type":"\([a-z]*\)".*/\1/p')
+          if [ -z "$backend" ]; then
+            echo "cannot determine Vault storage backend; is Vault running?" >&2
+            exit 1
+          fi
+
+          snapshot_raw="${STAGE_DIR}/vault-${backend}-${stamp}.snap"
+
+          if [ "$backend" = "raft" ]; then
+            is_raft=1
+            # Online and consistent: no downtime, no seal.
+            VAULT_TOKEN="$(cat "$ROOT_TOKEN_FILE")" \
+              vault operator raft snapshot save "$snapshot_raw"
+          else
+            # File backend: no online snapshot API exists. A consistent copy
+            # requires the service to be stopped.
+            if ! preflight_unseal_material; then
+              echo "unseal material missing or undecryptable; refusing to stop Vault" >&2
+              exit 1
+            fi
+            if ! preflight_free_space; then
+              echo "insufficient free space in ${STAGE_DIR}; refusing to stop Vault" >&2
+              exit 1
+            fi
+
+            stop_at=$(date +%s)
+            vault_stopped=1
+            systemctl stop "$SERVICE"
+            # Copy, never move: the live tree stays untouched if tar fails.
+            tar -C "$(dirname "$DATA_DIR")" -cf - "$(basename "$DATA_DIR")" \
+              | zstd -q -T0 -o "$snapshot_raw"
+            restore_vault
+            if [ "$unsealed" -ne 1 ]; then
+              exit 1
+            fi
+          fi
+
+          # Encrypt before the snapshot ever leaves this host. The recipient's
+          # private key is escrowed offline, so neither this host nor the object
+          # store can read what it holds.
+          snapshot_enc="${snapshot_raw}.gpg"
+          gpg --batch --yes --trust-model always \
+            --recipient "$GPG_RECIPIENT" \
+            --output "$snapshot_enc" --encrypt "$snapshot_raw"
+          shred -u "$snapshot_raw" 2>/dev/null || rm -f "$snapshot_raw"
+
+          sha256sum "$snapshot_enc" | awk '{print $1}' > "${snapshot_enc}.sha256"
+          # An empty value here would be an unparseable exposition line, and
+          # node_exporter drops the whole textfile on a parse error — taking
+          # every vault_backup_* series with it.
+          size_bytes=$(stat -c %s "$snapshot_enc" 2>/dev/null || echo 0)
+          success=1
+
+          dest="s3://${S3_BUCKET}/${S3_PREFIX}/$(basename "$snapshot_enc")"
+          s3 cp "$snapshot_enc" "$dest"
+          s3 cp "${snapshot_enc}.sha256" "${dest}.sha256"
+          offsite_success=1
+
+          # Local retention: keep the newest N encrypted snapshots.
+          find "$STAGE_DIR" -maxdepth 1 -name 'vault-*.gpg' -type f -printf '%T@ %p\n' \
+            | sort -rn | tail -n "+$(( KEEP_LOCAL + 1 ))" | cut -d' ' -f2- \
+            | while read -r stale; do
+                rm -f "$stale" "${stale}.sha256"
+              done
+
+          # Offsite retention: drop objects older than the window.
+          cutoff=$(date -u -d "${KEEP_OFFSITE_DAYS} days ago" +%Y-%m-%d)
+          s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
+            | while read -r day _time _size name; do
+                [ -n "${name:-}" ] || continue
+                if [[ "$day" < "$cutoff" ]]; then
+                  s3 rm "s3://${S3_BUCKET}/${S3_PREFIX}/${name}"
+                fi
+              done
+
+          echo "snapshot complete: ${dest} (${size_bytes} bytes, ${downtime}s downtime)"
+      register: vault_backup_script_installed
+
+    - name: Install the Vault offsite snapshot service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/vault-offsite-snapshot.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Encrypted offsite snapshot of the Vault data directory
+          Wants=network-online.target
+          After=network-online.target {{ vault_backup_service }}.service
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ vault_backup_script }}
+          # A hung snapshot must not leave Vault stopped indefinitely.
+          TimeoutStartSec=1800
+
+    - name: Install the Vault offsite snapshot timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/vault-offsite-snapshot.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run the Vault offsite snapshot on schedule
+
+          [Timer]
+          OnCalendar={{ vault_backup_schedule }}
+          RandomizedDelaySec=300
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: Install prometheus-node-exporter on the Vault host
+      ansible.builtin.package:
+        name: prometheus-node-exporter
+        state: present
+      when: vault_backup_manage_node_exporter
+
+    - name: Enable the node exporter textfile collector
+      ansible.builtin.lineinfile:
+        path: /etc/default/prometheus-node-exporter
+        regexp: '^ARGS='
+        line: 'ARGS="{{ vault_backup_node_exporter_args }}"'
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart prometheus-node-exporter
+      when: vault_backup_manage_node_exporter
+
+    - name: Ensure prometheus-node-exporter is enabled and started
+      ansible.builtin.systemd_service:
+        name: prometheus-node-exporter
+        enabled: true
+        state: started
+        daemon_reload: true
+      when: vault_backup_manage_node_exporter
+
+    - name: Enable the Vault offsite snapshot timer
+      ansible.builtin.systemd_service:
+        name: vault-offsite-snapshot.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # Seeds the freshness metrics so the alerts have a series to evaluate
+    # instead of firing on absent() the moment they are deployed.
+    #
+    # This STOPS VAULT for the duration of the copy while the file backend is
+    # in use, so running this playbook is a (short) change window, not a no-op.
+    # It re-triggers whenever the rendered script changes — including for a
+    # variable tweak such as a new retention count — so treat every run of this
+    # playbook as potentially service-affecting until the raft migration lands.
+    # Set `vault_backup_run_now: false` to install without taking the window.
+    - name: Run the snapshot once so a known-good backup exists (briefly stops Vault)
+      ansible.builtin.command:
+        argv: ["{{ vault_backup_script }}"]
+      register: vault_backup_first_run
+      changed_when: true
+      when:
+        - vault_backup_run_now | bool
+        - vault_backup_script_installed is changed
+
+    - name: Report the first snapshot result
+      ansible.builtin.debug:
+        var: vault_backup_first_run.stdout_lines
+      when: vault_backup_first_run is not skipped

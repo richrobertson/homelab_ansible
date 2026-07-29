@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+#
+# Exports BlueStore fragmentation metrics for every OSD in the cluster as
+# node_exporter textfile metrics.
+#
+# The Ceph mgr prometheus module does not export allocator fragmentation or
+# per-OSD BlueFS detail, so fragmentation is invisible to Prometheus without
+# this collector. That matters because fragmentation is a slow-onset problem
+# that surfaces as unexplained write latency long before anything else alerts.
+#
+# Runs on every Proxmox node but only the node holding the lock actually
+# collects, so the cluster-wide `ceph tell` sweep happens once per interval
+# rather than once per node.
+
+set -euo pipefail
+
+TEXTFILE_DIR="{{ ceph_fragmentation_metrics_textfile_dir }}"
+OUT="${TEXTFILE_DIR}/ceph_fragmentation.prom"
+TMP="$(mktemp "${OUT}.XXXXXX")"
+LOCK="{{ ceph_fragmentation_metrics_lock_file }}"
+
+cleanup() { rm -f "$TMP"; }
+trap cleanup EXIT
+
+# Only one node collects per interval. Without this, three nodes would each run
+# a full `ceph tell` sweep against every OSD every cycle.
+exec {lockfd}>"$LOCK"
+if ! flock -n "$lockfd"; then
+  exit 0
+fi
+
+# A node that cannot talk to the cluster should leave the previous scrape in
+# place rather than publishing zeros that would read as "fragmentation solved".
+if ! ceph -s >/dev/null 2>&1; then
+  exit 0
+fi
+
+{
+  echo "# HELP ceph_bluestore_allocator_fragmentation_score BlueStore allocator fragmentation, 0.0 contiguous to 1.0 severe."
+  echo "# TYPE ceph_bluestore_allocator_fragmentation_score gauge"
+  echo "# HELP ceph_bluestore_bluefs_used_ratio BlueFS metadata usage as a fraction of the BlueFS store."
+  echo "# TYPE ceph_bluestore_bluefs_used_ratio gauge"
+  echo "# HELP ceph_bluestore_fragmentation_collector_success Whether the last collection completed for all OSDs."
+  echo "# TYPE ceph_bluestore_fragmentation_collector_success gauge"
+} >"$TMP"
+
+osd_ids="$(ceph osd tree --format json 2>/dev/null \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(str(n["id"]) for n in d["nodes"] if n["type"]=="osd" and n.get("status")=="up"))')"
+
+failures=0
+for osd in $osd_ids; do
+  score="$(ceph tell "osd.${osd}" bluestore allocator score block 2>/dev/null \
+    | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin)["fragmentation_rating"])
+except Exception:
+    pass' || true)"
+
+  if [[ -n "$score" ]]; then
+    echo "ceph_bluestore_allocator_fragmentation_score{osd=\"${osd}\"} ${score}" >>"$TMP"
+  else
+    failures=$((failures + 1))
+  fi
+
+  ratio="$(ceph tell "osd.${osd}" perf dump bluefs 2>/dev/null \
+    | python3 -c 'import json,sys
+try:
+    b = json.load(sys.stdin)["bluefs"]
+    t = b.get("db_total_bytes", 0)
+    print(b.get("db_used_bytes", 0) / t if t else "")
+except Exception:
+    pass' || true)"
+
+  if [[ -n "$ratio" ]]; then
+    echo "ceph_bluestore_bluefs_used_ratio{osd=\"${osd}\"} ${ratio}" >>"$TMP"
+  else
+    failures=$((failures + 1))
+  fi
+done
+
+if [[ "$failures" -eq 0 ]]; then
+  echo "ceph_bluestore_fragmentation_collector_success 1" >>"$TMP"
+else
+  echo "ceph_bluestore_fragmentation_collector_success 0" >>"$TMP"
+fi
+
+chmod 0644 "$TMP"
+mv "$TMP" "$OUT"
+trap - EXIT

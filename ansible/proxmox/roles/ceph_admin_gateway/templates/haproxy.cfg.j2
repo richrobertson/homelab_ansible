@@ -1,0 +1,54 @@
+
+# {{ ansible_managed }}
+# Fronts the Ceph mgr dashboard with a stable name and a VIP that survives mgr
+# failover. Managed by the ceph_admin_gateway role; do not edit by hand.
+
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+    ca-base /etc/ssl/certs
+    crt-base {{ ceph_admin_gateway_cert_dir }}
+    ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
+    ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
+
+defaults
+    log     global
+    mode    http
+    option  httplog
+    option  dontlognull
+    option  forwardfor
+    timeout connect 5s
+    timeout client  60s
+    timeout server  60s
+    retries 2
+
+frontend ceph_admin
+    bind 0.0.0.0:{{ ceph_admin_gateway_port }} ssl crt {{ ceph_admin_gateway_pem_file }}
+    http-request set-header X-Forwarded-Proto https
+
+    # LAN-only. HAProxy is the second layer here; nftables already drops
+    # non-LAN sources, but this keeps the restriction visible in one place and
+    # holds even if the firewall is disabled.
+    acl lan_client src{% for cidr in ceph_admin_gateway_allowed_cidrs %} {{ cidr }}{% endfor %}
+
+    http-request deny deny_status 403 unless lan_client
+
+    http-response set-header Strict-Transport-Security "max-age=31536000"
+    default_backend ceph_dashboard
+
+backend ceph_dashboard
+    option httpchk GET /
+    http-check expect status 200
+
+    # The dashboard is HTTPS on the mgr. Certificate verification is skipped
+    # because the mgr presents the Proxmox portal certificate, whose name does
+    # not match the backend address we connect to.
+{% for node in ceph_admin_gateway_backend_nodes %}
+    server {{ hostvars[node].inventory_hostname_short | default(node) }} {{ hostvars[node].ansible_host | default(node) }}:{{ ceph_admin_gateway_dashboard_port }} check ssl verify none inter 3s fall 2 rise 1
+{% endfor %}

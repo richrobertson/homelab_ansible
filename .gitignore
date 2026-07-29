@@ -72,3 +72,32 @@ inventory/staging.ini
 *proxy*.conf
 *auth*.conf
 
+# Terraform state (incl. errored.tfstate from a failed apply - see the
+# 2025-10-17 homelab_bootstrap leak). Not expected here, but cheap to block.
+**/*.tfstate
+**/*.tfstate.*
+**/errored.tfstate
+**/*.tfvars
+**/*.tfvars.json
+!**/*.tfvars.example
+
+# Decrypted / staged secret material
+**/secrets.yaml
+**/secrets.yml
+**/secret.yaml
+**/secret.yml
+*.decrypted
+*.dec.yml
+*.dec.yaml
+!**/secrets.yaml.example
+!**/secrets.yml.example
+
+# Additional key material not covered above
+*.csr
+*.der
+
+# Kubeconfigs
+kubeconfig
+*.kubeconfig
+kubeconfig-*.yaml
+

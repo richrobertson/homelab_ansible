@@ -1,0 +1,250 @@
+---
+- name: Require Vault environment
+  ansible.builtin.assert:
+    that:
+      - proxmox_mcp_vault_addr | length > 0
+      - proxmox_mcp_vault_token | length > 0
+    fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running this role.
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Fetch the Proxmox API token from Vault
+  community.hashi_vault.vault_kv2_get:
+    url: "{{ proxmox_mcp_vault_addr }}"
+    token: "{{ proxmox_mcp_vault_token }}"
+    engine_mount_point: "{{ proxmox_mcp_vault_mount }}"
+    path: "{{ proxmox_mcp_vault_path }}"
+  register: proxmox_mcp_vault_secret
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: Assert the Vault secret is complete
+  ansible.builtin.assert:
+    that:
+      - proxmox_mcp_vault_secret.secret.user | default('') | length > 0
+      - proxmox_mcp_vault_secret.secret.token_name | default('') | length > 0
+      - proxmox_mcp_vault_secret.secret.token_secret | default('') | length > 0
+    fail_msg: >-
+      {{ proxmox_mcp_vault_mount }}/{{ proxmox_mcp_vault_path }} is missing user,
+      token_name, or token_secret. Run the proxmox_mcp_api_token role first.
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - git
+      - gnupg
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install the NodeSource signing key
+  ansible.builtin.get_url:
+    url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+    dest: /etc/apt/keyrings/nodesource.asc
+    owner: root
+    group: root
+    mode: "0644"
+  when: proxmox_mcp_manage_nodesource_repo | bool
+
+- name: Configure the NodeSource apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/nodesource.asc]
+      https://deb.nodesource.com/node_{{ proxmox_mcp_nodejs_major }}.x nodistro main
+    filename: nodesource
+    state: present
+  when: proxmox_mcp_manage_nodesource_repo | bool
+  register: proxmox_mcp_nodesource_repo
+
+- name: Install Node.js
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+    update_cache: "{{ proxmox_mcp_nodesource_repo.changed | default(false) }}"
+
+- name: Create the service group
+  ansible.builtin.group:
+    name: "{{ proxmox_mcp_group }}"
+    system: true
+    state: present
+
+- name: Create the service user
+  ansible.builtin.user:
+    name: "{{ proxmox_mcp_user }}"
+    group: "{{ proxmox_mcp_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ proxmox_mcp_install_dir }}"
+    create_home: false
+    state: present
+
+- name: Create the install directory
+  ansible.builtin.file:
+    path: "{{ proxmox_mcp_install_dir }}"
+    state: directory
+    owner: "{{ proxmox_mcp_user }}"
+    group: "{{ proxmox_mcp_group }}"
+    mode: "0755"
+
+- name: Check out the pinned MCP server revision
+  ansible.builtin.git:
+    repo: "{{ proxmox_mcp_repo_url }}"
+    dest: "{{ proxmox_mcp_install_dir }}"
+    version: "{{ proxmox_mcp_repo_version }}"
+    force: true
+  become_user: "{{ proxmox_mcp_user }}"
+  register: proxmox_mcp_checkout
+  notify: Restart proxmox-mcp
+
+# Upstream ships no package-lock.json, so `npm ci` is not usable here.
+- name: Install MCP server production dependencies
+  ansible.builtin.command:
+    argv:
+      - npm
+      - install
+      - --omit=dev
+      - --no-audit
+      - --no-fund
+    chdir: "{{ proxmox_mcp_install_dir }}"
+  become_user: "{{ proxmox_mcp_user }}"
+  environment:
+    HOME: "{{ proxmox_mcp_install_dir }}"
+    npm_config_cache: "{{ proxmox_mcp_install_dir }}/.npm"
+  when: proxmox_mcp_checkout.changed
+  changed_when: true
+  notify: Restart proxmox-mcp
+
+- name: Read the installed bridge version
+  ansible.builtin.command:
+    argv:
+      - npm
+      - list
+      - --global
+      - --depth=0
+      - --json
+  register: proxmox_mcp_global_npm
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Install the stdio-to-HTTP bridge
+  ansible.builtin.command:
+    argv:
+      - npm
+      - install
+      - --global
+      - --no-audit
+      - --no-fund
+      - "{{ proxmox_mcp_bridge_package }}@{{ proxmox_mcp_bridge_version }}"
+  vars:
+    proxmox_mcp_bridge_installed: >-
+      {{ (proxmox_mcp_global_npm.stdout | from_json).dependencies[proxmox_mcp_bridge_package].version | default('') }}
+  when: proxmox_mcp_bridge_installed != proxmox_mcp_bridge_version
+  changed_when: true
+  notify: Restart proxmox-mcp
+
+- name: Create the config directory
+  ansible.builtin.file:
+    path: "{{ proxmox_mcp_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ proxmox_mcp_group }}"
+    mode: "0750"
+
+- name: Write the service environment file
+  ansible.builtin.template:
+    src: proxmox-mcp.env.j2
+    dest: "{{ proxmox_mcp_env_file }}"
+    owner: root
+    group: "{{ proxmox_mcp_group }}"
+    mode: "0640"
+  no_log: true
+  notify: Restart proxmox-mcp
+
+- name: Install the systemd unit
+  ansible.builtin.template:
+    src: proxmox-mcp.service.j2
+    dest: "/etc/systemd/system/{{ proxmox_mcp_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart proxmox-mcp
+
+- name: Install nftables for endpoint filtering
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+  when: proxmox_mcp_firewall_enabled | bool
+
+- name: Create the nftables drop-in directory
+  ansible.builtin.file:
+    path: /etc/nftables.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: proxmox_mcp_firewall_enabled | bool
+
+# Debian's stock /etc/nftables.conf does not source a drop-in directory, so the
+# include has to be added explicitly or the rules below are never loaded.
+- name: Source the drop-in directory from the main nftables config
+  ansible.builtin.lineinfile:
+    path: /etc/nftables.conf
+    line: 'include "/etc/nftables.d/*.conf"'
+    insertafter: EOF
+    create: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: proxmox_mcp_firewall_enabled | bool
+  notify: Reload nftables
+
+- name: Restrict the MCP listener to allowed client networks
+  ansible.builtin.template:
+    src: proxmox-mcp-nftables.conf.j2
+    dest: /etc/nftables.d/proxmox-mcp.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: proxmox_mcp_firewall_enabled | bool
+  notify: Reload nftables
+
+- name: Enable nftables at boot
+  ansible.builtin.systemd_service:
+    name: nftables
+    enabled: true
+    state: started
+  when: proxmox_mcp_firewall_enabled | bool
+
+- name: Warn when the MCP endpoint is left unfiltered
+  ansible.builtin.debug:
+    msg: >-
+      Firewalling is disabled, so TCP {{ proxmox_mcp_port }} is reachable from the
+      entire L2 segment with no authentication in front of it. Set
+      proxmox_mcp_allowed_client_cidrs to constrain access.
+  when: not (proxmox_mcp_firewall_enabled | bool)
+
+- name: Enable and start the MCP service
+  ansible.builtin.systemd_service:
+    name: "{{ proxmox_mcp_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Flush handlers before verifying the endpoint
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the MCP health endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ proxmox_mcp_port }}{{ proxmox_mcp_health_path }}"
+    status_code: 200
+  register: proxmox_mcp_health
+  retries: 12
+  delay: 5
+  until: proxmox_mcp_health is succeeded

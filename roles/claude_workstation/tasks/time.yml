@@ -1,0 +1,37 @@
+---
+# Kerberos refuses tickets outside a five-minute clock skew, so on a domain
+# member this is a prerequisite for logging in at all, not a housekeeping task.
+# The domain controllers are the time source because they are what the KDC
+# compares against.
+- name: Install chrony
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+
+- name: Configure chrony to follow the domain controllers
+  ansible.builtin.template:
+    src: chrony-domain-member.conf.j2
+    dest: "{{ claude_workstation_chrony_config }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart chrony
+
+- name: Enable chrony at boot
+  ansible.builtin.systemd_service:
+    name: chrony
+    enabled: true
+    state: started
+
+- name: Apply the clock configuration before the domain join
+  ansible.builtin.meta: flush_handlers
+
+- name: Read the current clock offset
+  ansible.builtin.command:
+    argv:
+      - chronyc
+      - tracking
+  register: claude_workstation_chrony_tracking
+  changed_when: false
+  failed_when: false
+  check_mode: false

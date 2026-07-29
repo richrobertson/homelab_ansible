@@ -1,0 +1,55 @@
+# {{ ansible_managed }}
+# Consistent Vault Agent TLS certificate renewer for {{ vault_cert_agent_service_name }}.
+# Managed by roles/vault_cert_agent — the canonical internal-Linux implementation
+# of runbooks/security/certificate-management-standard.md. Do not edit by hand.
+
+pid_file = "{{ vault_cert_agent_runtime_dir }}/agent.pid"
+
+vault {
+  address = "{{ vault_cert_agent_vault_addr }}"
+  ca_cert = "{{ vault_cert_agent_vault_ca_file }}"
+}
+
+auto_auth {
+  method "approle" {
+    mount_path = "auth/approle"
+    config = {
+      role_id_file_path                   = "{{ vault_cert_agent_role_id_file }}"
+      secret_id_file_path                 = "{{ vault_cert_agent_secret_id_file }}"
+      remove_secret_id_file_after_reading = false
+    }
+  }
+
+  sink "file" {
+    config = {
+      path = "{{ vault_cert_agent_runtime_dir }}/token"
+      mode = 0640
+    }
+  }
+}
+
+{% if vault_cert_agent_exit_on_retry_failure | bool %}
+template_config {
+  exit_on_retry_failure = true
+}
+
+{% endif %}
+# pkiCert only re-issues as the lease approaches expiry, so restarting the agent
+# does not mint a new certificate every time. On change the apply script installs
+# the leaf/key and runs the service reload.
+template {
+  destination = "{{ vault_cert_agent_bundle_file }}"
+  perms       = "0600"
+  command     = "{{ vault_cert_agent_apply_script }}"
+  contents = <<EOT
+{{ '{{- with pkiCert "' ~ vault_cert_agent_pki_mount ~ '/issue/' ~ vault_cert_agent_pki_role ~ '" "common_name=' ~ vault_cert_agent_common_name ~ '" "alt_names=' ~ (vault_cert_agent_alt_names | reject('equalto', '') | join(',')) ~ '" "ip_sans=' ~ (vault_cert_agent_ip_sans | reject('equalto', '') | join(',')) ~ '" "ttl=' ~ vault_cert_agent_cert_ttl ~ '" "key_type=rsa" "key_bits=2048" -}}' }}
+CERT_BEGIN
+{{ '{{ .Cert }}' }}
+{{ '{{ .CA }}' }}
+CERT_END
+KEY_BEGIN
+{{ '{{ .Key }}' }}
+KEY_END
+{{ '{{- end -}}' }}
+EOT
+}

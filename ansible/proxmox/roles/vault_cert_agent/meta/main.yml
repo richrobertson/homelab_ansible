@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: vault_cert_agent
+  author: platform
+  description: >-
+    Canonical Vault Agent TLS certificate renewer for a single internal Linux
+    service. Implements the estate certificate-management standard (managed
+    authority + automated auto-rotation) for the Vault PKI lane.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+dependencies: []

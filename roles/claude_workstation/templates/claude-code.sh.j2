@@ -1,0 +1,24 @@
+# {{ ansible_managed }}
+# Sourced by every login shell, including the one Guacamole's SSH client opens.
+
+# Node reads the OS trust store only on 22.15+ and only on some code paths.
+# Pointing at the merged bundle makes Claude Code trust the AD and Vault CAs
+# regardless of runtime version or TLS-inspecting middlebox.
+export NODE_EXTRA_CA_CERTS="{{ claude_workstation_node_extra_ca_certs }}"
+
+{% if claude_workstation_disable_autoupdater %}
+# The CLI is installed globally and owned by root, so the in-place updater
+# cannot write to it. Disabling it turns a confusing permission failure into a
+# no-op; upgrades happen by re-running the claude_workstation role.
+export DISABLE_AUTOUPDATER=1
+{% endif %}
+
+{% if claude_workstation_manage_api_key %}
+# Readable only by members of {{ claude_workstation_env_group }}. Domain users
+# outside that group fall through to their own `claude setup-token` credentials
+# in $HOME, which is the intended path for named humans.
+if [ -r "{{ claude_workstation_env_file }}" ]; then
+    . "{{ claude_workstation_env_file }}"
+    export ANTHROPIC_API_KEY
+fi
+{% endif %}

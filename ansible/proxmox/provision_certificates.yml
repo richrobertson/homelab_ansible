@@ -223,6 +223,10 @@
     proxmox_pveproxy_cert_file: /etc/pve/local/pveproxy-ssl.pem
     proxmox_pveproxy_key_file: /etc/pve/local/pveproxy-ssl.key
     proxmox_cert_vault_ca_file: /etc/vault-agent.d/vault-ca.pem
+    # Post-rotation hook: pushes the freshly rotated pveproxy cert into the Ceph
+    # mgr dashboard config-key store so it does not drift from the live cert
+    # between manual ceph_admin_portal.yml runs. Installed and wired below.
+    proxmox_cert_ceph_refresh_script: /usr/local/sbin/refresh-ceph-dashboard-cert.sh
   pre_tasks:
     - name: Resolve Proxmox certificate automation inputs
       ansible.builtin.set_fact:
@@ -625,38 +629,11 @@
         state: restarted
       when: proxmox_current_key_type.stdout | trim == 'NON_RSA'
 
-    - name: Ensure certificate agent runtime directory exists
-      ansible.builtin.file:
-        path: "{{ proxmox_cert_agent_runtime_dir }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0700"
-
-    - name: Ensure vault agent config directory exists
-      ansible.builtin.file:
-        path: "{{ proxmox_cert_agent_dir }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0750"
-
-    - name: Install AppRole role_id file on Proxmox node
-      ansible.builtin.copy:
-        dest: "{{ proxmox_cert_role_id_file }}"
-        content: "{{ proxmox_cert_effective_role_id }}\n"
-        owner: root
-        group: root
-        mode: "0600"
-
-    - name: Install AppRole secret_id file on Proxmox node
-      ansible.builtin.copy:
-        dest: "{{ proxmox_cert_secret_id_file }}"
-        content: "{{ proxmox_cert_effective_secret_id }}\n"
-        owner: root
-        group: root
-        mode: "0600"
-
+    # The vault-agent config dir, runtime dir, and the AppRole role_id/secret_id
+    # files are now created by roles/vault_cert_agent (invoked below) using the
+    # same paths and 0750/0700/0600 permissions. The Vault CA is still installed
+    # here from the content resolved in pre_tasks, so the role finds it already
+    # present and does not re-fetch it.
     - name: Install Vault CA certificate for vault-agent trust
       ansible.builtin.copy:
         dest: "{{ proxmox_cert_vault_ca_file }}"
@@ -679,155 +656,113 @@
         - not (proxmox_vault_skip_verify_resolved | bool)
         - hostvars[ansible_play_hosts_all[0]].proxmox_cert_vault_ca_content is not defined
 
-    - name: Write Proxmox certificate apply script
+    # The apply script, Vault Agent HCL, systemd unit, service enablement,
+    # handler flush, and post-issue verification are now provided by
+    # roles/vault_cert_agent (invoked below) using the pveproxy parameters. The
+    # rendered artifacts are equivalent to the inline versions removed here; see
+    # runbooks/security/certificate-management-standard.md and the convergence
+    # notes in the role. Only the pmxcfs cp handling and the Ceph refresh hook
+    # are pveproxy-specific and are passed as role options.
+    - name: Install the Ceph mgr dashboard certificate refresh hook
       ansible.builtin.copy:
-        dest: "{{ proxmox_cert_apply_script }}"
+        dest: "{{ proxmox_cert_ceph_refresh_script }}"
         owner: root
         group: root
         mode: "0755"
         content: |
           #!/usr/bin/env bash
-          set -euo pipefail
+          # {{ ansible_managed }}
+          # Invoked by the pveproxy Vault Agent apply script (post-reload hook)
+          # after the pveproxy certificate rotates, so the Ceph mgr dashboard
+          # config-key store does not drift from the live cert between manual
+          # ceph_admin_portal.yml runs. Mirrors that playbook's per-node sync +
+          # active-mgr fail, scoped to this node, and is a safe no-op (exit 0)
+          # when this host is not a reachable Ceph mgr.
+          set -uo pipefail
 
-          BUNDLE_FILE="{{ proxmox_cert_bundle_file }}"
           CERT_FILE="{{ proxmox_pveproxy_cert_file }}"
           KEY_FILE="{{ proxmox_pveproxy_key_file }}"
 
-          cert_tmp=$(mktemp)
-          key_tmp=$(mktemp)
-          trap 'rm -f "$cert_tmp" "$key_tmp"' EXIT
+          command -v ceph >/dev/null 2>&1 || exit 0
+          ceph -s >/dev/null 2>&1 || exit 0
+          [[ -s "$CERT_FILE" && -s "$KEY_FILE" ]] || exit 0
 
-          awk '/^CERT_BEGIN$/{in_cert=1;next}/^CERT_END$/{in_cert=0} in_cert{print}' "$BUNDLE_FILE" > "$cert_tmp"
-          awk '/^KEY_BEGIN$/{in_key=1;next}/^KEY_END$/{in_key=0} in_key{print}' "$BUNDLE_FILE" > "$key_tmp"
+          NODES="$(ceph mgr dump --format json 2>/dev/null | python3 -c '
+          import json, sys
+          try:
+              d = json.load(sys.stdin)
+          except Exception:
+              sys.exit(0)
+          nodes = []
+          if d.get("active_name"):
+              nodes.append(d["active_name"])
+          nodes += [s["name"] for s in d.get("standbys", [])]
+          print(" ".join(nodes))
+          ')"
+          [[ -n "$NODES" ]] || exit 0
 
-          if [[ ! -s "$cert_tmp" || ! -s "$key_tmp" ]]; then
-            echo "failed to parse certificate bundle from $BUNDLE_FILE" >&2
-            exit 1
+          EXPECTED_KEY_HASH="$(sha256sum "$KEY_FILE" | awk '{print $1}')"
+          EXPECTED_CRT_HASH="$(sha256sum "$CERT_FILE" | awk '{print $1}')"
+          UPDATED=""
+          for node in $NODES; do
+            CURRENT_KEY_HASH="$(ceph config-key get "mgr/dashboard/${node}/key" 2>/dev/null | sha256sum | awk '{print $1}' || true)"
+            CURRENT_CRT_HASH="$(ceph config-key get "mgr/dashboard/${node}/crt" 2>/dev/null | sha256sum | awk '{print $1}' || true)"
+            if [[ "$CURRENT_KEY_HASH" != "$EXPECTED_KEY_HASH" || "$CURRENT_CRT_HASH" != "$EXPECTED_CRT_HASH" ]]; then
+              ceph config-key set "mgr/dashboard/${node}/key" -i "$KEY_FILE" || true
+              ceph config-key set "mgr/dashboard/${node}/crt" -i "$CERT_FILE" || true
+              UPDATED="${UPDATED} ${node}"
+            fi
+          done
+
+          if [[ -n "$UPDATED" ]]; then
+            ACTIVE="$(ceph mgr stat --format json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("active_name",""))' 2>/dev/null || true)"
+            [[ -n "$ACTIVE" ]] && ceph mgr fail "$ACTIVE" || true
           fi
+          exit 0
 
-          cert_changed=0
-          key_changed=0
-          if [[ ! -f "$CERT_FILE" ]] || ! cmp -s "$cert_tmp" "$CERT_FILE"; then
-            # /etc/pve is pmxcfs (FUSE) and rejects metadata-setting install(1) updates.
-            cp "$cert_tmp" "$CERT_FILE"
-            cert_changed=1
-          fi
-
-          if [[ ! -f "$KEY_FILE" ]] || ! cmp -s "$key_tmp" "$KEY_FILE"; then
-            cp "$key_tmp" "$KEY_FILE"
-            key_changed=1
-          fi
-
-          if [[ "$cert_changed" -eq 1 || "$key_changed" -eq 1 ]]; then
-            systemctl restart pveproxy
-          fi
-
-    - name: Write Vault agent config for Proxmox API cert
-      ansible.builtin.copy:
-        dest: "{{ proxmox_cert_agent_config_file }}"
-        owner: root
-        group: root
-        mode: "0640"
-        content: |
-          pid_file = "{{ proxmox_cert_agent_runtime_dir }}/agent.pid"
-
-          vault {
-            address = "{{ proxmox_vault_addr_resolved }}"
-            tls_skip_verify = {{ proxmox_vault_skip_verify_resolved | string | lower }}
-          {% if not (proxmox_vault_skip_verify_resolved | bool) %}
-            ca_cert = "{{ proxmox_cert_vault_ca_file }}"
-          {% endif %}
-          }
-
-          auto_auth {
-            method "approle" {
-              mount_path = "auth/approle"
-              config = {
-                role_id_file_path = "{{ proxmox_cert_role_id_file }}"
-                secret_id_file_path = "{{ proxmox_cert_secret_id_file }}"
-                remove_secret_id_file_after_reading = false
-              }
-            }
-
-            sink "file" {
-              config = {
-                path = "{{ proxmox_cert_agent_token_file }}"
-                mode = 0600
-              }
-            }
-          }
-
-          template_config {
-            exit_on_retry_failure = true
-          }
-
-          template {
-            destination = "{{ proxmox_cert_bundle_file }}"
-            perms       = 0600
-            contents = <<EOT
-          {{ '{{- with pkiCert "' ~ proxmox_pki_mount ~ '/issue/' ~ proxmox_pki_role_name ~ '" "common_name=' ~ proxmox_cert_common_name ~ '" "alt_names=' ~ proxmox_cert_alt_names ~ '" "ip_sans=' ~ proxmox_cert_ip_sans ~ '" "ttl=' ~ proxmox_cert_ttl ~ '" "key_type=rsa" "key_bits=2048"' ~ (( ' "issuer_ref=' ~ proxmox_pki_issuer_id ~ '"' ) if (proxmox_pki_issuer_id | length > 0) else '') ~ ' -}}' }}
-          CERT_BEGIN
-          {{ '{{ .Cert }}' }}
-          {{ '{{ .CA }}' }}
-          CERT_END
-          KEY_BEGIN
-          {{ '{{ .Key }}' }}
-          KEY_END
-          {{ '{{- end -}}' }}
-          EOT
-            command = "{{ proxmox_cert_apply_script }}"
-          }
-      notify: Restart Proxmox cert agent
-
-    - name: Write systemd unit for Proxmox cert agent
-      ansible.builtin.copy:
-        dest: "/etc/systemd/system/{{ proxmox_cert_agent_name }}.service"
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          [Unit]
-          Description=Vault Agent Proxmox API Certificate Renewer
-          After=network-online.target
-          Wants=network-online.target
-
-          [Service]
-          Type=simple
-          ExecStart={{ proxmox_node_vault_cli_check.stdout }} agent -config={{ proxmox_cert_agent_config_file }}
-          Restart=always
-          RestartSec=5
-
-          [Install]
-          WantedBy=multi-user.target
-
-    - name: Ensure Proxmox cert agent service is enabled and started
-      ansible.builtin.systemd:
-        name: "{{ proxmox_cert_agent_name }}"
-        enabled: true
-        state: started
-        daemon_reload: true
-
-    - name: Apply pending service restarts before certificate verification
-      ansible.builtin.meta: flush_handlers
-
-    - name: Verify pveproxy serves Vault-issued certificate
-      ansible.builtin.shell: |
-        set -euo pipefail
-        openssl s_client -connect 127.0.0.1:8006 -servername "{{ proxmox_cert_common_name }}" </dev/null 2>/dev/null |
-          openssl x509 -noout -issuer
-      args:
-        executable: /bin/bash
-      register: proxmox_pveproxy_cert_issuer
-      changed_when: false
-      retries: 10
-      delay: 3
-      until:
-        - proxmox_pveproxy_cert_issuer.rc == 0
-        - proxmox_pveproxy_cert_issuer.stdout is search(proxmox_cert_expected_issuer_pattern)
-      failed_when: proxmox_pveproxy_cert_issuer.stdout is not search(proxmox_cert_expected_issuer_pattern)
-
-  handlers:
-    - name: Restart Proxmox cert agent
-      ansible.builtin.systemd:
-        name: "{{ proxmox_cert_agent_name }}"
-        state: restarted
+    - name: Manage the pveproxy certificate via the canonical Vault Agent role
+      ansible.builtin.include_role:
+        name: vault_cert_agent
+      vars:
+        vault_cert_agent_service_name: proxmox-pveproxy
+        vault_cert_agent_common_name: "{{ proxmox_cert_common_name }}"
+        # SANs come from the same all-SANs list the legacy inline template used;
+        # the role joins each list with ',' to reproduce the identical
+        # alt_names / ip_sans request strings (host FQDN/short + IP + cluster VIP).
+        vault_cert_agent_alt_names: "{{ proxmox_cert_all_sans | reject('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') | list }}"
+        vault_cert_agent_ip_sans: "{{ proxmox_cert_all_sans | select('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') | list }}"
+        vault_cert_agent_cert_file: "{{ proxmox_pveproxy_cert_file }}"
+        vault_cert_agent_key_file: "{{ proxmox_pveproxy_key_file }}"
+        # /etc/pve/local is pmxcfs (FUSE): install(1) metadata ops are rejected,
+        # so the apply script uses plain cp and inherits the existing files'
+        # root:www-data 0640 ownership (set by the EC->RSA reissue / Proxmox).
+        vault_cert_agent_pmxcfs_target: true
+        vault_cert_agent_reload_command: systemctl restart pveproxy
+        # Ceph mgr dashboard cert refresh on rotation: DISABLED. Each pve node
+        # has a distinct leaf (CN = node FQDN), so pushing it into the shared
+        # mgr/dashboard/<node> config-keys makes them flip-flop between three
+        # certs and fires a `ceph mgr fail` failover on every rotation (~weekly).
+        # Low value anyway: the HAProxy ceph-admin gateway fronts the dashboard
+        # with its own cert. Needs a single-source, run_once redesign before it
+        # is re-enabled. The helper script stays installed but dormant.
+        vault_cert_agent_post_reload_command: ""
+        vault_cert_agent_verify_host: 127.0.0.1
+        vault_cert_agent_verify_port: "8006"
+        vault_cert_agent_expected_issuer_pattern: "{{ proxmox_cert_expected_issuer_pattern }}"
+        vault_cert_agent_vault_addr: "{{ proxmox_vault_addr_resolved }}"
+        vault_cert_agent_vault_ca_file: "{{ proxmox_cert_vault_ca_file }}"
+        vault_cert_agent_pki_mount: "{{ proxmox_pki_mount }}"
+        vault_cert_agent_pki_role: "{{ proxmox_pki_role_name }}"
+        vault_cert_agent_cert_ttl: "{{ proxmox_cert_ttl }}"
+        vault_cert_agent_role_id: "{{ proxmox_cert_effective_role_id }}"
+        vault_cert_agent_secret_id: "{{ proxmox_cert_effective_secret_id }}"
+        # Keep the exact on-host paths/unit name the legacy agent used so this is
+        # an in-place upgrade (no orphaned units/scripts).
+        vault_cert_agent_role_id_file: "{{ proxmox_cert_role_id_file }}"
+        vault_cert_agent_secret_id_file: "{{ proxmox_cert_secret_id_file }}"
+        vault_cert_agent_runtime_dir: "{{ proxmox_cert_agent_runtime_dir }}"
+        vault_cert_agent_bundle_file: "{{ proxmox_cert_bundle_file }}"
+        vault_cert_agent_config_file: "{{ proxmox_cert_agent_config_file }}"
+        vault_cert_agent_apply_script: "{{ proxmox_cert_apply_script }}"
+        # vault CLI presence is already asserted in pre_tasks; do not install it.
+        vault_cert_agent_install_vault_cli: false

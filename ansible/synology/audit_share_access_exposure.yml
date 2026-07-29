@@ -1,0 +1,527 @@
+---
+# Read-only exposure audit for every shared folder on Kermit and Scooter.
+#
+# This playbook never writes to DSM. Every task is a `raw` read plus local
+# parsing, because the audit has to be safe to run against production NAS units
+# during an incident without changing a share, an ACL, or a service flag.
+#
+# It answers one question per protocol: can share data, or the list of shares,
+# be reached without authenticating as a named DSM/AD principal?
+#   - SMB    : is the DSM `guest` account usable, and is any share ACE granted
+#              to it? Is SMB1/NTLMv1 still accepted?
+#   - NFS    : does an export have no host restriction, or does it disable root
+#              squash? DSM NFS is AUTH_SYS unless Kerberos is on, so an
+#              unrestricted export is unauthenticated access to that data.
+#   - rsync  : the DSM rsync daemon publishes the module (== shared folder) list
+#              pre-auth. Even with `auth users` set, the names and descriptions
+#              of every share leak to anyone who can reach TCP 873.
+#   - iSCSI  : does a target accept an initiator without CHAP (`auth_type` 0)?
+#   - Reach  : QuickConnect and Synology DDNS put the DSM login page on the
+#              public internet regardless of what the gateway forwards, so they
+#              are audited alongside the share protocols.
+#
+# The assertions at the end are the gate. They fail the run when an
+# unauthenticated path exists, so this is usable as a recurring control check
+# and not only as a one-off investigation. Set
+# `synology_audit_fail_on_finding=false` to collect evidence across the estate
+# before opening remediation work.
+- name: Audit Synology share exposure to unauthenticated and guest access
+  hosts: "{{ synology_audit_nas_group | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+  become: true
+  become_method: sudo
+
+  vars:
+    # DSM keeps the authoritative NFS export table here. `showmount -e` only
+    # shows the host list, never the squash flags, so the file is what counts.
+    synology_audit_exports_path: /etc/exports
+
+    # Synology generates this from the DSM UI; it is the effective Samba global
+    # config. Per-share sections are generated at runtime and are read through
+    # the SYNO.Core.Share.Permission API instead.
+    synology_audit_smb_conf_path: /etc/samba/smb.conf
+
+    synology_audit_fail_on_finding: true
+
+    # Exports that are knowingly wide open and accepted by the owner. Add the
+    # export path here with a dated justification in the runbook rather than
+    # disabling the whole assertion.
+    synology_audit_allowed_unrestricted_exports: []
+
+  tasks:
+    - name: Enumerate shared folders
+      ansible.builtin.raw: >-
+        /usr/syno/sbin/synoshare --enum ALL 2>/dev/null
+      changed_when: false
+      register: synology_audit_share_enum
+
+    - name: Build shared folder list
+      # `synoshare --enum` prints an argument banner and an "<n> Listed:" count
+      # line before the share names; everything after that is one share per
+      # line. `raw` also merges the login shell's stderr, which adds a "Could
+      # not chdir to home directory ..." banner for a DSM account with no home
+      # directory (svc-syno-ssh on scooter). All three must be dropped or they
+      # are counted as shares and queried against SYNO.Core.Share.Permission,
+      # which inflates share_count and produces silent API errors.
+      ansible.builtin.set_fact:
+        synology_audit_shares: >-
+          {{
+            synology_audit_share_enum.stdout_lines
+            | map('trim')
+            | reject('match', '^$')
+            | reject('search', 'Share Enum Arguments')
+            | reject('match', '^[0-9]+ Listed:')
+            | reject('search', 'Could not chdir')
+            | reject('match', '^Total')
+            | list
+          }}
+
+    - name: Read NFS export table
+      ansible.builtin.raw: >-
+        cat {{ synology_audit_exports_path }} 2>/dev/null || true
+      changed_when: false
+      register: synology_audit_exports
+
+    - name: Read effective Samba global configuration
+      ansible.builtin.raw: >-
+        cat {{ synology_audit_smb_conf_path }} 2>/dev/null || true
+      changed_when: false
+      register: synology_audit_smb_conf
+
+    - name: Read DSM guest account state
+      # DSM ships a built-in `guest` account that cannot be deleted. It is
+      # disabled when `Expired : [true]`; any other value means SMB guest logon
+      # is live for every share that carries a guest ACE.
+      ansible.builtin.raw: >-
+        /usr/syno/sbin/synouser --get guest 2>&1 || true
+      changed_when: false
+      register: synology_audit_guest_user
+
+    - name: Read SMB service configuration
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.FileServ.SMB
+        method=get
+        version=3
+        2>&1 || true
+      changed_when: false
+      register: synology_audit_smb_service
+
+    - name: Read NFS service configuration
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.FileServ.NFS
+        method=get
+        version=2
+        2>&1 || true
+      changed_when: false
+      register: synology_audit_nfs_service
+
+    - name: Read AFP service configuration
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.FileServ.AFP
+        method=get
+        version=1
+        2>&1 || true
+      changed_when: false
+      register: synology_audit_afp_service
+
+    - name: Read FTP service configuration
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.FileServ.FTP
+        method=get
+        version=3
+        2>&1 || true
+      changed_when: false
+      register: synology_audit_ftp_service
+
+    - name: Read listening TCP sockets
+      # DSM does not expose a working SYNO.Core.FileServ.Rsync endpoint on every
+      # release, and package-provided daemons (WebDAV, rsync) are not covered by
+      # the FileServ APIs at all. The listening socket table is the one source
+      # that is true regardless of which DSM version is running.
+      ansible.builtin.raw: >-
+        netstat -lnt 2>/dev/null || true
+      changed_when: false
+      register: synology_audit_listening
+
+    - name: Read rsync daemon configuration
+      ansible.builtin.raw: >-
+        cat /etc/rsyncd.conf 2>/dev/null || true
+      changed_when: false
+      register: synology_audit_rsyncd_conf
+
+    - name: Read installed package states
+      # WebDAV Server and Tailscale are packages, not core services, so they are
+      # invisible to the SYNO.Core.FileServ.* APIs.
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synopkg list --name 2>/dev/null || true
+      changed_when: false
+      register: synology_audit_packages
+
+    - name: Read QuickConnect configuration
+      # QuickConnect publishes the DSM login page through Synology's relay. It
+      # bypasses the UniFi gateway entirely, so a port-forward audit alone will
+      # miss it.
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.QuickConnect
+        method=get
+        version=1
+        2>&1 || true
+      changed_when: false
+      register: synology_audit_quickconnect
+
+    - name: Read DSM firewall state
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Security.Firewall
+        method=get
+        version=1
+        2>&1 || true
+      changed_when: false
+      register: synology_audit_firewall
+
+    - name: Read DSM auto-block state
+      # Auto Block is the only brute-force control in front of DSM logon, SSH,
+      # SMB, FTP and rsync. With it off, an internet-reachable DSM has unlimited
+      # password attempts.
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Security.AutoBlock
+        method=get
+        version=1
+        2>&1 || true
+      changed_when: false
+      register: synology_audit_autoblock
+
+    - name: Read iSCSI target inventory
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.ISCSI.Target
+        method=list
+        version=1
+        2>&1 || true
+      changed_when: false
+      register: synology_audit_iscsi_targets
+
+    - name: Read per-share permission assignments
+      # user_group_type=local_user is the namespace that contains the built-in
+      # `guest` account. AD principals live in a separate namespace and are not
+      # unauthenticated, so they are out of scope for this audit.
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Share.Permission
+        method=list
+        version=1
+        name={{ item | quote }}
+        user_group_type=local_user
+        2>&1 || true
+      changed_when: false
+      register: synology_audit_share_permissions
+      loop: "{{ synology_audit_shares }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Build NFS export findings
+      # A rule is unrestricted when its host field is a bare `*`; it grants
+      # remote root when `no_root_squash` is present. Wildcard hostname rules
+      # (`pve*`, `k8s-prod-worker-*`) are recorded separately because DSM
+      # resolves them by reverse DNS, which any DHCP client can influence.
+      #
+      # Patterns here use SINGLE backslashes. This is a YAML folded scalar
+      # (`>-`), which performs no escape processing, so `\\s` reaches the regex
+      # engine as a literal backslash followed by `s` - and `\\(` reaches it as
+      # a literal backslash followed by an unterminated group, which aborts the
+      # whole play. Every other templated expression in this file is also a
+      # folded scalar and also uses single backslashes; keep it that way.
+      #
+      # `insecure` must be anchored on both sides. DSM writes `insecure_locks`
+      # on every rule it generates, so a bare `insecure` substring test matches
+      # every export and the finding becomes meaningless. Only the standalone
+      # `insecure` option (client may use an unprivileged source port) matters.
+      ansible.builtin.set_fact:
+        synology_audit_export_findings: >-
+          {{
+            (synology_audit_export_findings | default([]))
+            + [
+              {
+                'host': inventory_hostname,
+                'export': (item | regex_search('^\S+')),
+                'unrestricted': (
+                  item is search('\s\*\(') or item is search('\s\*\s')
+                ),
+                'no_root_squash': (item is search('no_root_squash')),
+                'all_squash': (item is search('all_squash')),
+                'insecure': (item is search('[(,]insecure[,)]')),
+                'wildcard_hostname': (item is search('[A-Za-z0-9]\*')),
+                'rule': item
+              }
+            ]
+          }}
+      # Only lines that start with an absolute path are export rules. `raw`
+      # merges the login shell's stderr into stdout, and on a DSM account with
+      # no home directory that adds a "Could not chdir to home directory ..."
+      # banner which would otherwise be parsed as an export.
+      loop: >-
+        {{
+          synology_audit_exports.stdout_lines
+          | map('trim')
+          | select('match', '^/')
+          | list
+        }}
+      loop_control:
+        # Double-quoted YAML scalar, so `\\S` here is the same regex as `\S` in
+        # the folded scalars above. Do not "simplify" it to a single backslash.
+        label: "{{ item | regex_search('^\\S+') }}"
+
+    - name: Build guest share access findings
+      # DSM lists `guest` against every share whether or not it is granted, so
+      # presence of the name proves nothing. Only is_writable/is_readonly true
+      # is an actual grant.
+      #
+      # Single backslashes, for the reason documented on the export task below:
+      # with `\\{` and `\\s` this expression silently matched nothing and every
+      # share reported guest_granted=false regardless of its real ACL, which is
+      # a false negative on a CRITICAL check.
+      ansible.builtin.set_fact:
+        synology_audit_guest_share_findings: >-
+          {{
+            (synology_audit_guest_share_findings | default([]))
+            + [
+              {
+                'host': inventory_hostname,
+                'share': item.item,
+                'guest_granted': (
+                  item.stdout
+                  | regex_search('(?s)\{[^{}]*"name"\s*:\s*"guest"[^{}]*\}')
+                  | default('', true)
+                ) is search('"is_(writable|readonly)"\s*:\s*true')
+              }
+            ]
+          }}
+      loop: "{{ synology_audit_share_permissions.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Summarize service exposure
+      ansible.builtin.set_fact:
+        synology_audit_service_summary:
+          host: "{{ inventory_hostname }}"
+          share_count: "{{ synology_audit_shares | length }}"
+          guest_account_enabled: >-
+            {{ synology_audit_guest_user.stdout is not search('Expired\s*:\s*\[true\]') }}
+          guest_granted_shares: >-
+            {{ synology_audit_guest_share_findings | default([])
+               | selectattr('guest_granted') | map(attribute='share') | list }}
+          smb_enabled: >-
+            {{ synology_audit_smb_service.stdout is search('"enable_samba"\s*:\s*true') }}
+          # DSM enum: 0 = SMB1, 1 = SMB2, 2 = SMB3.
+          smb_min_protocol_enum: >-
+            {{ synology_audit_smb_service.stdout
+               | regex_search('"smb_min_protocol"\s*:\s*(\d)', '\1')
+               | default(['unknown'], true) | first }}
+          smb_ntlmv1_permitted: >-
+            {{ synology_audit_smb_service.stdout is search('"enable_ntlmv1_auth"\s*:\s*true') }}
+          smb_signing_required: >-
+            {{ synology_audit_smb_service.stdout is not search('"enable_server_signing"\s*:\s*0') }}
+          smb_transport_encrypted: >-
+            {{ synology_audit_smb_service.stdout is not search('"smb_encrypt_transport"\s*:\s*0') }}
+          nfs_enabled: >-
+            {{ synology_audit_nfs_service.stdout is search('"enable_nfs"\s*:\s*true') }}
+          nfs_v4_enabled: >-
+            {{ synology_audit_nfs_service.stdout is search('"enable_nfs_v4"\s*:\s*true') }}
+          nfs_kerberos: >-
+            {{ synology_audit_nfs_service.stdout is search('"enable_kerberos"\s*:\s*true') }}
+          nfs_export_count: "{{ synology_audit_export_findings | default([]) | length }}"
+          afp_enabled: >-
+            {{ synology_audit_afp_service.stdout is search('"enable_afp"\s*:\s*true') }}
+          ftp_enabled: >-
+            {{ synology_audit_ftp_service.stdout is search('"enable_ftp"\s*:\s*true') }}
+          ftp_anonymous: >-
+            {{ synology_audit_ftp_service.stdout is search('"enable_anonymous"\s*:\s*true') }}
+          rsync_daemon_listening: >-
+            {{ synology_audit_listening.stdout is search(':873\s') }}
+          # DSM does NOT list the shared-folder modules in /etc/rsyncd.conf - it
+          # generates them at runtime from the shared-folder table. On Kermit
+          # this parse returns 0 while `rsync rsync://kermit/` really does
+          # serve 21 modules pre-auth. So a 0 here means "nothing extra was
+          # hand-added to rsyncd.conf", NOT "no modules are exposed". The
+          # finding that matters is rsync_daemon_listening; read this field
+          # only alongside it.
+          rsync_conf_modules_without_auth: >-
+            {{ (synology_audit_rsyncd_conf.stdout | regex_findall('(?m)^\[[^\]]+\]') | length)
+               - (synology_audit_rsyncd_conf.stdout | regex_findall('(?im)^\s*auth users\s*=') | length) }}
+          webdav_running: >-
+            {{ synology_audit_packages.stdout is search('WebDAVServer') }}
+          tailscale_running: >-
+            {{ synology_audit_packages.stdout is search('Tailscale') }}
+          quickconnect_enabled: >-
+            {{ synology_audit_quickconnect.stdout is search('"enabled"\s*:\s*true') }}
+          # Outer default() matters: once QuickConnect is disabled there is no
+          # server_alias, regex_search returns None, and the capture-group form
+          # then raises rather than yielding an empty string - which would make
+          # the audit fail on the host that has just been remediated.
+          quickconnect_alias: >-
+            {{ (synology_audit_quickconnect.stdout
+                | regex_search('"server_alias"\s*:\s*"([^"]*)"', '\1')
+                | default([''], true) | first) | default('(none)', true) }}
+          dsm_firewall_enabled: >-
+            {{ synology_audit_firewall.stdout is search('"enable_firewall"\s*:\s*true') }}
+          dsm_autoblock_enabled: >-
+            {{ synology_audit_autoblock.stdout is search('"enable"\s*:\s*true') }}
+          iscsi_targets_total: >-
+            {{ synology_audit_iscsi_targets.stdout | regex_findall('"target_id"') | length }}
+          iscsi_targets_without_chap: >-
+            {{ synology_audit_iscsi_targets.stdout | regex_findall('"auth_type"\s*:\s*0') | length }}
+
+    - name: Report service exposure
+      ansible.builtin.debug:
+        var: synology_audit_service_summary
+
+    - name: Report NFS exports that allow unauthenticated or root access
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.export }}:
+          unrestricted={{ item.unrestricted }},
+          no_root_squash={{ item.no_root_squash }},
+          all_squash={{ item.all_squash }},
+          insecure_port={{ item.insecure }},
+          wildcard_hostname={{ item.wildcard_hostname }}
+      loop: "{{ synology_audit_export_findings | default([]) }}"
+      loop_control:
+        label: "{{ item.export }}"
+      when: >-
+        item.unrestricted or item.no_root_squash or item.all_squash
+        or item.insecure or item.wildcard_hostname
+
+    - name: Collect audit findings
+      # One aggregated assert instead of eight sequential ones. Ansible aborts
+      # a host at its first failed assert, so per-check asserts would hide every
+      # finding after the first - which is the opposite of what an audit is for.
+      ansible.builtin.set_fact:
+        synology_audit_findings: >-
+          {{
+            ([] if not (synology_audit_service_summary.guest_account_enabled | bool) else [
+              'CRITICAL: the DSM guest account is enabled. Any SMB client on the'
+              ' LAN can authenticate as guest. Disable it in DSM > Control Panel'
+              ' > User & Group > User > guest.'
+            ])
+            + ([] if (synology_audit_service_summary.guest_granted_shares | length) == 0 else [
+              'CRITICAL: these shares grant the guest account access: '
+              ~ (synology_audit_service_summary.guest_granted_shares | join(', '))
+              ~ '. Remove the guest ACE in DSM > Control Panel > Shared Folder >'
+              ' Edit > Permissions.'
+            ])
+            + ([] if (synology_audit_service_summary.smb_min_protocol_enum | int) >= 1 else [
+              'HIGH: SMB1 is still accepted. Raise the minimum SMB protocol to'
+              ' SMB2 in DSM > Control Panel > File Services > SMB > Advanced.'
+            ])
+            + ([] if not (synology_audit_service_summary.smb_ntlmv1_permitted | bool) else [
+              'HIGH: NTLMv1 authentication is permitted over SMB. Disable it in'
+              ' DSM > Control Panel > File Services > SMB > Advanced.'
+            ])
+            + ([] if not (synology_audit_service_summary.ftp_anonymous | bool) else [
+              'CRITICAL: anonymous FTP is enabled.'
+            ])
+            + (
+              synology_audit_export_findings | default([])
+              | rejectattr('export', 'in', synology_audit_allowed_unrestricted_exports)
+              | selectattr('unrestricted')
+              | map(attribute='export')
+              | map('regex_replace', '^(.*)$',
+                    'CRITICAL: NFS export \1 has no host restriction. DSM NFS is'
+                    ' AUTH_SYS only, so this is unauthenticated access to that'
+                    ' data.')
+              | list
+            )
+            + (
+              synology_audit_export_findings | default([])
+              | rejectattr('export', 'in', synology_audit_allowed_unrestricted_exports)
+              | selectattr('no_root_squash')
+              | map(attribute='export')
+              | map('regex_replace', '^(.*)$',
+                    'HIGH: NFS export \1 has at least one rule with'
+                    ' no_root_squash. Any client matching that rule mounts as'
+                    ' root and bypasses every file mode on the share.')
+              | list
+            )
+            + (
+              synology_audit_export_findings | default([])
+              | rejectattr('export', 'in', synology_audit_allowed_unrestricted_exports)
+              | selectattr('insecure')
+              | map(attribute='export')
+              | map('regex_replace', '^(.*)$',
+                    'HIGH: NFS export \1 has at least one rule with the'
+                    ' `insecure` option, so a client may mount from an'
+                    ' unprivileged source port. Combined with no_root_squash an'
+                    ' unprivileged local user on an allowed host gets root on'
+                    ' the share.')
+              | list
+            )
+            + (
+              synology_audit_export_findings | default([])
+              | selectattr('wildcard_hostname')
+              | map(attribute='export')
+              | map('regex_replace', '^(.*)$',
+                    'MEDIUM: NFS export \1 uses a wildcard hostname rule, which'
+                    ' DSM resolves by reverse DNS. Replace it with IP literals.')
+              | list
+            )
+            + (
+              synology_audit_export_findings | default([])
+              | selectattr('all_squash')
+              | map(attribute='export')
+              | map('regex_replace', '^(.*)$',
+                    'INFO: NFS export \1 has at least one all_squash rule. Not'
+                    ' an exposure, but every client UID is rewritten to the'
+                    ' rule anonuid, so check anonuid consistency before moving'
+                    ' data between rules.')
+              | list
+            )
+            + ([] if (synology_audit_service_summary.iscsi_targets_without_chap | int) == 0 else [
+              'MEDIUM: '
+              ~ synology_audit_service_summary.iscsi_targets_without_chap
+              ~ ' of ' ~ synology_audit_service_summary.iscsi_targets_total
+              ~ ' iSCSI targets accept an initiator without CHAP.'
+            ])
+            + ([] if not (synology_audit_service_summary.quickconnect_enabled | bool) else [
+              'CRITICAL: QuickConnect is enabled, so the DSM login page is'
+              ' published on the public internet through the Synology relay,'
+              ' independent of the UniFi gateway port forwards. Disable it in'
+              ' DSM > Control Panel > External Access > QuickConnect.'
+            ])
+            + ([] if (synology_audit_service_summary.dsm_autoblock_enabled | bool) else [
+              'CRITICAL: DSM Auto Block is disabled. Password attempts against'
+              ' DSM logon, SSH, SMB, FTP and rsync are unlimited. Enable it in'
+              ' DSM > Control Panel > Security > Protection.'
+            ])
+            + ([] if not (synology_audit_service_summary.rsync_daemon_listening | bool) else [
+              'MEDIUM: the rsync daemon is listening on TCP 873. It publishes'
+              ' every shared-folder name and description before authentication.'
+            ])
+            + ([] if (synology_audit_service_summary.dsm_firewall_enabled | bool) else [
+              'LOW: the DSM firewall is disabled.'
+            ])
+            + ([] if (synology_audit_service_summary.smb_signing_required | bool) else [
+              'LOW: SMB signing is offered but not required.'
+            ])
+          }}
+
+    - name: Report audit findings
+      ansible.builtin.debug:
+        msg: "{{ synology_audit_findings }}"
+
+    - name: Assert no unauthenticated or guest access path exists
+      ansible.builtin.assert:
+        that:
+          - (synology_audit_findings | length) == 0
+        fail_msg: >-
+          {{ synology_audit_findings | length }} exposure finding(s) on
+          {{ inventory_hostname }}. See the reported list above and
+          runbooks/synology/synology-share-access-audit.md.
+        success_msg: >-
+          No unauthenticated or guest access path found on {{ inventory_hostname }}.
+      when: synology_audit_fail_on_finding | bool

@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Vault Agent — {{ vault_cert_agent_service_name }} TLS certificate renewer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{ vault_cert_agent_vault_bin.stdout }} agent -config={{ vault_cert_agent_config_file }}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
