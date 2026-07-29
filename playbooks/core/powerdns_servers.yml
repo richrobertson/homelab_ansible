@@ -88,16 +88,18 @@
     pdns_recursor_webserver_allow_from: "0.0.0.0/0"
     # Must match the LAN-reachable LoadBalancer IP used by the shared myrobertson-com gateway.
     pdns_rec_split_dns_gateway_ip: "10.31.0.69"
-    # Kermit Synology NAS, used directly by Synology Drive Client on the LAN.
-    pdns_rec_synology_drive_ip: "192.168.1.141"
     pdns_rec_split_dns_zone_dir: "/etc/powerdns/recursor/zones"
     pdns_rec_split_dns_zones:
       plex.myrobertson.com:
         address: "{{ pdns_rec_split_dns_gateway_ip }}"
         serial: 2026042001
       drive.myrobertson.com:
-        address: "{{ pdns_rec_synology_drive_ip }}"
-        serial: 2026051401
+        # Model A: front drive via the gateway (like plex), not the NAS directly.
+        # External clients reach it via Cloudflare -> gateway; LAN clients get the
+        # gateway IP straight from split-DNS. Was 192.168.1.141 (NAS, Model B),
+        # which served DSM's Web Station default page for this hostname.
+        address: "{{ pdns_rec_split_dns_gateway_ip }}"
+        serial: 2026072901
     pdns_rec_config:
 
       # Listen Address
