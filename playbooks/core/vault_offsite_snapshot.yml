@@ -65,9 +65,13 @@
     # freshness metrics land where node_exporter is already told to look.
     vault_backup_textfile_dir: /var/lib/prometheus/node-exporter
     vault_backup_node_exporter_args: "--collector.textfile.directory={{ vault_backup_textfile_dir }}"
-    # Vault VM 119 is the single most critical host in the estate and currently
-    # has no scrape target at all, so install the exporter here too.
-    vault_backup_manage_node_exporter: true
+    # node_exporter on the Vault VM is installed by the dedicated, OS-aware
+    # playbooks/core/vault_node_exporter.yml (the Vault host is CentOS Stream 9,
+    # where the `prometheus-node-exporter` package below does not exist — it is
+    # `node-exporter` from EPEL, plus a firewalld rule). Left false so this
+    # playbook does not fail on that package; run vault_node_exporter.yml first.
+    # Set true only on a Debian Vault host that this playbook fully manages.
+    vault_backup_manage_node_exporter: false
 
     # The seeding run below stops Vault on the file backend. Set false to
     # install the timer during business hours and let it fire on schedule.

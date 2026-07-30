@@ -1,42 +1,52 @@
 ---
-# Install prometheus-node-exporter on the Vault VM (192.168.7.128 / VM 119).
+# Install node_exporter on the Vault VM (192.168.7.128 / VM 119).
 #
 #   ansible-playbook -i inventory/environments/production.ini \
 #     playbooks/core/vault_node_exporter.yml
 #
 # WHY THIS EXISTS SEPARATELY FROM vault_offsite_snapshot.yml
 # ---------------------------------------------------------
-# The Vault VM is the single most critical host in the estate and currently has
-# no scrape target at all, so `TargetDown{job="vault-node"}` fires. The full
+# The Vault VM is the single most critical host in the estate and had no scrape
+# target at all, so `TargetDown{job="vault-node"}` fired. The full
 # offsite-snapshot playbook also installs this exporter, but it is BLOCKED until
 # the operator provisions S3 credentials and a GPG escrow key (it asserts
 # secret/vault/backup/offsite before doing anything). This playbook installs just
-# the exporter so the vault-node target can go green immediately, with no S3
+# the exporter so the vault-node target goes green immediately, with no S3
 # material and — unlike the snapshot playbook — WITHOUT ever stopping Vault.
 #
-# It is deliberately config-compatible with vault_offsite_snapshot.yml: same
-# package, same textfile directory, same ARGS. Running either converges to the
-# same state, so there is no drift and no conflict. Once the offsite backup is
-# set up per runbooks/security/vault-offsite-snapshot-setup.md, the snapshot
-# playbook takes over management of this exporter and this file becomes a no-op.
+# OS NOTE: the Vault host is CentOS Stream 9, NOT Debian like the Proxmox nodes.
+# node_exporter therefore comes from EPEL as the `node-exporter` package (whose
+# systemd unit still runs the `prometheus-node-exporter` binary and reads $ARGS
+# from /etc/default/prometheus-node-exporter, same as Debian), and firewalld must
+# be opened for the scrape. vault_offsite_snapshot.yml currently hard-codes the
+# Debian package name and would fail its node_exporter task on this host; this
+# playbook handles both families and is config-compatible, so running either
+# converges to the same exporter state.
 
 - name: Install node_exporter on the Vault host
   hosts: "{{ vault_backup_target_hosts | default('vault') }}"
   become: true
-  gather_facts: false
+  gather_facts: true
 
   vars:
     # Matches vault_offsite_snapshot.yml and the Proxmox textfile collectors so
     # every collector lands where node_exporter is already told to look.
     vault_node_exporter_textfile_dir: /var/lib/prometheus/node-exporter
     vault_node_exporter_args: "--collector.textfile.directory={{ vault_node_exporter_textfile_dir }}"
+    # Both the Debian package and the EPEL package ship/alias this unit name.
+    vault_node_exporter_service: prometheus-node-exporter
+    vault_node_exporter_port: 9100
 
   handlers:
-    - name: Restart prometheus-node-exporter
+    - name: Restart node_exporter
       ansible.builtin.systemd_service:
-        name: prometheus-node-exporter
+        name: "{{ vault_node_exporter_service }}"
         state: restarted
         daemon_reload: true
+
+    - name: Reload firewalld
+      ansible.builtin.command: firewall-cmd --reload
+      changed_when: true
 
   tasks:
     - name: Ensure the node exporter textfile directory exists
@@ -47,11 +57,41 @@
         group: root
         mode: "0755"
 
-    - name: Install prometheus-node-exporter
+    # --- RedHat family (the Vault host: CentOS Stream 9) --------------------
+    - name: Ensure EPEL is available (RedHat family)
+      ansible.builtin.package:
+        name: epel-release
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Install node-exporter from EPEL (RedHat family)
+      ansible.builtin.package:
+        name: node-exporter
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Check whether the exporter port is already open in firewalld (RedHat family)
+      ansible.builtin.command: "firewall-cmd --query-port={{ vault_node_exporter_port }}/tcp"
+      register: vault_node_exporter_fw
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "RedHat"
+
+    - name: Open the exporter port in firewalld (RedHat family)
+      ansible.builtin.command: "firewall-cmd --permanent --add-port={{ vault_node_exporter_port }}/tcp"
+      when:
+        - ansible_os_family == "RedHat"
+        - (vault_node_exporter_fw.rc | default(1)) != 0
+      notify: Reload firewalld
+
+    # --- Debian family (e.g. the Proxmox nodes) ----------------------------
+    - name: Install prometheus-node-exporter (Debian family)
       ansible.builtin.package:
         name: prometheus-node-exporter
         state: present
+      when: ansible_os_family == "Debian"
 
+    # --- Common: both units read $ARGS from this env file ------------------
     - name: Enable the node exporter textfile collector
       ansible.builtin.lineinfile:
         path: /etc/default/prometheus-node-exporter
@@ -61,11 +101,11 @@
         owner: root
         group: root
         mode: "0644"
-      notify: Restart prometheus-node-exporter
+      notify: Restart node_exporter
 
-    - name: Ensure prometheus-node-exporter is enabled and started
+    - name: Ensure node_exporter is enabled and started
       ansible.builtin.systemd_service:
-        name: prometheus-node-exporter
+        name: "{{ vault_node_exporter_service }}"
         enabled: true
         state: started
         daemon_reload: true
