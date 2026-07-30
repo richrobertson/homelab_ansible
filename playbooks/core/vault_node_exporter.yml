@@ -1,0 +1,71 @@
+---
+# Install prometheus-node-exporter on the Vault VM (192.168.7.128 / VM 119).
+#
+#   ansible-playbook -i inventory/environments/production.ini \
+#     playbooks/core/vault_node_exporter.yml
+#
+# WHY THIS EXISTS SEPARATELY FROM vault_offsite_snapshot.yml
+# ---------------------------------------------------------
+# The Vault VM is the single most critical host in the estate and currently has
+# no scrape target at all, so `TargetDown{job="vault-node"}` fires. The full
+# offsite-snapshot playbook also installs this exporter, but it is BLOCKED until
+# the operator provisions S3 credentials and a GPG escrow key (it asserts
+# secret/vault/backup/offsite before doing anything). This playbook installs just
+# the exporter so the vault-node target can go green immediately, with no S3
+# material and — unlike the snapshot playbook — WITHOUT ever stopping Vault.
+#
+# It is deliberately config-compatible with vault_offsite_snapshot.yml: same
+# package, same textfile directory, same ARGS. Running either converges to the
+# same state, so there is no drift and no conflict. Once the offsite backup is
+# set up per runbooks/security/vault-offsite-snapshot-setup.md, the snapshot
+# playbook takes over management of this exporter and this file becomes a no-op.
+
+- name: Install node_exporter on the Vault host
+  hosts: "{{ vault_backup_target_hosts | default('vault') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    # Matches vault_offsite_snapshot.yml and the Proxmox textfile collectors so
+    # every collector lands where node_exporter is already told to look.
+    vault_node_exporter_textfile_dir: /var/lib/prometheus/node-exporter
+    vault_node_exporter_args: "--collector.textfile.directory={{ vault_node_exporter_textfile_dir }}"
+
+  handlers:
+    - name: Restart prometheus-node-exporter
+      ansible.builtin.systemd_service:
+        name: prometheus-node-exporter
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    - name: Ensure the node exporter textfile directory exists
+      ansible.builtin.file:
+        path: "{{ vault_node_exporter_textfile_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install prometheus-node-exporter
+      ansible.builtin.package:
+        name: prometheus-node-exporter
+        state: present
+
+    - name: Enable the node exporter textfile collector
+      ansible.builtin.lineinfile:
+        path: /etc/default/prometheus-node-exporter
+        regexp: '^ARGS='
+        line: 'ARGS="{{ vault_node_exporter_args }}"'
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart prometheus-node-exporter
+
+    - name: Ensure prometheus-node-exporter is enabled and started
+      ansible.builtin.systemd_service:
+        name: prometheus-node-exporter
+        enabled: true
+        state: started
+        daemon_reload: true
