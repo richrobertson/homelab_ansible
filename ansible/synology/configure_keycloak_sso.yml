@@ -1,0 +1,102 @@
+---
+# Configure the DSM OIDC SSO Client on the Synology NAS to authenticate against
+# Keycloak (realm homelab). This supersedes configure_authelia_sso.yml, which is
+# stale — the live SSO provider is Keycloak, not Authelia. Do NOT run the Authelia
+# playbook against these hosts or it will revert the provider.
+#
+# The OIDC client_id / client_secret / well-known URL are read from Vault; the
+# redirect URIs are declared here so that drive.myrobertson.com (Model A,
+# gateway-fronted) is accepted alongside the NAS's own hostname. Adding a redirect
+# URI here must be matched by the same URI on the Keycloak client
+# (apps/base/keycloak/grafana-clients-job.yaml -> synology_kermit_prod).
+#
+# Connection + become use the local svc-syno-ssh account, password from Vault.
+# Requires VAULT_ADDR / VAULT_TOKEN in the environment (VAULT_CACERT for the
+# internal CA; on macOS also OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES).
+#
+# Run:
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/synology/configure_keycloak_sso.yml --limit kermit.myrobertson.net
+- name: Configure DSM OIDC SSO against Keycloak
+  hosts: "{{ synology_sso_nas_group | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+  become: true
+  vars:
+    # Connection identity (scoped to this playbook so other synology plays are
+    # unaffected). Sourced from Vault, never stored in the repo.
+    ansible_user: svc-syno-ssh
+    ansible_password: >-
+      {{ lookup('community.hashi_vault.vault_kv2_get',
+                'synology/dsm-admin/local-ssh-account',
+                engine_mount_point='secret').secret.password }}
+    ansible_become_password: "{{ ansible_password }}"
+
+    synology_sso_vault_mount: secret
+    # Legacy path name; the stored values are the current Keycloak client.
+    synology_sso_vault_prefix: synology/prod/sso/authelia
+    synology_sso_provider_name: Keycloak
+    synology_sso_scope: "openid profile email groups"
+    synology_sso_user_claim: preferred_username
+    synology_sso_allow_local_user_default: false
+    synology_sso_allow_local_user_by_host:
+      kermit.myrobertson.net: false
+    # Redirect URIs per NAS. kermit is reached both directly (kermit.myrobertson.com)
+    # and via the gateway-fronted drive.myrobertson.com (Model A), so both are
+    # registered; DSM accepts a comma-separated list.
+    synology_sso_redirect_uris_by_host:
+      kermit.myrobertson.net:
+        - https://kermit.myrobertson.com/webman/ssoclient/token_relay.html
+        - https://drive.myrobertson.com/webman/ssoclient/token_relay.html
+      scooter.myrobertson.net:
+        - https://scooter.myrobertson.net:5011/webman/ssoclient/token_relay.html
+        - https://scooter.myrobertson.net:5001/webman/ssoclient/token_relay.html
+  tasks:
+    - name: Require the Vault environment
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'VAULT_ADDR') | length > 0
+          - lookup('env', 'VAULT_TOKEN') | length > 0
+        fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running.
+      run_once: true
+      delegate_to: localhost
+      become: false
+
+    - name: Read the Synology OIDC client from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ lookup('env', 'VAULT_ADDR') }}"
+        token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+        engine_mount_point: "{{ synology_sso_vault_mount }}"
+        path: "{{ synology_sso_vault_prefix }}/{{ inventory_hostname_short }}"
+      register: synology_sso_vault_secret
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Build this host's redirect URI list
+      ansible.builtin.set_fact:
+        synology_sso_redirect_uris: >-
+          {{ synology_sso_redirect_uris_by_host[inventory_hostname]
+             | default(['https://' ~ inventory_hostname
+                        ~ ':5001/webman/ssoclient/token_relay.html']) }}
+
+    - name: Configure the DSM OIDC profile (Keycloak) with all declared redirect URIs
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.Directory.OIDC.SSO
+        method=set
+        version=1
+        profile=oidc
+        oidc_name={{ synology_sso_provider_name | quote }}
+        oidc_wellknown={{ synology_sso_vault_secret.secret.wellknown_url | quote }}
+        oidc_client_id={{ synology_sso_vault_secret.secret.client_id | quote }}
+        oidc_client_secret={{ synology_sso_vault_secret.secret.client_secret | quote }}
+        oidc_redirect_uri={{ synology_sso_redirect_uris | join(',') | quote }}
+        oidc_scope={{ synology_sso_scope | quote }}
+        oidc_user_claim={{ synology_sso_user_claim | quote }}
+        oidc_allow_local_user={{ (synology_sso_allow_local_user_by_host[inventory_hostname]
+                                  | default(synology_sso_allow_local_user_default)) | lower }}
+        2>&1
+      register: synology_sso_oidc_set
+      changed_when: true
+      failed_when: "'\"success\" : true' not in synology_sso_oidc_set.stdout"
+      no_log: true
