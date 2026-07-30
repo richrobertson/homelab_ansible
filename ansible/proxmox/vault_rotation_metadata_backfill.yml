@@ -116,7 +116,7 @@
         msg: >-
           {{ kv_meta.results | length }} secrets scanned;
           {{ backfill_targets | default([]) | length }} missing rotated_at
-          {{ 'would be' if backfill_report_only else 'will be' }} stamped
+          {{ 'would be' if (backfill_report_only | bool) else 'will be' }} stamped
           (interval default {{ default_rotation_interval_days }}d).
 
     - name: Stamp rotated_at + rotation_interval_days (merge-patch, preserves other metadata)
@@ -136,4 +136,4 @@
       loop: "{{ backfill_targets | default([]) }}"
       loop_control:
         label: "{{ item.path }} -> rotated_at={{ item.rotated_at }}, interval={{ item.interval }}"
-      when: not backfill_report_only
+      when: not (backfill_report_only | bool)
