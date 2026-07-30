@@ -102,7 +102,11 @@
                'path': item.item,
                'rotated_at': ((item.json.data.updated_time | default(item.json.data.created_time)) | string)[:10],
                'interval': (rotation_interval_overrides[item.item.split('/')[0]]
-                            | default(default_rotation_interval_days)) | string
+                            | default(default_rotation_interval_days)) | string,
+               'max_versions': item.json.data.max_versions | default(0) | int,
+               'cas_required': item.json.data.cas_required | default(false) | bool,
+               'delete_version_after': item.json.data.delete_version_after | default('0s'),
+               'existing_cm': item.json.data.custom_metadata | default({}, true)
              }] }}
       loop: "{{ kv_meta.results }}"
       loop_control:
@@ -119,18 +123,27 @@
           {{ 'would be' if (backfill_report_only | bool) else 'will be' }} stamped
           (interval default {{ default_rotation_interval_days }}d).
 
-    - name: Stamp rotated_at + rotation_interval_days (merge-patch, preserves other metadata)
+    - name: Stamp rotated_at + rotation_interval_days (full POST; token has update, not patch)
       ansible.builtin.uri:
         url: "{{ vault_addr }}/v1/{{ vault_mount }}/metadata/{{ item.path }}"
-        method: PATCH
+        method: POST
         headers:
           X-Vault-Token: "{{ vault_token }}"
-          Content-Type: application/merge-patch+json
         body_format: json
-        body:
-          custom_metadata:
-            rotated_at: "{{ item.rotated_at }}"
-            rotation_interval_days: "{{ item.interval }}"
+        # The login token has 'update' but not Vault's distinct 'patch' capability,
+        # so a merge-PATCH 403s. Do a full metadata POST (uses 'update') and re-send
+        # the existing max_versions / cas_required / delete_version_after and any
+        # existing custom_metadata (read back above) so nothing else is clobbered.
+        body: >-
+          {{ {
+               'max_versions': item.max_versions,
+               'cas_required': item.cas_required,
+               'delete_version_after': item.delete_version_after,
+               'custom_metadata': item.existing_cm | combine({
+                 'rotated_at': item.rotated_at,
+                 'rotation_interval_days': item.interval
+               })
+             } }}
         ca_path: "{{ vault_cacert | default(omit, true) }}"
         status_code: [200, 204]
       loop: "{{ backfill_targets | default([]) }}"
