@@ -1,0 +1,72 @@
+---
+# Self-healing re-pin of the PVE -> PBS storage TLS fingerprints.
+#
+# PBS's proxy certificate is auto-rotated by its Vault Agent
+# (pbs_provision_certificate.yml -> /usr/local/sbin/apply-pbs-cert.sh). When it
+# rotates, the sha256 fingerprint pinned for each PBS storage in the cluster
+# storage.cfg goes stale, and every PBS-backed backup job fails cluster-wide
+# with: "fingerprint '<new>' not verified, abort!" (storages go inactive).
+#
+# This playbook derives the CURRENT fingerprint straight from PBS's proxy.pem
+# and re-pins any PBS storage whose pin differs. It is idempotent (a converged
+# cluster reports changed=0) and safe to run on a schedule or, ideally, from
+# apply-pbs-cert.sh right after a rotation so the fix self-heals.
+#
+# storage.cfg is cluster-wide, so re-pinning from one PVE node updates them all.
+#
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/pbs_repin_storage_fingerprints.yml
+- name: Derive PBS's current certificate fingerprint
+  hosts: "{{ pbs_repin_pbs_host | default('pbs.myrobertson.net') }}"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read the PBS proxy certificate sha256 fingerprint
+      ansible.builtin.command:
+        cmd: openssl x509 -in /etc/proxmox-backup/proxy.pem -noout -fingerprint -sha256
+      changed_when: false
+      register: pbs_repin_openssl
+
+    - name: Store the colon-separated fingerprint as a host fact
+      ansible.builtin.set_fact:
+        pbs_repin_fingerprint: >-
+          {{ pbs_repin_openssl.stdout | regex_replace('(?i)^.*fingerprint=', '') | trim }}
+
+- name: Re-pin every PVE PBS storage to the live PBS fingerprint
+  hosts: "{{ pbs_repin_pve_host | default('pve3.myrobertson.net') }}"
+  become: true
+  gather_facts: false
+  vars:
+    pbs_repin_fingerprint: >-
+      {{ hostvars[pbs_repin_pbs_host | default('pbs.myrobertson.net')]['pbs_repin_fingerprint'] }}
+  tasks:
+    - name: Sanity-check the derived fingerprint is a 32-byte sha256
+      ansible.builtin.assert:
+        that:
+          - pbs_repin_fingerprint is match('^([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}$')
+        fail_msg: "Derived PBS fingerprint looks malformed: '{{ pbs_repin_fingerprint }}'"
+
+    - name: Read current PBS storage pins from storage.cfg
+      ansible.builtin.shell:
+        cmd: "awk '/^pbs:/{id=$2} /^[[:space:]]*fingerprint /{print id\" \"$2}' /etc/pve/storage.cfg"
+      changed_when: false
+      register: pbs_repin_current
+
+    - name: Re-pin storages whose fingerprint differs from PBS's live cert
+      ansible.builtin.command:
+        cmd: "pvesm set {{ item.split()[0] }} --fingerprint {{ pbs_repin_fingerprint }}"
+      loop: "{{ pbs_repin_current.stdout_lines }}"
+      loop_control:
+        label: "{{ item.split()[0] }} ({{ 'stale' if item.split()[1] | upper != pbs_repin_fingerprint | upper else 'ok' }})"
+      when: item.split()[1] | upper != pbs_repin_fingerprint | upper
+      changed_when: true
+      register: pbs_repin_result
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          PBS live fingerprint {{ pbs_repin_fingerprint }}. Storages:
+          {{ pbs_repin_current.stdout_lines | map('regex_replace', ' .*', '') | list }}.
+          Re-pinned this run:
+          {{ pbs_repin_result.results | default([]) | rejectattr('skipped', 'defined')
+             | map(attribute='item') | map('regex_replace', ' .*', '') | list }}.
