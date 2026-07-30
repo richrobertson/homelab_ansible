@@ -713,7 +713,7 @@ export VAULT_ADDR=https://vault.myrobertson.net:8200
 vault secrets enable -path=ldap ldap
 
 vault write ldap/config \
-  binddn='CN=svc-vault-ldapmgr,OU=Bind,OU=Service Accounts,DC=myrobertson,DC=net' \
+  binddn='CN=svc-vault-ldapmgr,OU=Automation,OU=Service Accounts,DC=myrobertson,DC=net' \
   bindpass=- \
   url='ldaps://dc1.myrobertson.net,ldaps://rhonda.myrobertson.net' \
   userdn='OU=Bind,OU=Service Accounts,DC=myrobertson,DC=net' \
