@@ -1,0 +1,139 @@
+---
+# Truthful backfill of rotation metadata for the `secret/` KV v2 mount.
+# Resolves VaultSecretsMissingRotationMetadata without inventing rotation events.
+#
+# For every secret that declares no rotated_at / password_rotated_at in
+# custom_metadata, it stamps:
+#   custom_metadata.rotated_at             = the secret's Vault-recorded last-write
+#                                            date (metadata.updated_time, the most
+#                                            recent time the VALUE demonstrably
+#                                            changed), truncated to YYYY-MM-DD
+#   custom_metadata.rotation_interval_days = a sane default (90), overridable per
+#                                            top-level prefix
+#
+# Honest, not cosmetic: for secrets whose true last-write is older than the
+# interval this will (correctly) trip VaultSecretPastRotationInterval. That is the
+# intended signal per runbooks/security/credential-lifecycle-roadmap.md, not a
+# regression.
+#
+# Preserves existing custom_metadata keys and other metadata settings
+# (max_versions, cas_required, ...) via JSON merge-patch (RFC 7396).
+# Idempotent: already-stamped secrets are skipped; a re-run writes nothing.
+#
+# The credential-age-collector AppRole is read-only, so it cannot run this.
+# Use a token with update on secret/metadata/* (e.g. a human admin/root token or
+# a scoped policy: path "secret/metadata/*" { capabilities = ["read","list","update"] }).
+#
+#   export VAULT_ADDR=https://vault.myrobertson.net:8200 VAULT_TOKEN=... \
+#          VAULT_CACERT=/path/to/vault-ca-chain.pem
+#   # dry run (DEFAULT) — lists exactly what WOULD be stamped, writes nothing:
+#   ansible-playbook ansible/proxmox/vault_rotation_metadata_backfill.yml
+#   # apply (mass metadata write across secret/ — requires sign-off):
+#   ansible-playbook ansible/proxmox/vault_rotation_metadata_backfill.yml -e backfill_report_only=false
+
+- name: Backfill Vault rotation metadata (truthful, idempotent)
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+
+  vars:
+    vault_addr: "{{ lookup('ansible.builtin.env', 'VAULT_ADDR') }}"
+    vault_token: "{{ lookup('ansible.builtin.env', 'VAULT_TOKEN') }}"
+    vault_cacert: "{{ lookup('ansible.builtin.env', 'VAULT_CACERT') }}"
+    vault_mount: secret
+    default_rotation_interval_days: 90
+    # Per top-level-prefix overrides, e.g. {'proxmox': 180, 'aws': 30}
+    rotation_interval_overrides: {}
+    # Report-only by DEFAULT: print the plan and change nothing. Applying is a
+    # mass metadata write across the secret/ mount, so it is opt-in and needs
+    # sign-off. Set false (-e backfill_report_only=false) to actually stamp.
+    backfill_report_only: true
+
+  tasks:
+    - name: Require Vault environment
+      ansible.builtin.assert:
+        that:
+          - vault_addr | length > 0
+          - vault_token | length > 0
+        fail_msg: Set VAULT_ADDR and VAULT_TOKEN (and VAULT_CACERT) before running.
+
+    # Recursive metadata LIST walk of the KV v2 mount. Read-only; mirrors the
+    # collector's walk() exactly so the two agree on the secret set.
+    - name: Enumerate leaf secret paths
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          walk() {
+            local prefix="$1" key
+            while IFS= read -r key; do
+              [ -n "$key" ] || continue
+              if [[ "$key" == */ ]]; then walk "${prefix}${key}"
+              else printf '%s\n' "${prefix}${key}"; fi
+            done < <(vault kv list -format=json "{{ vault_mount }}/${prefix}" 2>/dev/null | jq -r '.[]? // empty')
+          }
+          walk ''
+      environment:
+        VAULT_ADDR: "{{ vault_addr }}"
+        VAULT_TOKEN: "{{ vault_token }}"
+        VAULT_CACERT: "{{ vault_cacert }}"
+      register: kv_walk
+      changed_when: false
+
+    - name: Read metadata for every secret (metadata only, no values)
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/{{ vault_mount }}/metadata/{{ item }}"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+        ca_path: "{{ vault_cacert | default(omit, true) }}"
+        return_content: false
+      loop: "{{ kv_walk.stdout_lines }}"
+      loop_control:
+        label: "{{ item }}"
+      register: kv_meta
+      changed_when: false
+
+    - name: Compute backfill targets (only secrets missing rotated_at)
+      ansible.builtin.set_fact:
+        backfill_targets: >-
+          {{ backfill_targets | default([]) + [{
+               'path': item.item,
+               'rotated_at': ((item.json.data.updated_time | default(item.json.data.created_time)) | string)[:10],
+               'interval': (rotation_interval_overrides[item.item.split('/')[0]]
+                            | default(default_rotation_interval_days)) | string
+             }] }}
+      loop: "{{ kv_meta.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - (item.json.data.custom_metadata | default({}, true)).rotated_at is not defined
+        - (item.json.data.custom_metadata | default({}, true)).password_rotated_at is not defined
+
+    - name: Report the plan
+      ansible.builtin.debug:
+        msg: >-
+          {{ kv_meta.results | length }} secrets scanned;
+          {{ backfill_targets | default([]) | length }} missing rotated_at
+          {{ 'would be' if backfill_report_only else 'will be' }} stamped
+          (interval default {{ default_rotation_interval_days }}d).
+
+    - name: Stamp rotated_at + rotation_interval_days (merge-patch, preserves other metadata)
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/{{ vault_mount }}/metadata/{{ item.path }}"
+        method: PATCH
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+          Content-Type: application/merge-patch+json
+        body_format: json
+        body:
+          custom_metadata:
+            rotated_at: "{{ item.rotated_at }}"
+            rotation_interval_days: "{{ item.interval }}"
+        ca_path: "{{ vault_cacert | default(omit, true) }}"
+        status_code: [200, 204]
+      loop: "{{ backfill_targets | default([]) }}"
+      loop_control:
+        label: "{{ item.path }} -> rotated_at={{ item.rotated_at }}, interval={{ item.interval }}"
+      when: not backfill_report_only
