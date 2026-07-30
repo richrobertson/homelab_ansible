@@ -1,0 +1,344 @@
+---
+# =============================================================================
+# rotate_krbtgt.yml - Guarded krbtgt (Kerberos TGS) key rotation
+# =============================================================================
+# Addresses alert: ADKrbtgtPasswordStale
+#   - domain `krbtgt`          : last rotated ~2067 days ago  (kvno currently 2)
+#   - RODC   `krbtgt_12069`    : last rotated ~295  days ago  (dns01's RODC krbtgt)
+#
+# WHAT THIS DOES
+#   Rotates ONE krbtgt key per run with a single `Set-ADAccountPassword -Reset`.
+#   Active Directory ignores the supplied password value for functional
+#   purposes: on reset it derives brand-new Kerberos keys and increments the
+#   key version number (kvno / msDS-KeyVersionNumber). We never keep the
+#   password - it is throwaway.
+#
+#   A COMPLETE rotation of a key is TWO passes, run in TWO maintenance windows:
+#     pass 1 -> current key becomes N+1, previous key becomes N (old N-1 retired)
+#     ...wait >= MaxTicketAge (10h) so every TGT signed with the pre-pass-1 key
+#        expires and both writable DCs + the RODC converge...
+#     pass 2 -> current key becomes N+2, previous key becomes N+1 (N fully gone)
+#
+# !!! SAFETY - READ BEFORE RUNNING A RESET !!!
+#   * There is NO ROLLBACK for a krbtgt reset. The key is derived from the reset
+#     and the prior secret is gone. You cannot "undo" a pass.
+#   * MaxTicketAge = 10h is the INTER-PASS MINIMUM. Running the second pass
+#     before every ticket issued under the pre-pass-1 key has expired will
+#     invalidate live TGTs and cause a DOMAIN-WIDE authentication outage.
+#   * Therefore this playbook rotates exactly ONE key per run and BLOCKS any
+#     pass that runs < krbtgt_min_gap_hours (10h) after the last reset of that
+#     same account. That single uniform guard both (a) lets pass 1 proceed
+#     because the account was last set months/years ago, and (b) stops pass 2
+#     (or an accidental re-run) from firing inside the danger window.
+#   * Run inside an approved maintenance window only.
+#
+# PARAMETERS (pass with -e)
+#   krbtgt_target         'main' (the domain krbtgt) | 'krbtgt_<id>' (an RODC
+#                         krbtgt, e.g. krbtgt_12069). Required.
+#   krbtgt_pass           1 | 2   -- which pass of the two-pass rotation. Used
+#                         for messaging/assertion; the >=10h gap guard is what
+#                         actually enforces correct inter-pass spacing.
+#   krbtgt_reset_confirm  Must be true to perform the reset. Default false.
+#                         The read/validate path does NOT require this.
+#   krbtgt_min_gap_hours  Inter-pass minimum in hours. Default 10 (MaxTicketAge).
+#
+# EXACT RUN SEQUENCE (do NOT deviate)
+#   Base cmd (from repo root, with the WinRM password extra-vars file):
+#     .venv/bin/ansible-playbook -i inventory/environments/production.ini \
+#       ansible/domain/rotate_krbtgt.yml -e @$SP/winpw.extravars.yml <ARGS>
+#
+#   0. READ-ONLY VALIDATION (no reset; safe any time):
+#        <base> -e krbtgt_target=main --tags read
+#        <base> -e krbtgt_target=krbtgt_12069 --tags read
+#      Confirms it reads kvno/PasswordLastSet and shows the gap-guard verdict.
+#      The reset is skipped because krbtgt_reset_confirm defaults to false.
+#
+#   --- domain krbtgt (kvno 2 -> 3 -> 4) ---
+#   1. Window A: <base> -e krbtgt_target=main -e krbtgt_pass=1 \
+#                       -e krbtgt_reset_confirm=true
+#      Verify kvno converged 2 -> 3 on dc1, rhonda AND dns01.
+#   2. WAIT >= 10h (MaxTicketAge).
+#   3. Window B: <base> -e krbtgt_target=main -e krbtgt_pass=2 \
+#                       -e krbtgt_reset_confirm=true
+#      Verify kvno converged 3 -> 4 on dc1, rhonda AND dns01.
+#
+#   --- then repeat BOTH passes for the RODC krbtgt (read its baseline first) ---
+#   4. Window C: <base> -e krbtgt_target=krbtgt_12069 -e krbtgt_pass=1 \
+#                       -e krbtgt_reset_confirm=true      (kvno K -> K+1)
+#   5. WAIT >= 10h.
+#   6. Window D: <base> -e krbtgt_target=krbtgt_12069 -e krbtgt_pass=2 \
+#                       -e krbtgt_reset_confirm=true      (kvno K+1 -> K+2)
+#
+#   If the convergence check throws on any pass: STOP. Do NOT run the next pass
+#   until every DC (dc1, rhonda, dns01) reports the expected kvno.
+#
+# CONNECTION
+#   Runs on the RWDC dc1 (domain_controllers_windows[0]) over WinRM. Replication
+#   is forced OUTWARD from dc1 to every other DC. win_powershell only.
+# =============================================================================
+
+- name: Rotate one krbtgt key (guarded, single pass)
+  hosts: "{{ krbtgt_reset_host | default('domain_controllers_windows[0]') }}"
+  gather_facts: false
+
+  vars:
+    # 'main' -> the domain krbtgt account; otherwise an RODC krbtgt_<id> account.
+    krbtgt_target: main
+    krbtgt_pass: 1
+    # Safety gate: nothing is reset unless this is explicitly true.
+    krbtgt_reset_confirm: false
+    # MaxTicketAge (hours). This is the inter-pass minimum and the block window.
+    krbtgt_min_gap_hours: 10
+    krbtgt_base_dn: DC=myrobertson,DC=net
+    # Every DC the new kvno must converge on before a pass is declared done.
+    krbtgt_domain_controllers:
+      - dc1.myrobertson.net    # RWDC (replication source / reset origin)
+      - rhonda.myrobertson.net # RWDC / PDCe
+      - dns01.myrobertson.net  # RODC
+    # sAMAccountName derived from the target selector.
+    krbtgt_sam: "{{ 'krbtgt' if krbtgt_target == 'main' else krbtgt_target }}"
+
+  tasks:
+    # -- INPUT VALIDATION (runs in both the read path and the reset path) -------
+    - name: Validate krbtgt_target and krbtgt_pass
+      ansible.builtin.assert:
+        that:
+          - krbtgt_target == 'main' or (krbtgt_target is match('^krbtgt_[0-9]+$'))
+          - krbtgt_pass | int in [1, 2]
+          - krbtgt_min_gap_hours | float > 0
+          - krbtgt_domain_controllers | length >= 1
+        fail_msg: >-
+          krbtgt_target must be 'main' or 'krbtgt_<id>' (got '{{ krbtgt_target }}')
+          and krbtgt_pass must be 1 or 2 (got '{{ krbtgt_pass }}').
+        success_msg: >-
+          Target {{ krbtgt_sam }}, pass {{ krbtgt_pass }} - inputs valid.
+      tags: [read, reset]
+
+    - name: Ensure the ActiveDirectory PowerShell module is available
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
+            throw 'ActiveDirectory PowerShell module is not available on this host.'
+          }
+          Write-Output 'ActiveDirectory module available'
+      changed_when: false
+      tags: [read, reset]
+
+    # -- READ CURRENT STATE (read-only; prerequisite for the reset path) --------
+    - name: Read current krbtgt kvno and PasswordLastSet
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+          $sam = {{ krbtgt_sam | to_json }}
+          $sourceDc = "$env:COMPUTERNAME.$((Get-ADDomain).DNSRoot)"
+          $u = Get-ADUser -Identity $sam -Server $sourceDc `
+                 -Properties 'msDS-KeyVersionNumber','PasswordLastSet','whenChanged'
+          $now = Get-Date
+          # A null PasswordLastSet means "never/unknown" -> treat as very old so
+          # a first pass is allowed; only a genuinely recent reset should block.
+          if ($u.PasswordLastSet) {
+            $hours = [math]::Round(($now - $u.PasswordLastSet).TotalHours, 2)
+            $pls = $u.PasswordLastSet.ToString('o')
+          } else {
+            $hours = 1000000.0
+            $pls = $null
+          }
+          [pscustomobject]@{
+            SamAccountName      = $sam
+            DistinguishedName   = $u.DistinguishedName
+            Kvno                = [int]$u.'msDS-KeyVersionNumber'
+            PasswordLastSet     = $pls
+            HoursSinceLastReset = $hours
+            SourceDc            = $sourceDc
+          }
+      changed_when: false
+      register: krbtgt_state
+      tags: [read, reset]
+
+    - name: Show current krbtgt state and the gap-guard verdict (read-only)
+      ansible.builtin.debug:
+        msg:
+          - "target              : {{ krbtgt_sam }} (pass {{ krbtgt_pass }})"
+          - "distinguishedName   : {{ krbtgt_state.output[0].DistinguishedName }}"
+          - "current kvno        : {{ krbtgt_state.output[0].Kvno }}"
+          - "expected kvno if run: {{ krbtgt_state.output[0].Kvno | int + 1 }}"
+          - "PasswordLastSet     : {{ krbtgt_state.output[0].PasswordLastSet }}"
+          - "hours since reset   : {{ krbtgt_state.output[0].HoursSinceLastReset }}"
+          - >-
+            gap guard (>= {{ krbtgt_min_gap_hours }}h):
+            {{ 'PASS - safe to reset'
+               if krbtgt_state.output[0].HoursSinceLastReset | float
+                  >= krbtgt_min_gap_hours | float
+               else 'BLOCK - inside the danger window' }}
+          - "reset will run this invocation: {{ krbtgt_reset_confirm | bool }}"
+      tags: [read]
+
+    # -- RESET PATH (all tasks below are reset-tagged; skipped by --tags read) --
+    - name: Confirm the operator explicitly authorized the reset
+      ansible.builtin.assert:
+        that:
+          - krbtgt_reset_confirm | bool
+        fail_msg: >-
+          REFUSING TO RESET. krbtgt_reset_confirm is not true. This is a
+          destructive, no-rollback Kerberos key rotation. Re-run with
+          -e krbtgt_reset_confirm=true inside an approved maintenance window,
+          or use --tags read for a safe read-only check.
+        success_msg: "Reset confirmed for {{ krbtgt_sam }} pass {{ krbtgt_pass }}."
+      tags: [reset]
+
+    - name: Enforce the >= {{ krbtgt_min_gap_hours }}h inter-pass gap (MaxTicketAge)
+      ansible.builtin.assert:
+        that:
+          - >-
+            krbtgt_state.output[0].HoursSinceLastReset | float
+            >= krbtgt_min_gap_hours | float
+        fail_msg: >-
+          BLOCKED: {{ krbtgt_sam }} was last reset
+          {{ krbtgt_state.output[0].HoursSinceLastReset }}h ago, which is less
+          than the {{ krbtgt_min_gap_hours }}h MaxTicketAge minimum. Running a
+          pass now would invalidate still-valid Kerberos tickets and cause a
+          domain-wide outage. WAIT until the gap is >= {{ krbtgt_min_gap_hours }}h,
+          then run the next pass.
+        success_msg: >-
+          Gap OK - last reset {{ krbtgt_state.output[0].HoursSinceLastReset }}h ago
+          (>= {{ krbtgt_min_gap_hours }}h). Proceeding with pass {{ krbtgt_pass }}.
+      tags: [reset]
+      when: krbtgt_reset_confirm | bool
+
+    - name: "PASS {{ krbtgt_pass }} - reset {{ krbtgt_sam }} (Set-ADAccountPassword -Reset; AD derives new keys + bumps kvno)"
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+          $sam = {{ krbtgt_sam | to_json }}
+          $sourceDc = "$env:COMPUTERNAME.$((Get-ADDomain).DNSRoot)"
+          $u = Get-ADUser -Identity $sam -Server $sourceDc `
+                 -Properties 'msDS-KeyVersionNumber'
+          $before = [int]$u.'msDS-KeyVersionNumber'
+
+          # Throwaway complex password. There is NO rollback for krbtgt: AD
+          # derives fresh Kerberos keys from this reset and we discard the value.
+          $bytes = New-Object 'System.Byte[]' 32
+          [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+          $pw = [System.Convert]::ToBase64String($bytes) + '9!Aa'
+          $secure = ConvertTo-SecureString $pw -AsPlainText -Force
+          $pw = $null
+
+          Set-ADAccountPassword -Identity $u.DistinguishedName -Server $sourceDc `
+            -Reset -NewPassword $secure
+          $secure = $null
+
+          $after = [int](Get-ADUser -Identity $sam -Server $sourceDc `
+                     -Properties 'msDS-KeyVersionNumber').'msDS-KeyVersionNumber'
+          if ($after -le $before) {
+            throw "kvno did not increment on $sourceDc (before=$before after=$after)"
+          }
+          [pscustomobject]@{
+            Sam        = $sam
+            SourceDc   = $sourceDc
+            Dn         = $u.DistinguishedName
+            KvnoBefore = $before
+            KvnoAfter  = $after
+          }
+      register: krbtgt_reset
+      changed_when: true
+      tags: [reset]
+      when: krbtgt_reset_confirm | bool
+
+    - name: "PASS {{ krbtgt_pass }} - force replication of {{ krbtgt_sam }} from the source DC to every DC"
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+          $sourceDc = {{ krbtgt_reset.output[0].SourceDc | to_json }}
+          $dn       = {{ krbtgt_reset.output[0].Dn | to_json }}
+          $domainDn = {{ krbtgt_base_dn | to_json }}
+          $allDcs   = @({{ krbtgt_domain_controllers | map('to_json') | join(', ') }})
+          $dests    = $allDcs | Where-Object { $_ -ne $sourceDc }
+          $log = New-Object System.Collections.Generic.List[string]
+
+          # 1) Push the single krbtgt object from the source to each other DC.
+          #    For the RODC this triggers it to pull the updated object inbound.
+          foreach ($d in $dests) {
+            $out = & repadmin /replsingleobj $d $sourceDc "$dn" 2>&1 | Out-String
+            $log.Add("replsingleobj ${d} <- ${sourceDc}:`n$out")
+            if ($LASTEXITCODE -ne 0) {
+              throw "repadmin /replsingleobj to $d failed (exit $LASTEXITCODE):`n$out"
+            }
+          }
+
+          # 2) Push all changes outward from the source across the domain NC.
+          $sync = & repadmin /syncall /AdeP $sourceDc "$domainDn" 2>&1 | Out-String
+          $syncExit = $LASTEXITCODE
+          $log.Add("syncall /AdeP ${sourceDc} ${domainDn} (exit ${syncExit}):`n$sync")
+
+          [pscustomobject]@{
+            SourceDc     = $sourceDc
+            Destinations = $dests
+            SyncAllExit  = $syncExit
+            Log          = ($log -join "`n---`n")
+          }
+      register: krbtgt_replication
+      changed_when: false
+      tags: [reset]
+      when: krbtgt_reset_confirm | bool
+
+    - name: "PASS {{ krbtgt_pass }} - VERIFY new kvno converged on dc1, rhonda AND dns01 (throw if any lags)"
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+          $sam      = {{ krbtgt_sam | to_json }}
+          $expected = {{ krbtgt_reset.output[0].KvnoAfter | int }}
+          $dcs      = @({{ krbtgt_domain_controllers | map('to_json') | join(', ') }})
+
+          $rows = foreach ($d in $dcs) {
+            try {
+              $k = [int](Get-ADUser -Identity $sam -Server $d `
+                     -Properties 'msDS-KeyVersionNumber').'msDS-KeyVersionNumber'
+            } catch {
+              $k = -1
+            }
+            [pscustomobject]@{ Dc = $d; Kvno = $k; Converged = ($k -eq $expected) }
+          }
+
+          $lag = @($rows | Where-Object { -not $_.Converged })
+          if ($lag.Count -gt 0) {
+            $detail = ($lag | ForEach-Object { "$($_.Dc)=kvno $($_.Kvno)" }) -join ', '
+            throw ("krbtgt '$sam' kvno has NOT converged to $expected on: " +
+                   "$detail. Do NOT run the next pass until every DC " +
+                   "(dc1, rhonda, dns01) reports kvno $expected.")
+          }
+          [pscustomobject]@{
+            Sam          = $sam
+            ExpectedKvno = $expected
+            PerDc        = $rows
+            Converged    = $true
+          }
+      register: krbtgt_verify
+      changed_when: false
+      retries: 6
+      delay: 20
+      until: krbtgt_verify is succeeded
+      tags: [reset]
+      when: krbtgt_reset_confirm | bool
+
+    - name: "PASS {{ krbtgt_pass }} - result summary"
+      ansible.builtin.debug:
+        msg:
+          - "target            : {{ krbtgt_sam }} (pass {{ krbtgt_pass }})"
+          - "kvno              : {{ krbtgt_reset.output[0].KvnoBefore }} -> {{ krbtgt_reset.output[0].KvnoAfter }} (converged on all DCs)"
+          - "replication source: {{ krbtgt_reset.output[0].SourceDc }}"
+          - "syncall exit code : {{ krbtgt_replication.output[0].SyncAllExit }}"
+          - >-
+            NEXT: if this was pass 1, WAIT >= {{ krbtgt_min_gap_hours }}h
+            (MaxTicketAge) before running pass 2. If this was pass 2, this key's
+            rotation is complete.
+      tags: [reset]
+      when: krbtgt_reset_confirm | bool
