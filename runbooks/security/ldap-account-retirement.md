@@ -233,11 +233,11 @@ DC=myrobertson,DC=net
 ├── OU=Endpoints                  janice, bobo
 └── OU=Service Accounts
     ├── OU=Bind                   read-only directory binds; Vault-rotated
-    │     svc-vault-ldap, svc-nextcloud-ldap, svc-nextcloud-ldap-stg,
+    │     svc-vault-ldap, svc-nextcloud-ldap, svc-nextcloud-stg,
     │     svc-pve-ldap, svc-pbs-ldap, svc-authelia-ldap (interim),
     │     keycloak-ldap
     └── OU=Automation             write-capable or elevated
-          svc-vault-ldapmgr-bind, svc-tf-adcs, svc-tf-dnsupdate,
+          svc-vault-ldapmgr, svc-tf-adcs, svc-tf-dnsupdate,
           svc-ansible-ad, svc-ansible-win, svc-syno-admin, svc-syno-repl,
           netsvc
 ```
@@ -279,12 +279,12 @@ Rotation column: **V-LDAP** = Vault LDAP secrets engine static role;
 |---|---|---|---|---|---|
 | `svc-vault-ldap` | conventional | Vault `ldap/` auth method | `GG-Directory-Bind-Read` only | **V-AUTH, 8h** | Read the user/group attributes in `CN=Users` and `OU=Family`. Cannot authenticate as anyone — Vault re-binds as the user itself. Cannot write. Cannot log on to any host. |
 | `svc-nextcloud-ldap` | conventional | Nextcloud prod (both deployments) | `GG-Directory-Bind-Read` only | **V-LDAP, 8h** | Same read set. Nothing else. |
-| `svc-nextcloud-ldap-stg` | conventional | Nextcloud staging | `GG-Directory-Bind-Read` only | **V-LDAP, 8h** | Same read set. Nothing else. Separate from prod so staging can be revoked independently. |
+| `svc-nextcloud-stg` | conventional | Nextcloud staging | `GG-Directory-Bind-Read` only | **V-LDAP, 8h** | Same read set. Nothing else. Separate from prod so staging can be revoked independently. |
 | `svc-pve-ldap` | conventional | Proxmox VE realm `myrobertson` | `GG-Directory-Bind-Read` only | **V-LDAP, 24h** | Same read set. Cannot log into Proxmox — the realm bind is not a Proxmox user. |
 | `svc-pbs-ldap` | conventional | PBS realm `myrobertson.net` | `GG-Directory-Bind-Read` only | **V-LDAP, 24h** | Same read set. Note the value is duplicated into the PBS DR archive; see §7. |
 | `svc-authelia-ldap` | conventional | Authelia prod + staging (**interim**) | `GG-Directory-Bind-Read` only | manual / 90d | Same read set. Delete when Authelia is decommissioned. |
 | `keycloak-ldap` *(existing, rescoped)* | conventional | Keycloak user federation | `GG-Directory-Bind-Read`; **plus** `Reset Password` + `Change Password` + write `pwdLastSet` on descendant `user` objects of `OU=Family` **only if `editMode` stays `WRITABLE`** | **V-LDAP, 24h** | Read set, **plus the ability to reset the password of any user in `OU=Family`** (today: `stella`). If `editMode` is set to `READ_ONLY`, the write delegation is dropped entirely and the blast radius collapses to read-only. **This is the single highest-value decision in the design** — see §4.1. |
-| `svc-vault-ldapmgr-bind` | conventional | Vault LDAP secrets engine `ldap/config` binddn | `Reset Password` extended right + write `pwdLastSet` on descendant `user` objects of **`OU=Bind` only** | `vault write -f ldap/rotate-root`, 8h | Can reset the password of the seven read-only bind accounts, i.e. can become any of them. Net effect is still **directory read only**. Cannot reach `OU=Automation`, cannot reach human or admin accounts, cannot log on anywhere. |
+| `svc-vault-ldapmgr` | conventional | Vault LDAP secrets engine `ldap/config` binddn | `Reset Password` extended right + write `pwdLastSet` on descendant `user` objects of **`OU=Bind` only** | `vault write -f ldap/rotate-root`, 8h | Can reset the password of the seven read-only bind accounts, i.e. can become any of them. Net effect is still **directory read only**. Cannot reach `OU=Automation`, cannot reach human or admin accounts, cannot log on anywhere. |
 | `svc-tf-adcs` | conventional | Terraform `microsoftadcs` | Read + `Enroll` on the two named certificate templates; Request Certificates on the CA. No directory write, no group. | **V-LDAP, 8h** | Can request certificates from those two templates. Because those templates issue a **subordinate CA certificate** for Vault PKI, an attacker could mint a CA trusted by the estate. **This is the highest-value new account.** See §4.2. |
 | `svc-tf-dnsupdate` | conventional | Terraform `dns` (GSSAPI) | `Create Child`/`Delete Child` for `dnsNode` and `Write Property` `dnsRecord` on the `myrobertson.net` zone object. **Explicitly not DnsAdmins.** | **V-LDAP, 8h** | Can create, modify and delete DNS records in the `myrobertson.net` zone → can hijack any internal name, redirect SSO, and satisfy DNS-01 certificate challenges. Significant, but bounded to one zone and confers no code execution on a DC (which DnsAdmins does). |
 | `svc-ansible-ad` | conventional | `provision_domain_accounts.yml`, `provision_service_account_identities.yml` | `Create Child`/`Delete Child` for `user`, `group`, `organizationalUnit`; `Generic Read`/`Generic Write` on descendants; `Write DACL` on `OU=Family` and `OU=Service Accounts` | **V-LDAP, 8h** | Full control of `OU=Family` and `OU=Service Accounts`, including the ability to grant itself more on those OUs. Can therefore become any bind account. **Cannot** touch `CN=Users`, so it cannot reach `rich`, `roy`, `Administrator` or any privileged group. Net effect: directory read plus control of family and service identities. |
@@ -543,9 +543,9 @@ foreach ($scope in $scopes) {
 
 # --- Vault LDAP secrets engine manager, scoped to the bind OU only ---------
 dsacls "OU=Bind,OU=Service Accounts,DC=myrobertson,DC=net" /I:S `
-  /G "MYROBERTSON\svc-vault-ldapmgr-bind:CA;Reset Password;user"
+  /G "MYROBERTSON\svc-vault-ldapmgr:CA;Reset Password;user"
 dsacls "OU=Bind,OU=Service Accounts,DC=myrobertson,DC=net" /I:S `
-  /G "MYROBERTSON\svc-vault-ldapmgr-bind:WP;pwdLastSet;user"
+  /G "MYROBERTSON\svc-vault-ldapmgr:WP;pwdLastSet;user"
 
 # --- Keycloak write-back, ONLY if editMode stays WRITABLE (see 4.1) --------
 dsacls "OU=Family,DC=myrobertson,DC=net" /I:S `
@@ -713,7 +713,7 @@ export VAULT_ADDR=https://vault.myrobertson.net:8200
 vault secrets enable -path=ldap ldap
 
 vault write ldap/config \
-  binddn='CN=svc-vault-ldapmgr-bind,OU=Bind,OU=Service Accounts,DC=myrobertson,DC=net' \
+  binddn='CN=svc-vault-ldapmgr,OU=Bind,OU=Service Accounts,DC=myrobertson,DC=net' \
   bindpass=- \
   url='ldaps://dc1.myrobertson.net,ldaps://rhonda.myrobertson.net' \
   userdn='OU=Bind,OU=Service Accounts,DC=myrobertson,DC=net' \
@@ -831,7 +831,7 @@ Not a uniform number. What I would actually run:
 | Identity | Recommended | Why |
 |---|---|---|
 | `svc-vault-ldap` | **8h** | Native Vault self-rotation, no driver, no restart, no propagation. Free. |
-| `svc-vault-ldapmgr-bind` | **8h** | `ldap/rotate-root`, internal to Vault. Free. |
+| `svc-vault-ldapmgr` | **8h** | `ldap/rotate-root`, internal to Vault. Free. |
 | `svc-ansible-win` | **8h** | Tier-0. Read from Vault per run, nothing persists. The shortest window matters most here and costs nothing. |
 | `svc-ansible-ad` | **8h** | Same mechanism, no cost. |
 | `svc-tf-adcs` | **8h** | High blast radius (§4.2), read per apply, no cost. |
