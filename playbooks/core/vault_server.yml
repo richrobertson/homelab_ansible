@@ -174,10 +174,25 @@
             tls_key_file  = "{{ vault_tls_key_file }}"
             tls_disable_client_certs = true
           {% endif %}
+
+            # Allow Prometheus to read /v1/sys/metrics without a token. This
+            # listener is reachable only on the internal VLAN and the scrape is
+            # over TLS; without this, the metrics endpoint requires auth.
+            telemetry {
+              unauthenticated_metrics_access = true
+            }
           }
 
           api_addr = "{{ vault_api_addr }}"
           cluster_addr = "{{ vault_cluster_addr }}"
+
+          # Prometheus telemetry sink. Without it, /v1/sys/metrics?format=prometheus
+          # returns HTTP 400 "prometheus is not enabled". Requires a Vault restart
+          # to take effect. Resolves VaultMetricsMissing.
+          telemetry {
+            prometheus_retention_time = "24h"
+            disable_hostname = true
+          }
       notify: Restart Vault
 
     - name: Write Vault unseal script
