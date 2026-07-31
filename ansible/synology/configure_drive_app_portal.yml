@@ -1,0 +1,192 @@
+---
+# Serve the Synology Drive web app directly at its own domain
+# (https://drive.myrobertson.com) instead of landing on the DSM desktop, by
+# configuring the DSM "Login Portal -> Applications" (Application Portal)
+# feature over the Synology API. This is normally set by hand in the GUI; here
+# it is codified so the record is reproducible and idempotent.
+#
+# Mechanism (discovered read-only on kermit, DSM 7):
+#   * The Application Portal is the SYNO.Core.AppPortal API (entry.cgi).
+#   * Assigning a customized domain (`fqdn`) to an application makes DSM's
+#     nginx emit a `server_name <fqdn>` vhost on 80/443 that `include`s that
+#     app's location conf (conf.d/.server.syno-app-portal.SynologyDrive.conf).
+#     A request with Host: <fqdn> then opens the app (the DSM login page with
+#     launchApp=<id>) rather than the default_server (`server_name _` = the
+#     plain DSM desktop). Verified: curl -H 'Host: drive.myrobertson.com'
+#     https://<nas>/ returns launchApp=SYNO.SDS.SheetStation.Application.
+#
+# Exact API call this playbook makes (the whole change):
+#   synowebapi --exec api=SYNO.Core.AppPortal method=set version=2 \
+#       id=<drive app-portal id> fqdn=drive.myrobertson.com
+#
+# Notes / gotchas:
+#   * On this NAS the "Synology Drive" application-portal id is
+#     SYNO.SDS.SheetStation.Application (NOT SYNO.SDS.Drive.Application, which
+#     returns error 4101). The id is resolved dynamically by display name so
+#     the playbook stays correct across DSM versions; override with
+#     synology_drive_app_portal_id if ever needed.
+#   * Only `id` and `fqdn` are sent. The customized-domain vhost hardcodes
+#     listen 80 / listen 443, so passing http_port=80/https_port=443 collides
+#     with the DSM system ports and fails with error 4105 (those params belong
+#     to the separate "HTTP/HTTPS port" access method, not the domain method).
+#   * `enable_redirect` in the list/get output is a *different* feature (it is
+#     not the domain flag) and is intentionally left untouched.
+#
+# TLS / fronting (already handled elsewhere, out of scope here):
+#   * drive.myrobertson.com resolves to the shared gateway (Model A split-DNS,
+#     PR #26); the gateway fronts it to this NAS.
+#   * The drive.myrobertson.com leaf cert is kept in DSM's default store by
+#     ansible/synology/sync_drive_certificate.yml. When the domain portal is
+#     created DSM binds its 443 vhost to the currently-assigned cert (the
+#     drive.myrobertson.com leaf).
+#
+# Connection + become use the local svc-syno-ssh account, password from Vault
+# (same pattern as configure_keycloak_sso.yml). Requires VAULT_ADDR /
+# VAULT_TOKEN in the environment (VAULT_CACERT for the internal CA; on macOS
+# also OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES).
+#
+# Run:
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/synology/configure_drive_app_portal.yml --limit kermit.myrobertson.net
+#
+# Revert (remove the domain portal; drive.myrobertson.com goes back to the DSM
+# desktop):
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/synology/configure_drive_app_portal.yml --limit kermit.myrobertson.net \
+#     -e synology_drive_app_portal_state=absent
+- name: Configure DSM Application Portal for Synology Drive
+  hosts: "{{ synology_drive_app_portal_group | default('synology_snapshot_replication_nas') }}"
+  gather_facts: false
+  become: true
+  vars:
+    # Connection identity (scoped to this playbook so other synology plays are
+    # unaffected). Sourced from Vault, never stored in the repo.
+    ansible_user: svc-syno-ssh
+    ansible_password: >-
+      {{ lookup('community.hashi_vault.vault_kv2_get',
+                'synology/dsm-admin/local-ssh-account',
+                engine_mount_point='secret').secret.password }}
+    ansible_become_password: "{{ ansible_password }}"
+
+    # Only these hosts get the Drive domain portal, even if the play targets a
+    # wider group. kermit is the NAS that serves drive.myrobertson.com.
+    synology_drive_app_portal_hosts:
+      - kermit.myrobertson.net
+    # The application whose portal we manage, matched by DSM display name.
+    synology_drive_app_portal_display_name: "Synology Drive"
+    # The domain the app is served at.
+    synology_drive_app_portal_fqdn: drive.myrobertson.com
+    # Force a specific app-portal id; empty string = resolve by display name.
+    synology_drive_app_portal_id: ""
+    # present -> serve at the domain; absent -> clear the domain portal.
+    synology_drive_app_portal_state: present
+
+  tasks:
+    - name: Require the Vault environment
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'VAULT_ADDR') | length > 0
+          - lookup('env', 'VAULT_TOKEN') | length > 0
+        fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running.
+      run_once: true
+      delegate_to: localhost
+      become: false
+
+    - name: Skip hosts not selected for the Drive domain portal
+      ansible.builtin.meta: end_host
+      when: inventory_hostname not in synology_drive_app_portal_hosts
+
+    - name: Compute the desired fqdn and the set argument for the target state
+      ansible.builtin.set_fact:
+        # Normalised desired value used for idempotency/verify ('' == no domain).
+        synology_drive_app_portal_desired_fqdn: >-
+          {{ synology_drive_app_portal_fqdn
+             if synology_drive_app_portal_state == 'present' else '' }}
+        # The literal fqdn= argument passed to synowebapi. DSM clears the domain
+        # only when fqdn is JSON null (an empty string is rejected: error 4100).
+        synology_drive_app_portal_fqdn_arg: >-
+          {{ ('fqdn=' ~ synology_drive_app_portal_fqdn)
+             if synology_drive_app_portal_state == 'present' else 'fqdn=null' }}
+
+    - name: List Application Portal records
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.AppPortal method=list version=2 2>/dev/null | grep -v '^\[Line'
+      register: synology_drive_app_portal_list
+      changed_when: false
+      failed_when: '''"success" : true'' not in synology_drive_app_portal_list.stdout'
+
+    - name: Resolve the Synology Drive application-portal id
+      ansible.builtin.set_fact:
+        synology_drive_app_portal_resolved_id: >-
+          {{ synology_drive_app_portal_id
+             if (synology_drive_app_portal_id | length > 0)
+             else ((synology_drive_app_portal_list.stdout | from_json).data.portal
+                   | selectattr('display_name', 'equalto',
+                                synology_drive_app_portal_display_name)
+                   | map(attribute='id') | first) }}
+
+    - name: Require exactly one resolved application-portal id
+      ansible.builtin.assert:
+        that:
+          - synology_drive_app_portal_resolved_id | length > 0
+        fail_msg: >-
+          Could not resolve an Application Portal id for display name
+          '{{ synology_drive_app_portal_display_name }}'.
+
+    - name: Read the current Application Portal record for Synology Drive
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.AppPortal method=get version=2
+        id={{ synology_drive_app_portal_resolved_id | quote }}
+        2>/dev/null | grep -v '^\[Line'
+      register: synology_drive_app_portal_current
+      changed_when: false
+      failed_when: '''"success" : true'' not in synology_drive_app_portal_current.stdout'
+
+    - name: Record the current fqdn
+      ansible.builtin.set_fact:
+        # fqdn may be JSON null (no domain) -> normalise to '' with default(_, true).
+        synology_drive_app_portal_current_fqdn: >-
+          {{ (synology_drive_app_portal_current.stdout | from_json).data.fqdn
+             | default('', true) }}
+
+    - name: Apply the desired customized domain for Synology Drive
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.AppPortal method=set version=2
+        id={{ synology_drive_app_portal_resolved_id | quote }}
+        {{ synology_drive_app_portal_fqdn_arg }}
+        2>/dev/null | grep -v '^\[Line'
+      register: synology_drive_app_portal_set
+      when: >-
+        synology_drive_app_portal_current_fqdn
+        != synology_drive_app_portal_desired_fqdn
+      changed_when: synology_drive_app_portal_set is not skipped
+      failed_when:
+        - synology_drive_app_portal_set is not skipped
+        - '''"success" : true'' not in synology_drive_app_portal_set.stdout'
+
+    - name: Re-read the Application Portal record to verify
+      ansible.builtin.raw: >-
+        /usr/syno/bin/synowebapi --exec
+        api=SYNO.Core.AppPortal method=get version=2
+        id={{ synology_drive_app_portal_resolved_id | quote }}
+        2>/dev/null | grep -v '^\[Line'
+      register: synology_drive_app_portal_verify
+      changed_when: false
+      failed_when: '''"success" : true'' not in synology_drive_app_portal_verify.stdout'
+
+    - name: Assert the record now matches the desired domain
+      ansible.builtin.assert:
+        that:
+          - >-
+            (synology_drive_app_portal_verify.stdout | from_json).data.fqdn
+            | default('', true) == synology_drive_app_portal_desired_fqdn
+        success_msg: >-
+          Synology Drive Application Portal id
+          {{ synology_drive_app_portal_resolved_id }} fqdn =
+          '{{ synology_drive_app_portal_desired_fqdn }}'.
+        fail_msg: >-
+          Application Portal fqdn did not converge to
+          '{{ synology_drive_app_portal_desired_fqdn }}'.
