@@ -295,11 +295,57 @@ Rotation column: **V-LDAP** = Vault LDAP secrets engine static role;
 
 | Identity | Action | Why | Blast radius before → after |
 |---|---|---|---|
-| `svc-syno-repl` | Remove `GG-Synology-Snapshot-Replication` from `Domain Admins`. Remove from `Backup Operators`. Move to `OU=Automation`. Remove `DONT_EXPIRE_PASSWORD`. Rotate via V-LDAP. | Snapshot replication between two Synology NAS does not require any AD privilege beyond authenticating; DSM enforces share ACLs itself. | Domain Admin → directory read plus DSM share access |
+| `svc-syno-repl` | **Done 2026-07-29, and the consumer has since been migrated off this account — see the correction below.** Removed `GG-Synology-Snapshot-Replication` from `Domain Admins`; removed from `Backup Operators`. Still to do: move to `OU=Automation`, remove `DONT_EXPIRE_PASSWORD`, rotate via V-LDAP. | ~~Snapshot replication between two Synology NAS does not require any AD privilege beyond authenticating; DSM enforces share ACLs itself.~~ **This was wrong — see below.** | Domain Admin → directory read; no longer used by replication |
 | `svc-syno-admin` | Move to `OU=Automation`. Remove `DONT_EXPIRE_PASSWORD`. Rotate via V-LDAP. Already `adminCount=0`. | Already close to correct. | DSM administrator → unchanged, but now rotating |
 | `netsvc` | **Remove from `DnsAdmins`.** Keep `DnsUpdateProxy` if it is the DHCP dynamic-DNS registration credential — confirm first. Move to `OU=Automation`. Remove `DONT_EXPIRE_PASSWORD`. | `DnsAdmins` is a privilege-escalation path to SYSTEM on a DC. `DnsUpdateProxy` is the correct group for DHCP DNS registration and is not privileged. | SYSTEM on a domain controller → DNS record ownership only |
 | `synbackup` | **Verify dead, then delete.** Last logon 2024-01-23. If genuinely needed, remove from `Backup Operators` and give it explicitly delegated backup rights on the specific hosts. | Backup Operators can read `NTDS.dit`; it is Tier-0. An account unused for 918 days should not hold it. | Tier-0 → none |
 | `rich`, `roy` | Remove `DONT_EXPIRE_PASSWORD` (roadmap Workstream 1). Consider `Protected Users`. | Human Domain Admins should follow the domain password policy. | — |
+
+#### Correction (2026-08-02): Snapshot Replication DOES require privilege
+
+The `svc-syno-repl` row above originally justified de-privileging with
+"Snapshot replication between two Synology NAS does not require any AD
+privilege beyond authenticating; DSM enforces share ACLs itself."
+
+**That is false, and acting on it caused a three-day DR outage.** The
+de-privileging ran at 2026-07-29 23:59. Ninety seconds later, at the
+2026-07-30 00:00 scheduled run, 14 replication plans began failing with
+`no remote permission` and did not recover until 2026-08-02. Successful
+syncs on `scooter` fell from 16/day to 2/day. Nothing alerted, because the
+exporter read `plan_status` — a stored field that stays `normal` through a
+failed run.
+
+Evidence that it is privilege and not authentication:
+
+- DSM returns **402 "denied permission"** for the account, not 400 "no such
+  account or incorrect password". The credential is valid; the account is
+  refused.
+- The account was still in DSM's local `administrators` group and still in
+  its domain user cache throughout, so this is not identity resolution.
+- Re-adding `Backup Operators` alone was tested and did **not** restore
+  replication, so the load-bearing grant was the `Domain Admins` nesting.
+
+DSM's Snapshot Replication *partner API* (port 5010) requires
+administrative privilege to establish the connection. Share ACLs govern
+what is replicated, not whether the partner connection may be made at all.
+
+**The de-privileging was still the right call.** The error was assuming it
+had no consumer. The consumer has since been moved off AD entirely:
+replication plans now authenticate as a *local* DSM account, which is not
+subject to AD group evaluation — see
+`ansible/synology/repoint_snapshot_replication_credentials.yml`. Both NAS
+now hold zero DSM credentials referencing `svc-syno-repl`, and the Vault
+secret `secret/synology/snapshot-replication/ad-service-account` is
+annotated `status=superseded`.
+
+Note also that Synology's own documentation never states that domain
+accounts are supported for the replication pairing — every reference says
+only "administrator account". A local DSM account is the safer default.
+
+**Generalisable lesson for the rest of this runbook: verify the consumer,
+do not reason about it.** Every "does not require privilege" claim in the
+tables above is a hypothesis until someone has watched the consumer work
+without it.
 
 ### 4.1 The Keycloak decision
 
