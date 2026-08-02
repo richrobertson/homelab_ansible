@@ -10,7 +10,10 @@
     pbs_encrypted_datastore: pbs-b2
     pbs_encrypted_server: 10.0.0.87
     pbs_encrypted_username: root@pam
-    pbs_encrypted_fingerprint: "F1:11:5D:F7:5A:E5:71:E9:98:5E:CA:3C:44:6D:99:6E:50:21:4A:8E:F4:0E:E4:CA:93:93:56:06:0B:A6:3E:E3"
+    # PBS's proxy cert is Vault-rotated, so this pin drifts on every rotation.
+    # It is used only when first creating the storage; ongoing sync is handled
+    # by pbs_repin_storage_fingerprints.yml. Value = live PBS cert 2026-07-29.
+    pbs_encrypted_fingerprint: "A2:F9:EE:AC:FB:87:2E:3B:4E:29:AE:C8:7C:16:17:D1:D4:D4:13:0D:91:69:D6:D3:E9:87:74:0C:E5:93:C9:E2"
     pbs_encrypted_vault_path: secret/proxmox/pbs/prod/client-encryption/pbs-b2-encrypted
     pbs_encrypted_backup_job_id: non-k8s-r2-encrypted-nightly
     pbs_encrypted_backup_schedule: "mon,tue,wed,thu,fri,sat,sun 05:30"
