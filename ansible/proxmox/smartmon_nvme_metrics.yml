@@ -1,0 +1,119 @@
+---
+# Makes the packaged SMART textfile collector actually fire on NVMe-only hosts.
+#
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/smartmon_nvme_metrics.yml
+#
+# Background: prometheus-node-exporter-collectors ships
+# /usr/lib/systemd/system/prometheus-node-exporter-smartmon.timer with
+#
+#     ConditionPathExistsGlob=|/dev/sd*
+#     ConditionPathExistsGlob=|/dev/hd*
+#     # TODO: Figure out if NVMe returns usable metrics through smartmon.sh.
+#     #ConditionPathExistsGlob=|/dev/nvme*
+#
+# pve3/pve4/pve5 are NVMe-only, so the trigger condition group never matches,
+# systemd logs "skipped, no trigger condition checks were met", and the timer
+# silently never runs. smartmon.prom then freezes at whatever the last manual
+# run produced -- which is what fired ProxmoxHostSMARTDataStale for all six
+# devices at the same instant on 2026-07-31.
+#
+# This drop-in ORs NVMe into the existing trigger conditions. It is additive
+# (systemd appends to the condition list) and survives package upgrades, unlike
+# editing the shipped unit.
+#
+# Scope note: for NVMe, smartmon.sh reports smart_available=0 / smart_enabled=0
+# and emits only a coarse smartmon_device_smart_healthy. The richer per-device
+# telemetry comes from prometheus-node-exporter-nvme.timer (nvme.prom), which
+# was unaffected and feeds ProxmoxHostNVMeCriticalWarning,
+# ProxmoxHostNVMeSpareBelowThreshold and ProxmoxHostNVMeWearHigh. This playbook
+# restores a redundant belt-and-braces check, not the primary one.
+#
+# Pairs with the alert rules in
+# homelab_flux/infrastructure/configs/proxmox-host-alerts.yaml
+# (ProxmoxHostSMARTDataStale, ProxmoxHostDiskSMARTFailure).
+
+- name: Run the packaged SMART collector on NVMe-only Proxmox hosts
+  hosts: "{{ smartmon_nvme_target_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    smartmon_nvme_unit: prometheus-node-exporter-smartmon.timer
+    smartmon_nvme_dropin_dir: /etc/systemd/system/prometheus-node-exporter-smartmon.timer.d
+
+  tasks:
+    - name: Ensure the packaged SMART collector is installed
+      ansible.builtin.stat:
+        path: /usr/share/prometheus-node-exporter-collectors/smartmon.sh
+      register: smartmon_nvme_script
+
+    - name: Require the prometheus-node-exporter-collectors package
+      ansible.builtin.assert:
+        that:
+          - smartmon_nvme_script.stat.exists
+        fail_msg: >-
+          smartmon.sh is missing on {{ inventory_hostname }}; install the
+          prometheus-node-exporter-collectors package before running this play.
+
+    - name: Ensure the timer drop-in directory exists
+      ansible.builtin.file:
+        path: "{{ smartmon_nvme_dropin_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Allow the SMART timer to trigger on NVMe devices
+      ansible.builtin.copy:
+        dest: "{{ smartmon_nvme_dropin_dir }}/nvme.conf"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by ansible/proxmox/smartmon_nvme_metrics.yml -- do not edit.
+          # The shipped unit only triggers on /dev/sd*|/dev/hd*, so on NVMe-only
+          # hosts the timer never fires and smartmon.prom goes stale.
+          [Unit]
+          ConditionPathExistsGlob=|/dev/nvme*
+      notify: Restart the SMART collector timer
+
+    - name: Enable the SMART collector timer
+      ansible.builtin.systemd_service:
+        name: "{{ smartmon_nvme_unit }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Confirm the trigger conditions now match
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "{{ smartmon_nvme_unit }}"
+          - --property=ConditionResult
+          - --value
+      register: smartmon_nvme_condition
+      changed_when: false
+
+    - name: Fail if the timer still cannot trigger
+      ansible.builtin.assert:
+        that:
+          - smartmon_nvme_condition.stdout | trim == "yes"
+        fail_msg: >-
+          {{ smartmon_nvme_unit }} still reports
+          ConditionResult={{ smartmon_nvme_condition.stdout | trim }} on
+          {{ inventory_hostname }}; SMART metrics will keep going stale.
+
+    - name: Run the collector once so metrics are fresh immediately
+      ansible.builtin.systemd_service:
+        name: prometheus-node-exporter-smartmon.service
+        state: started
+      changed_when: true
+
+  handlers:
+    - name: Restart the SMART collector timer
+      ansible.builtin.systemd_service:
+        name: "{{ smartmon_nvme_unit }}"
+        state: restarted
+        daemon_reload: true
