@@ -49,7 +49,11 @@
         - { name: NetBackup, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
         - { name: NetBackup-1, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
         - { name: Time Machine Folder, policy_name: retain_by_adv, hourly: 0, daily: 7, weekly: 2, monthly: 1, yearly: 1, retain_all_days: 1, minimum: 5 }
-        - { name: Vault, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
+        # kermit's `Vault` share was empty and was removed on 2026-08-01 along
+        # with its dangling replication task (tokenless, stuck in
+        # permission_error). The live ~745G dataset is `Vault-1`, which
+        # replicates to scooter's `Vault`. Do not re-add `Vault` here: the
+        # "Ensure configured shares exist" task below fails on a missing share.
         - { name: Vault-1, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
         - { name: docker, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30 }
         - { name: homes, policy_name: retain_by_adv, hourly: 0, daily: 30, weekly: 12, monthly: 12, yearly: 2, retain_all_days: 7, minimum: 30, trigger_hour: 0 }

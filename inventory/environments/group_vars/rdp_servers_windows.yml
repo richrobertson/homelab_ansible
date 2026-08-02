@@ -1,0 +1,10 @@
+---
+# WinRM password for the domain Windows hosts, sourced from Vault at runtime so no
+# credential is ever stored in the repo or passed on a command line. This is the
+# ldap@myrobertson.net bootstrap account (Domain Admin) used to provision the
+# least-privilege service identities; after ldap@ retirement, repoint vault_path
+# to the svc-ansible-win Tier-0 automation account.
+#
+# Requires VAULT_ADDR + VAULT_TOKEN in the environment (ANSIBLE_HASHI_VAULT_CA_CERT
+# for the internal CA). See runbooks/security/ldap-account-retirement.md.
+ansible_password: "{{ lookup('community.hashi_vault.vault_kv2_get', 'windows/domain/ldap', engine_mount_point='secret').secret.password }}"
