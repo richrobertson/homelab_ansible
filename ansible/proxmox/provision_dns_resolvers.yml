@@ -7,8 +7,16 @@
 # (192.168.1.1) as its resolver, which serves LAN/DHCP names but NOT the internal
 # PowerDNS/AD zone. It therefore could not resolve vault.myrobertson.net, and its
 # Vault-Agent certificate renewal (pbs_provision_certificate.yml) failed. The pve
-# nodes already use the AD DNS servers (192.168.1.244/.245); this codifies that
+# nodes already use the AD DNS servers (dns01/rhonda); this codifies that
 # same config for the whole family so the fix is reproducible, not a one-off.
+#
+# The nameserver list is written in inventory order, and resolv.conf is tried in
+# that order, so a dead entry costs every lookup a full resolver timeout before
+# it falls back. These are literals rather than inventory lookups because the AD
+# hosts are grouped by Windows role, not by "is a resolver" — so when dns01 moved
+# 192.168.1.244 -> .101 the inventory was updated (see dhcp_partner_windows in
+# inventory/environments/production.ini) and this list was not, leaving pbs and
+# pve4 stalling ~3s on every DNS lookup. Cross-check both when a DC is renumbered.
 #
 # resolv.conf on these hosts is a plain static file (no systemd-resolved, no DHCP
 # management), so a templated file is the correct, durable mechanism. The play
@@ -27,7 +35,7 @@
   vars:
     proxmox_dns_search: myrobertson.net
     proxmox_dns_nameservers:
-      - 192.168.1.244
+      - 192.168.1.101
       - 192.168.1.245
     proxmox_dns_probe_name: vault.myrobertson.net
   tasks:
@@ -61,3 +69,34 @@
       changed_when: false
       register: proxmox_dns_probe
       failed_when: proxmox_dns_probe.rc != 0
+
+    # getent above only proves *some* resolver in the list answered; it succeeds
+    # via fallback even when the first one is dead, which is precisely how the
+    # stale .244 stayed invisible here for as long as it did. Probe each entry
+    # individually so a dead resolver fails the play instead of silently
+    # costing every lookup a timeout. /dev/tcp rather than dig, to avoid
+    # depending on dnsutils being installed on every host in the group.
+    - name: Check every configured resolver answers on port 53
+      ansible.builtin.shell:
+        cmd: 'cat < /dev/null > /dev/tcp/{{ item }}/53'
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+      # Read-only probe, so run it under --check too; otherwise the assert below
+      # sees an empty result set and "passes" without having tested anything.
+      check_mode: false
+      register: proxmox_dns_reachable
+      loop: "{{ proxmox_dns_nameservers }}"
+
+    - name: Require every configured resolver to be reachable
+      ansible.builtin.assert:
+        that:
+          - proxmox_dns_reachable.results | rejectattr('rc', 'equalto', 0) | list | length == 0
+        fail_msg: >-
+          Unreachable resolver(s) on {{ inventory_hostname }}:
+          {{ proxmox_dns_reachable.results | rejectattr('rc', 'equalto', 0)
+             | map(attribute='item') | join(', ') }}.
+          Every entry in proxmox_dns_nameservers must be live — a dead one adds a
+          full resolver timeout to each lookup that falls through to it.
+        success_msg: >-
+          All {{ proxmox_dns_nameservers | length }} configured resolvers answered.
