@@ -233,11 +233,11 @@ DC=myrobertson,DC=net
 ├── OU=Endpoints                  janice, bobo
 └── OU=Service Accounts
     ├── OU=Bind                   read-only directory binds; Vault-rotated
-    │     svc-vault-ldap, svc-nextcloud-ldap, svc-nextcloud-ldap-stg,
+    │     svc-vault-ldap, svc-nextcloud-ldap, svc-nextcloud-stg,
     │     svc-pve-ldap, svc-pbs-ldap, svc-authelia-ldap (interim),
     │     keycloak-ldap
     └── OU=Automation             write-capable or elevated
-          svc-vault-ldapmgr-bind, svc-tf-adcs, svc-tf-dnsupdate,
+          svc-vault-ldapmgr, svc-tf-adcs, svc-tf-dnsupdate,
           svc-ansible-ad, svc-ansible-win, svc-syno-admin, svc-syno-repl,
           netsvc
 ```
@@ -279,12 +279,12 @@ Rotation column: **V-LDAP** = Vault LDAP secrets engine static role;
 |---|---|---|---|---|---|
 | `svc-vault-ldap` | conventional | Vault `ldap/` auth method | `GG-Directory-Bind-Read` only | **V-AUTH, 8h** | Read the user/group attributes in `CN=Users` and `OU=Family`. Cannot authenticate as anyone — Vault re-binds as the user itself. Cannot write. Cannot log on to any host. |
 | `svc-nextcloud-ldap` | conventional | Nextcloud prod (both deployments) | `GG-Directory-Bind-Read` only | **V-LDAP, 8h** | Same read set. Nothing else. |
-| `svc-nextcloud-ldap-stg` | conventional | Nextcloud staging | `GG-Directory-Bind-Read` only | **V-LDAP, 8h** | Same read set. Nothing else. Separate from prod so staging can be revoked independently. |
+| `svc-nextcloud-stg` | conventional | Nextcloud staging | `GG-Directory-Bind-Read` only | **V-LDAP, 8h** | Same read set. Nothing else. Separate from prod so staging can be revoked independently. |
 | `svc-pve-ldap` | conventional | Proxmox VE realm `myrobertson` | `GG-Directory-Bind-Read` only | **V-LDAP, 24h** | Same read set. Cannot log into Proxmox — the realm bind is not a Proxmox user. |
 | `svc-pbs-ldap` | conventional | PBS realm `myrobertson.net` | `GG-Directory-Bind-Read` only | **V-LDAP, 24h** | Same read set. Note the value is duplicated into the PBS DR archive; see §7. |
 | `svc-authelia-ldap` | conventional | Authelia prod + staging (**interim**) | `GG-Directory-Bind-Read` only | manual / 90d | Same read set. Delete when Authelia is decommissioned. |
 | `keycloak-ldap` *(existing, rescoped)* | conventional | Keycloak user federation | `GG-Directory-Bind-Read`; **plus** `Reset Password` + `Change Password` + write `pwdLastSet` on descendant `user` objects of `OU=Family` **only if `editMode` stays `WRITABLE`** | **V-LDAP, 24h** | Read set, **plus the ability to reset the password of any user in `OU=Family`** (today: `stella`). If `editMode` is set to `READ_ONLY`, the write delegation is dropped entirely and the blast radius collapses to read-only. **This is the single highest-value decision in the design** — see §4.1. |
-| `svc-vault-ldapmgr-bind` | conventional | Vault LDAP secrets engine `ldap/config` binddn | `Reset Password` extended right + write `pwdLastSet` on descendant `user` objects of **`OU=Bind` only** | `vault write -f ldap/rotate-root`, 8h | Can reset the password of the seven read-only bind accounts, i.e. can become any of them. Net effect is still **directory read only**. Cannot reach `OU=Automation`, cannot reach human or admin accounts, cannot log on anywhere. |
+| `svc-vault-ldapmgr` | conventional | Vault LDAP secrets engine `ldap/config` binddn | `Reset Password` extended right + write `pwdLastSet` on descendant `user` objects of **`OU=Bind` only** | `vault write -f ldap/rotate-root`, 8h | Can reset the password of the seven read-only bind accounts, i.e. can become any of them. Net effect is still **directory read only**. Cannot reach `OU=Automation`, cannot reach human or admin accounts, cannot log on anywhere. |
 | `svc-tf-adcs` | conventional | Terraform `microsoftadcs` | Read + `Enroll` on the two named certificate templates; Request Certificates on the CA. No directory write, no group. | **V-LDAP, 8h** | Can request certificates from those two templates. Because those templates issue a **subordinate CA certificate** for Vault PKI, an attacker could mint a CA trusted by the estate. **This is the highest-value new account.** See §4.2. |
 | `svc-tf-dnsupdate` | conventional | Terraform `dns` (GSSAPI) | `Create Child`/`Delete Child` for `dnsNode` and `Write Property` `dnsRecord` on the `myrobertson.net` zone object. **Explicitly not DnsAdmins.** | **V-LDAP, 8h** | Can create, modify and delete DNS records in the `myrobertson.net` zone → can hijack any internal name, redirect SSO, and satisfy DNS-01 certificate challenges. Significant, but bounded to one zone and confers no code execution on a DC (which DnsAdmins does). |
 | `svc-ansible-ad` | conventional | `provision_domain_accounts.yml`, `provision_service_account_identities.yml` | `Create Child`/`Delete Child` for `user`, `group`, `organizationalUnit`; `Generic Read`/`Generic Write` on descendants; `Write DACL` on `OU=Family` and `OU=Service Accounts` | **V-LDAP, 8h** | Full control of `OU=Family` and `OU=Service Accounts`, including the ability to grant itself more on those OUs. Can therefore become any bind account. **Cannot** touch `CN=Users`, so it cannot reach `rich`, `roy`, `Administrator` or any privileged group. Net effect: directory read plus control of family and service identities. |
@@ -295,11 +295,57 @@ Rotation column: **V-LDAP** = Vault LDAP secrets engine static role;
 
 | Identity | Action | Why | Blast radius before → after |
 |---|---|---|---|
-| `svc-syno-repl` | Remove `GG-Synology-Snapshot-Replication` from `Domain Admins`. Remove from `Backup Operators`. Move to `OU=Automation`. Remove `DONT_EXPIRE_PASSWORD`. Rotate via V-LDAP. | Snapshot replication between two Synology NAS does not require any AD privilege beyond authenticating; DSM enforces share ACLs itself. | Domain Admin → directory read plus DSM share access |
+| `svc-syno-repl` | **Done 2026-07-29, and the consumer has since been migrated off this account — see the correction below.** Removed `GG-Synology-Snapshot-Replication` from `Domain Admins`; removed from `Backup Operators`. Still to do: move to `OU=Automation`, remove `DONT_EXPIRE_PASSWORD`, rotate via V-LDAP. | ~~Snapshot replication between two Synology NAS does not require any AD privilege beyond authenticating; DSM enforces share ACLs itself.~~ **This was wrong — see below.** | Domain Admin → directory read; no longer used by replication |
 | `svc-syno-admin` | Move to `OU=Automation`. Remove `DONT_EXPIRE_PASSWORD`. Rotate via V-LDAP. Already `adminCount=0`. | Already close to correct. | DSM administrator → unchanged, but now rotating |
 | `netsvc` | **Remove from `DnsAdmins`.** Keep `DnsUpdateProxy` if it is the DHCP dynamic-DNS registration credential — confirm first. Move to `OU=Automation`. Remove `DONT_EXPIRE_PASSWORD`. | `DnsAdmins` is a privilege-escalation path to SYSTEM on a DC. `DnsUpdateProxy` is the correct group for DHCP DNS registration and is not privileged. | SYSTEM on a domain controller → DNS record ownership only |
 | `synbackup` | **Verify dead, then delete.** Last logon 2024-01-23. If genuinely needed, remove from `Backup Operators` and give it explicitly delegated backup rights on the specific hosts. | Backup Operators can read `NTDS.dit`; it is Tier-0. An account unused for 918 days should not hold it. | Tier-0 → none |
 | `rich`, `roy` | Remove `DONT_EXPIRE_PASSWORD` (roadmap Workstream 1). Consider `Protected Users`. | Human Domain Admins should follow the domain password policy. | — |
+
+#### Correction (2026-08-02): Snapshot Replication DOES require privilege
+
+The `svc-syno-repl` row above originally justified de-privileging with
+"Snapshot replication between two Synology NAS does not require any AD
+privilege beyond authenticating; DSM enforces share ACLs itself."
+
+**That is false, and acting on it caused a three-day DR outage.** The
+de-privileging ran at 2026-07-29 23:59. Ninety seconds later, at the
+2026-07-30 00:00 scheduled run, 14 replication plans began failing with
+`no remote permission` and did not recover until 2026-08-02. Successful
+syncs on `scooter` fell from 16/day to 2/day. Nothing alerted, because the
+exporter read `plan_status` — a stored field that stays `normal` through a
+failed run.
+
+Evidence that it is privilege and not authentication:
+
+- DSM returns **402 "denied permission"** for the account, not 400 "no such
+  account or incorrect password". The credential is valid; the account is
+  refused.
+- The account was still in DSM's local `administrators` group and still in
+  its domain user cache throughout, so this is not identity resolution.
+- Re-adding `Backup Operators` alone was tested and did **not** restore
+  replication, so the load-bearing grant was the `Domain Admins` nesting.
+
+DSM's Snapshot Replication *partner API* (port 5010) requires
+administrative privilege to establish the connection. Share ACLs govern
+what is replicated, not whether the partner connection may be made at all.
+
+**The de-privileging was still the right call.** The error was assuming it
+had no consumer. The consumer has since been moved off AD entirely:
+replication plans now authenticate as a *local* DSM account, which is not
+subject to AD group evaluation — see
+`ansible/synology/repoint_snapshot_replication_credentials.yml`. Both NAS
+now hold zero DSM credentials referencing `svc-syno-repl`, and the Vault
+secret `secret/synology/snapshot-replication/ad-service-account` is
+annotated `status=superseded`.
+
+Note also that Synology's own documentation never states that domain
+accounts are supported for the replication pairing — every reference says
+only "administrator account". A local DSM account is the safer default.
+
+**Generalisable lesson for the rest of this runbook: verify the consumer,
+do not reason about it.** Every "does not require privilege" claim in the
+tables above is a hypothesis until someone has watched the consumer work
+without it.
 
 ### 4.1 The Keycloak decision
 
@@ -543,9 +589,9 @@ foreach ($scope in $scopes) {
 
 # --- Vault LDAP secrets engine manager, scoped to the bind OU only ---------
 dsacls "OU=Bind,OU=Service Accounts,DC=myrobertson,DC=net" /I:S `
-  /G "MYROBERTSON\svc-vault-ldapmgr-bind:CA;Reset Password;user"
+  /G "MYROBERTSON\svc-vault-ldapmgr:CA;Reset Password;user"
 dsacls "OU=Bind,OU=Service Accounts,DC=myrobertson,DC=net" /I:S `
-  /G "MYROBERTSON\svc-vault-ldapmgr-bind:WP;pwdLastSet;user"
+  /G "MYROBERTSON\svc-vault-ldapmgr:WP;pwdLastSet;user"
 
 # --- Keycloak write-back, ONLY if editMode stays WRITABLE (see 4.1) --------
 dsacls "OU=Family,DC=myrobertson,DC=net" /I:S `
@@ -713,7 +759,7 @@ export VAULT_ADDR=https://vault.myrobertson.net:8200
 vault secrets enable -path=ldap ldap
 
 vault write ldap/config \
-  binddn='CN=svc-vault-ldapmgr-bind,OU=Bind,OU=Service Accounts,DC=myrobertson,DC=net' \
+  binddn='CN=svc-vault-ldapmgr,OU=Automation,OU=Service Accounts,DC=myrobertson,DC=net' \
   bindpass=- \
   url='ldaps://dc1.myrobertson.net,ldaps://rhonda.myrobertson.net' \
   userdn='OU=Bind,OU=Service Accounts,DC=myrobertson,DC=net' \
@@ -831,7 +877,7 @@ Not a uniform number. What I would actually run:
 | Identity | Recommended | Why |
 |---|---|---|
 | `svc-vault-ldap` | **8h** | Native Vault self-rotation, no driver, no restart, no propagation. Free. |
-| `svc-vault-ldapmgr-bind` | **8h** | `ldap/rotate-root`, internal to Vault. Free. |
+| `svc-vault-ldapmgr` | **8h** | `ldap/rotate-root`, internal to Vault. Free. |
 | `svc-ansible-win` | **8h** | Tier-0. Read from Vault per run, nothing persists. The shortest window matters most here and costs nothing. |
 | `svc-ansible-ad` | **8h** | Same mechanism, no cost. |
 | `svc-tf-adcs` | **8h** | High blast radius (§4.2), read per apply, no cost. |

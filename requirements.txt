@@ -1,0 +1,32 @@
+# Python packages the Ansible controller needs, beyond ansible itself.
+#
+#   pip install -r requirements.txt      # into whatever venv runs ansible-playbook
+#
+# These are not optional extras. Without them, playbooks fail at connection or
+# lookup time with import errors that do not name this file, which is how an
+# afternoon disappears:
+#
+#   pywinrm  - the connection plugin for every Windows host. Absent, ANY play
+#              targeting domain_controllers_windows, dhcp_servers_windows or
+#              rdp_member_servers_windows dies with
+#              "winrm or requests is not installed: No module named 'winrm'"
+#              before running a single task.
+#
+#   hvac     - required by community.hashi_vault. This became mandatory for all
+#              Windows plays when inventory/environments/group_vars/
+#              rdp_servers_windows.yml started sourcing ansible_password from
+#              Vault via vault_kv2_get, so a missing hvac now breaks the
+#              CONNECTION, not just the plays that read secrets themselves.
+#              provision_service_account_identities.yml also uses it directly.
+#
+# playbooks/core/powerdns_servers.yml installs hvac inline at runtime. That
+# predates the group_vars change and only helps that one play; it is not a
+# substitute for having these present on the controller.
+#
+# macOS note: Ansible forking under the system Python can abort with
+# "objc[...]: +[NSNumber initialize] may have been in progress ... Crashing
+# instead" / "A worker was found in a dead state". Export
+# OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES for the run.
+
+pywinrm
+hvac
