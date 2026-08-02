@@ -41,9 +41,6 @@
   vars:
     smartmon_nvme_unit: prometheus-node-exporter-smartmon.timer
     smartmon_nvme_dropin_dir: /etc/systemd/system/prometheus-node-exporter-smartmon.timer.d
-    # Matches the other collectors so everything lands where node_exporter is
-    # already reading (--collector.textfile.directory).
-    smartmon_nvme_textfile_dir: /var/lib/prometheus/node-exporter
 
   tasks:
     - name: Ensure the packaged SMART collector is installed

@@ -74,12 +74,20 @@
     # via fallback even when the first one is dead, which is precisely how the
     # stale .244 stayed invisible here for as long as it did. Probe each entry
     # individually so a dead resolver fails the play instead of silently
-    # costing every lookup a timeout. /dev/tcp rather than dig, to avoid
-    # depending on dnsutils being installed on every host in the group.
+    # costing every lookup a timeout.
+    #
+    # wait_for rather than dig, to avoid depending on dnsutils being installed
+    # on every host in the group, and rather than a bash /dev/tcp redirect,
+    # which has no timeout: a blackholed resolver (SYNs dropped rather than
+    # refused) would hang the play for the kernel's full SYN retry window per
+    # nameserver instead of failing fast.
     - name: Check every configured resolver answers on port 53
-      ansible.builtin.shell:
-        cmd: 'cat < /dev/null > /dev/tcp/{{ item }}/53'
-        executable: /bin/bash
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: 53
+        connect_timeout: 2
+        timeout: 3
+        state: started
       changed_when: false
       failed_when: false
       # Read-only probe, so run it under --check too; otherwise the assert below
@@ -91,10 +99,10 @@
     - name: Require every configured resolver to be reachable
       ansible.builtin.assert:
         that:
-          - proxmox_dns_reachable.results | rejectattr('rc', 'equalto', 0) | list | length == 0
+          - proxmox_dns_reachable.results | selectattr('failed') | list | length == 0
         fail_msg: >-
           Unreachable resolver(s) on {{ inventory_hostname }}:
-          {{ proxmox_dns_reachable.results | rejectattr('rc', 'equalto', 0)
+          {{ proxmox_dns_reachable.results | selectattr('failed')
              | map(attribute='item') | join(', ') }}.
           Every entry in proxmox_dns_nameservers must be live — a dead one adds a
           full resolver timeout to each lookup that falls through to it.
