@@ -224,22 +224,93 @@
       delegate_to: localhost
       changed_when: true
 
+    # param() block, not $Args. win_powershell only binds `parameters:` to
+    # declared parameters; without a param() block they bind to nothing and
+    # $Args is empty, so Set-ADAccountPassword runs with a null identity. With
+    # no_log on the task that surfaces as a censored failure with no reason,
+    # which is the same trap this repo already hit once when no_log hid a safety
+    # gate's own error.
+    #
+    # So: catch inside PowerShell and return a sanitised string instead of
+    # throwing. The task itself cannot fail, and the assert below - which is NOT
+    # no_log - reports the actual reason. AD errors do not echo the password, so
+    # the message is safe to print.
     - name: Set the password on the admin account
       ansible.windows.win_powershell:
         script: |
+          param([string]$Username, [string]$Password)
           $ErrorActionPreference = 'Stop'
-          $username = $Args[0]
-          $password = $Args[1]
-          Set-ADAccountPassword -Identity $username -Reset `
-            -NewPassword (ConvertTo-SecureString $password -AsPlainText -Force)
+          Import-Module ActiveDirectory
+          try {
+            Set-ADAccountPassword -Identity $Username -Reset `
+              -NewPassword (ConvertTo-SecureString $Password -AsPlainText -Force)
+            "SET-OK $Username"
+          } catch {
+            "SET-FAILED $Username : " + $_.Exception.Message
+          }
         parameters:
-          Args:
-            - "{{ item.admin }}"
-            - "{{ caps_generated[item.admin] }}"
+          Username: "{{ item.admin }}"
+          Password: "{{ caps_generated[item.admin] }}"
       loop: "{{ caps_pairs }}"
       loop_control:
         label: "{{ item.admin }}"
       when: caps_generated is defined and item.admin in caps_generated
+      register: caps_set
+      no_log: true
+
+    # Deliberately not no_log: it reports only the sanitised strings above.
+    - name: Require every password write to have succeeded
+      ansible.builtin.assert:
+        that:
+          - (caps_set.results | default([]))
+            | rejectattr('skipped', 'defined')
+            | map(attribute='output') | flatten
+            | select('search', 'SET-FAILED') | list | length == 0
+        fail_msg: >-
+          One or more admin passwords could not be set:
+          {{ (caps_set.results | default([])) | rejectattr('skipped', 'defined')
+             | map(attribute='output') | flatten
+             | select('search', 'SET-FAILED') | list | join(' | ') }}
+          Vault already holds the generated password, so Vault and AD now
+          disagree for those accounts; re-run once the cause is fixed and the
+          Vault value will be replaced.
+        success_msg: >-
+          {{ (caps_set.results | default([])) | rejectattr('skipped', 'defined')
+             | map(attribute='output') | flatten | join('; ') }}
+
+    # An account that already had a password when this run started - a re-run
+    # after a partial failure, or a password set by hand - still has to be
+    # validated before phase 2 will act on it, so read it back out of Vault.
+    # Vault is the record of what the password is supposed to be; if it does not
+    # authenticate, that divergence is precisely what needs surfacing.
+    - name: Read the stored password for admin accounts that already had one
+      ansible.builtin.command:
+        cmd: >-
+          vault kv get -mount=secret -field=password {{ item.vault_path }}
+      loop: "{{ caps_pairs }}"
+      loop_control:
+        label: "{{ item.admin }}"
+      when:
+        - caps_state[item.admin].has_password | default(false)
+        - item.admin not in (caps_generated | default({}))
+      register: caps_stored
+      failed_when: false
+      changed_when: false
+      no_log: true
+      delegate_to: localhost
+
+    - name: Assemble the password to validate with, per admin account
+      ansible.builtin.set_fact:
+        caps_password: >-
+          {{ (caps_generated | default({}))
+             | combine(dict((caps_stored.results | default([]))
+                            | rejectattr('skipped', 'defined')
+                            | selectattr('rc', 'equalto', 0)
+                            | map(attribute='item.admin')
+                            | zip((caps_stored.results | default([]))
+                                  | rejectattr('skipped', 'defined')
+                                  | selectattr('rc', 'equalto', 0)
+                                  | map(attribute='stdout')))) }}
       no_log: true
 
     # Proving the credential works is what licenses phase 2. Set-ADAccountPassword
@@ -249,36 +320,41 @@
     - name: Verify the admin account can actually authenticate
       ansible.windows.win_powershell:
         script: |
+          param([string]$Domain, [string]$Username, [string]$Password)
           $ErrorActionPreference = 'Stop'
           Add-Type -AssemblyName System.DirectoryServices.AccountManagement
           $ctx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext(
-                   [System.DirectoryServices.AccountManagement.ContextType]::Domain, $Args[0])
-          if ($ctx.ValidateCredentials($Args[1], $Args[2])) { 'VALIDATED' } else { 'REJECTED' }
+                   [System.DirectoryServices.AccountManagement.ContextType]::Domain, $Domain)
+          # Emits the bare verdict, not "VALIDATED <name>". `output` is a list,
+          # so the selectattr below matches elements exactly; appending the
+          # username made every comparison miss and reported nothing as proven.
+          if ($ctx.ValidateCredentials($Username, $Password)) { 'VALIDATED' }
+          else { 'REJECTED' }
         parameters:
-          Args:
-            - "{{ caps_domain }}"
-            - "{{ item.admin }}"
-            - "{{ caps_generated[item.admin] }}"
+          Domain: "{{ caps_domain }}"
+          Username: "{{ item.admin }}"
+          Password: "{{ caps_password[item.admin] }}"
       loop: "{{ caps_pairs }}"
       loop_control:
         label: "{{ item.admin }}"
-      when: caps_generated is defined and item.admin in caps_generated
+      when: item.admin in (caps_password | default({}))
       register: caps_validate
       no_log: true
 
-    - name: Record which admin accounts are now proven usable
+    # Proven means "authenticated during THIS run", nothing weaker. An earlier
+    # version also treated "already has a password in AD" as proven, so a re-run
+    # after a partial failure would have marked both accounts usable without
+    # testing either - and phase 2 demotes on the strength of this list. An
+    # account that has a password which nobody can successfully present is
+    # exactly the state this play exists to fix, so it must never count.
+    - name: Record which admin accounts are proven usable
       ansible.builtin.set_fact:
         caps_proven: >-
           {{ (caps_validate.results | default([]))
              | rejectattr('skipped', 'defined')
              | selectattr('output', 'defined')
              | selectattr('output', 'contains', 'VALIDATED')
-             | map(attribute='item.admin') | list
-             + (caps_pairs | selectattr('admin', 'in',
-                 (caps_state | dict2items
-                  | selectattr('value.has_password', 'equalto', true)
-                  | map(attribute='key') | list))
-                | map(attribute='admin') | list) }}
+             | map(attribute='item.admin') | list }}
 
     - name: Show which admin accounts are usable
       ansible.builtin.debug:
@@ -298,16 +374,17 @@
     - name: Remove standing privilege from each daily driver whose counterpart is proven
       ansible.windows.win_powershell:
         script: |
+          param([string]$Group, [string]$Member)
           $ErrorActionPreference = 'Stop'
-          Remove-ADGroupMember -Identity $Args[0] -Members $Args[1] -Confirm:$false
-          $still = (Get-ADGroupMember -Identity $Args[0] -Recursive |
-                    Select-Object -ExpandProperty SamAccountName) -contains $Args[1]
-          if ($still) { throw "$($Args[1]) is still a member of $($Args[0])" }
-          "REMOVED $($Args[1]) from $($Args[0])"
+          Import-Module ActiveDirectory
+          Remove-ADGroupMember -Identity $Group -Members $Member -Confirm:$false
+          $still = (Get-ADGroupMember -Identity $Group -Recursive |
+                    Select-Object -ExpandProperty SamAccountName) -contains $Member
+          if ($still) { throw "$Member is still a member of $Group" }
+          "REMOVED $Member from $Group"
         parameters:
-          Args:
-            - "{{ caps_privileged_group }}"
-            - "{{ item.daily }}"
+          Group: "{{ caps_privileged_group }}"
+          Member: "{{ item.daily }}"
       loop: "{{ caps_pairs }}"
       loop_control:
         label: "{{ item.daily }}"
