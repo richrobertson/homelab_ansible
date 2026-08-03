@@ -7,4 +7,4 @@
 #
 # Requires VAULT_ADDR + VAULT_TOKEN in the environment (ANSIBLE_HASHI_VAULT_CA_CERT
 # for the internal CA). See runbooks/security/ldap-account-retirement.md.
-ansible_password: "{{ lookup('community.hashi_vault.vault_kv2_get', 'windows/domain/ldap', engine_mount_point='secret').secret.password }}"
+ansible_password: "{{ lookup('community.hashi_vault.vault_kv2_get', 'windows/domain/service-accounts/svc-ansible-win', engine_mount_point='secret').secret.password }}"
