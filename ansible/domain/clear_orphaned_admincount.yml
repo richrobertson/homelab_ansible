@@ -1,0 +1,201 @@
+---
+# Clear AdminSDHolder residue from accounts that are no longer privileged.
+#
+#   # report only - lists what would be cleaned and why. Default.
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/domain/clear_orphaned_admincount.yml
+#
+#   # actually clean
+#   ansible-playbook ... -e oac_confirm=true
+#
+# WHY THIS EXISTS
+#
+# Removing an account from a protected group does NOT undo what AdminSDHolder
+# did to it. SDProp stamps adminCount=1 and replaces the object's ACL with the
+# AdminSDHolder template, with inheritance DISABLED. Neither is reverted on
+# removal - AD leaves both in place indefinitely.
+#
+# After demoting rich and roy out of Domain Admins and Administrators, both
+# still read adminCount=1 and still carry AdminSDHolder ACLs with inheritance
+# off. So they hold no privilege but keep its access-control residue, and
+# delegation or GPO-driven ACLs that rely on inheritance do not reach them.
+#
+# This is also why ADPrivilegedAccountPasswordNeverExpires kept firing for two
+# accounts that are, by group membership, no longer privileged at all.
+#
+# SDProp re-stamps adminCount only for CURRENT members of protected groups, so
+# for an account that has genuinely left, this cleanup is durable rather than
+# something SDProp will undo an hour later.
+#
+# SELECTION IS COMPUTED, NOT HARDCODED
+#
+# The account list is derived live: adminCount=1 AND not a member of any
+# protected group. Hardcoding names would risk clearing adminCount on an account
+# that is still privileged, which would be a real security regression rather
+# than a cleanup - the flag would say "unprotected" while the account was still
+# a Domain Admin. Anything still in a protected group is skipped by
+# construction.
+#
+# WHAT THIS DOES NOT DO
+#
+# It re-enables inheritance but PRESERVES the existing explicit ACEs
+# (SetAccessRuleProtection($false, $true)). A stricter cleanup would also strip
+# the AdminSDHolder ACEs that were converted to explicit entries, but those are
+# indistinguishable from deliberately delegated permissions once converted, and
+# removing a real delegation is worse than leaving a redundant ACE. Inheritance
+# resuming is the part that matters; nothing is deleted.
+
+- name: Clear orphaned AdminSDHolder residue
+  hosts: "{{ oac_host | default('domain_controllers_windows[0]') }}"
+  gather_facts: false
+
+  vars:
+    oac_confirm: false
+    # The groups AdminSDHolder protects. An account in ANY of these legitimately
+    # carries adminCount=1 and must never be touched here.
+    oac_protected_groups:
+      - Domain Admins
+      - Enterprise Admins
+      - Schema Admins
+      - Administrators
+      - Account Operators
+      - Backup Operators
+      - Server Operators
+      - Print Operators
+      - Replicator
+    # krbtgt and the built-ins carry adminCount by design and are never
+    # candidates even if a group lookup somehow misses them.
+    oac_never_touch:
+      - krbtgt
+      - Administrator
+      - Guest
+
+  tasks:
+    - name: Find accounts carrying AdminSDHolder residue without current privilege
+      ansible.windows.win_powershell:
+        script: |
+          param([string[]]$Protected, [string[]]$NeverTouch)
+          Import-Module ActiveDirectory
+          $privileged = New-Object System.Collections.Generic.HashSet[string] (
+            [System.StringComparer]::OrdinalIgnoreCase)
+          foreach ($g in $Protected) {
+            $members = Get-ADGroupMember -Identity $g -Recursive -ErrorAction SilentlyContinue
+            foreach ($m in $members) { [void]$privileged.Add($m.SamAccountName) }
+          }
+          # adminCount=1 is the residue; membership is the justification for it.
+          $candidates = Get-ADUser -LDAPFilter '(admincount=1)' -Properties adminCount,SamAccountName
+          $out = foreach ($u in $candidates) {
+            $isPriv = $privileged.Contains($u.SamAccountName)
+            $skip   = $NeverTouch -contains $u.SamAccountName
+            $acl = Get-Acl -Path ("AD:" + $u.DistinguishedName)
+            [pscustomobject]@{
+              name               = $u.SamAccountName
+              dn                 = $u.DistinguishedName
+              still_privileged   = $isPriv
+              never_touch        = $skip
+              inheritance_broken = [bool]$acl.AreAccessRulesProtected
+              orphaned           = ((-not $isPriv) -and (-not $skip))
+            }
+          }
+          $out
+        parameters:
+          Protected: "{{ oac_protected_groups }}"
+          NeverTouch: "{{ oac_never_touch }}"
+      register: oac_scan
+      changed_when: false
+      check_mode: false
+
+    - name: Summarise the scan
+      ansible.builtin.debug:
+        msg: >-
+          {{ oac_scan.output | length }} account(s) carry adminCount=1.
+          Legitimately privileged (skipped):
+          {{ oac_scan.output | selectattr('still_privileged') | map(attribute='name') | join(', ') | default('none', true) }}.
+          Never-touch (skipped):
+          {{ oac_scan.output | selectattr('never_touch') | map(attribute='name') | join(', ') | default('none', true) }}.
+          ORPHANED (would be cleaned):
+          {{ oac_scan.output | selectattr('orphaned') | map(attribute='name') | join(', ') | default('none', true) }}.
+          Inheritance currently broken on:
+          {{ oac_scan.output | selectattr('orphaned') | selectattr('inheritance_broken')
+             | map(attribute='name') | join(', ') | default('none', true) }}.
+          {{ 'REPORT ONLY - nothing will change. Re-run with -e oac_confirm=true.'
+             if not (oac_confirm | bool) else 'CONFIRMED - cleaning.' }}
+
+    - name: Stop here unless explicitly confirmed
+      ansible.builtin.meta: end_play
+      when: not (oac_confirm | bool)
+
+    - name: Clear adminCount and re-enable ACL inheritance
+      ansible.windows.win_powershell:
+        script: |
+          param([string]$Name)
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+          $u = Get-ADUser -Identity $Name -Properties adminCount
+          $path = "AD:" + $u.DistinguishedName
+          $did = @()
+          if ($null -ne $u.adminCount) {
+            Set-ADUser -Identity $Name -Clear adminCount
+            $did += 'cleared adminCount'
+          }
+          $acl = Get-Acl -Path $path
+          if ($acl.AreAccessRulesProtected) {
+            # $false = stop protecting (re-enable inheritance).
+            # $true  = keep the existing explicit ACEs rather than discarding
+            #          them. Discarding would also remove any deliberate
+            #          delegation, which is indistinguishable from AdminSDHolder
+            #          residue once SDProp has converted it to explicit.
+            $acl.SetAccessRuleProtection($false, $true)
+            Set-Acl -Path $path -AclObject $acl
+            $did += 're-enabled inheritance'
+          }
+          if ($did.Count -eq 0) { "NOOP $Name already clean" }
+          else { "CLEANED $Name : $($did -join ', ')" }
+        parameters:
+          Name: "{{ item }}"
+      loop: "{{ oac_scan.output | selectattr('orphaned') | map(attribute='name') | list }}"
+      register: oac_clean
+
+    # Re-read rather than trusting the write. adminCount is a replicated
+    # attribute and the ACL change is a separate operation; confirming both
+    # landed on the same object is the only thing that proves the cleanup.
+    - name: Verify the residue is gone
+      ansible.windows.win_powershell:
+        script: |
+          param([string[]]$Names)
+          Import-Module ActiveDirectory
+          $out = foreach ($n in $Names) {
+            $u = Get-ADUser -Identity $n -Properties adminCount
+            $acl = Get-Acl -Path ("AD:" + $u.DistinguishedName)
+            [pscustomobject]@{
+              name               = $u.SamAccountName
+              admin_count        = if ($null -eq $u.adminCount) { 'cleared' } else { [string]$u.adminCount }
+              inheritance_broken = [bool]$acl.AreAccessRulesProtected
+            }
+          }
+          $out
+        parameters:
+          Names: "{{ oac_scan.output | selectattr('orphaned') | map(attribute='name') | list }}"
+      register: oac_verify
+      changed_when: false
+      when: (oac_scan.output | selectattr('orphaned') | list | length) > 0
+
+    - name: Require every cleaned account to be clean
+      ansible.builtin.assert:
+        that:
+          - oac_verify.output | rejectattr('admin_count', 'equalto', 'cleared') | list | length == 0
+          - oac_verify.output | selectattr('inheritance_broken') | list | length == 0
+        fail_msg: >-
+          Cleanup did not fully land:
+          {{ oac_verify.output | rejectattr('admin_count', 'equalto', 'cleared')
+             | map(attribute='name') | join(', ') | default('none', true) }}
+          still carry adminCount, and
+          {{ oac_verify.output | selectattr('inheritance_broken')
+             | map(attribute='name') | join(', ') | default('none', true) }}
+          still have inheritance disabled.
+        success_msg: >-
+          {{ (oac_clean.results | default([])) | rejectattr('skipped', 'defined')
+             | map(attribute='output') | flatten | join('; ') }}.
+          Verified: adminCount cleared and inheritance re-enabled on
+          {{ oac_verify.output | map(attribute='name') | join(', ') }}.
+      when: (oac_scan.output | selectattr('orphaned') | list | length) > 0
