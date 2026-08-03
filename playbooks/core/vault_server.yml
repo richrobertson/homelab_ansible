@@ -567,10 +567,63 @@
         - "'vault.service' not in ansible_facts.services"
 
   handlers:
+    # Restarting Vault leaves it SEALED. This deployment is seal type shamir
+    # with t=3/n=5 and ha_enabled=false, so a sealed Vault is a fully down
+    # Vault, and recovering it by hand means entering three of five key shares.
+    #
+    # An unseal path already exists - vault-unseal.service, a Type=oneshot unit
+    # running {{ vault_unseal_script_path }} - but it is WantedBy
+    # multi-user.target with After=/Requires=vault.service. That wires it for
+    # BOOT only: `systemctl restart vault` does not re-trigger a completed
+    # oneshot unit, so before this change a config change here restarted Vault
+    # and left it sealed until the next reboot or a manual start.
+    #
+    # Chaining the unseal handler onto the restart closes that gap. Handlers may
+    # notify other handlers, and the notified handler must be defined after the
+    # notifier, so the ordering below is load-bearing.
     - name: Restart Vault
       ansible.builtin.systemd:
         name: vault
         state: restarted
+      notify: Unseal Vault
+
+    # state: restarted, not started - the unit is Type=oneshot and has already
+    # run to completion at boot, so `started` would be a no-op on an inactive
+    # unit and the unseal would never happen.
+    - name: Unseal Vault
+      ansible.builtin.systemd:
+        name: "{{ vault_unseal_service_name }}"
+        state: restarted
+      when: vault_manage_unseal_service | bool
+
+    - name: Verify Vault came back unsealed
+      ansible.builtin.command:
+        cmd: vault status -format=json
+      environment:
+        VAULT_ADDR: "{{ vault_unseal_addr }}"
+        VAULT_SKIP_VERIFY: "{{ vault_unseal_skip_verify | string | lower }}"
+      register: vault_post_restart_status
+      changed_when: false
+      # Vault returns exit 2 when sealed, so a non-zero rc is expected here and
+      # the assert below is what actually decides pass or fail.
+      failed_when: false
+      when: vault_manage_unseal_service | bool
+
+    # Fail loudly rather than leaving a silently sealed Vault behind. Everything
+    # Vault-backed - VSO, the VaultStaticSecrets, the credential-age collectors -
+    # breaks while it is sealed, so this must not pass quietly.
+    - name: Require Vault to be unsealed after restart
+      ansible.builtin.assert:
+        that:
+          - (vault_post_restart_status.stdout | from_json).sealed | bool == false
+        fail_msg: >-
+          Vault restarted but is still SEALED. {{ vault_unseal_service_name }}
+          did not unseal it. Vault is DOWN until three of five Shamir key shares
+          are entered. Check {{ vault_unseal_log_file }} on the host, then run
+          `systemctl start {{ vault_unseal_service_name }}` or unseal manually
+          with `vault operator unseal`.
+        success_msg: Vault is unsealed after restart.
+      when: vault_manage_unseal_service | bool
 
     - name: Restart Vault UI Cert Agent
       ansible.builtin.systemd:
