@@ -1,10 +1,24 @@
 ---
-# WinRM password for the domain Windows hosts, sourced from Vault at runtime so no
-# credential is ever stored in the repo or passed on a command line. This is the
-# ldap@myrobertson.net bootstrap account (Domain Admin) used to provision the
-# least-privilege service identities; after ldap@ retirement, repoint vault_path
-# to the svc-ansible-win Tier-0 automation account.
+# WinRM identity and password for the domain Windows hosts, sourced from Vault at
+# runtime so no credential is ever stored in the repo or passed on a command line.
+#
+# BOTH are set here on purpose. inventory/environments/production.ini is
+# gitignored - it carries per-node Vault secret-ids - so anything set only there
+# is untracked and diverges per machine. Splitting the identity and the password
+# across one tracked file and one untracked file is worse than either: a control
+# node whose local ini still reads ansible_user=ldap@myrobertson.net would pair
+# that username with svc-ansible-win's password and fail authentication for a
+# reason nobody would guess from "the specified credentials were rejected".
+#
+# Inventory group_vars/ files take precedence over [group:vars] in the ini, so
+# this value wins and the ini's ansible_user line is now redundant.
+#
+# svc-ansible-win is the Tier-0 automation identity that replaced
+# ldap@myrobertson.net - 2057 days old, never-expiring, Domain Admins - which
+# previously authenticated every WinRM run over NTLM on plain HTTP/5985. It is
+# declared in ansible/domain/vars/service_account_identities.yml.
 #
 # Requires VAULT_ADDR + VAULT_TOKEN in the environment (ANSIBLE_HASHI_VAULT_CA_CERT
 # for the internal CA). See runbooks/security/ldap-account-retirement.md.
-ansible_password: "{{ lookup('community.hashi_vault.vault_kv2_get', 'windows/domain/ldap', engine_mount_point='secret').secret.password }}"
+ansible_user: svc-ansible-win@myrobertson.net
+ansible_password: "{{ lookup('community.hashi_vault.vault_kv2_get', 'windows/domain/service-accounts/svc-ansible-win', engine_mount_point='secret').secret.password }}"
