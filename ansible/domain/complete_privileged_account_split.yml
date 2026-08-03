@@ -1,0 +1,328 @@
+---
+# Finish the privileged-access split that was started on 2026-07-30 and left
+# half-done.
+#
+#   # report only - shows what would change and why. Default.
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/domain/complete_privileged_account_split.yml
+#
+#   # phase 1 only: give the -super accounts a usable password
+#   ansible-playbook ... -e caps_confirm=true
+#
+#   # phase 2 as well: drop Domain Admins from the daily drivers
+#   ansible-playbook ... -e caps_confirm=true -e caps_demote_confirm=true
+#
+# MEASURED STATE, 2026-08-03
+#
+#   Name        Enabled PwdLastSet NeverExpire LastLogon  Created    Domain Admins
+#   rich           True 2023-11-15        True 2026-08-02 2020-11-30 yes
+#   roy            True 2023-11-15        True 2025-10-06 2020-12-14 yes
+#   rich-super     True NEVER            False NEVER      2026-07-30 yes
+#   roy-super      True NEVER            False NEVER      2026-07-30 yes
+#   Administrator  True 2025-10-06       False 2026-07-30 2020-11-30 yes
+#
+# rich-super and roy-super were created in Domain Admins as the dedicated admin
+# identities and then never given a password, so they have never been used. That
+# is why rich and roy still carry standing Domain Admins on passwords set
+# 2023-11-15 and flagged never-expiring - the split was started and abandoned,
+# and the daily drivers stayed privileged by default.
+#
+# The -super accounts are not currently a usable attack path: PasswordNotRequired
+# is False and no password has ever been set, so there is nothing to present at
+# logon. They are dead weight in Domain Admins rather than an open door. The real
+# defect is the standing privilege on the two accounts that ARE used daily.
+#
+# WHAT THIS DOES NOT DO
+#
+# It does not clear DONT_EXPIRE_PASSWORD on rich or roy. Their passwords date
+# from 2023-11-15 and the domain maxPwdAge is 42 days, so clearing that flag
+# would expire both passwords the instant it is removed - the exact failure
+# 6344161 documented ("would expire a password older than maxPwdAge the moment
+# the flag is removed - an outage"). Removing never-expires has to be paired
+# with an actual password change at a time the account holder chooses, and that
+# is a separate, human-scheduled operation.
+#
+# It does not touch Administrator. That account is the break-glass path and this
+# play asserts it remains a Domain Admin before demoting anything.
+
+- name: Complete the privileged account split
+  hosts: "{{ caps_host | default('domain_controllers_windows[0]') }}"
+  gather_facts: false
+
+  vars:
+    caps_confirm: false
+    caps_demote_confirm: false
+    caps_domain: myrobertson.net
+    caps_break_glass: Administrator
+    caps_privileged_group: Domain Admins
+
+    # daily = the account a human logs into every day and which should NOT hold
+    # standing Domain Admins. admin = its dedicated privileged counterpart.
+    caps_pairs:
+      - daily: rich
+        admin: rich-super
+        vault_path: windows/domain/users/rich-super
+      - daily: roy
+        admin: roy-super
+        vault_path: windows/domain/users/roy-super
+
+  tasks:
+    # ---------------------------------------------------------------- audit --
+    # Built as a fact first. Composing this inline in the script template mixed
+    # `+` with `|` in one Jinja expression, where the precedence is not what it
+    # looks like, and silently produced a short list - the break-glass assert
+    # then failed claiming Administrator was missing when it was simply never
+    # queried.
+    - name: Assemble the list of accounts to inspect
+      ansible.builtin.set_fact:
+        caps_all_names: >-
+          {{ (caps_pairs | map(attribute='daily') | list)
+             + (caps_pairs | map(attribute='admin') | list)
+             + [caps_break_glass] }}
+
+    - name: Read the current state of every account this play touches
+      ansible.windows.win_powershell:
+        # Names and group arrive as typed parameters rather than being templated
+        # into the script body. Rendering a PowerShell array literal from Jinja
+        # needs the quoting to survive a YAML literal block, a Jinja string
+        # escape and PowerShell parsing in that order; getting it wrong produced
+        # a script that ran cleanly and returned zero rows, which then surfaced
+        # as "Administrator is missing" rather than as a quoting error.
+        script: |
+          param([string[]]$Names, [string]$Group)
+          $members = (Get-ADGroupMember -Identity $Group -Recursive |
+                      Select-Object -ExpandProperty SamAccountName)
+          $props = @('SamAccountName','Enabled','PasswordLastSet',
+                     'PasswordNeverExpires','PasswordNotRequired','LastLogonDate')
+          $out = foreach ($n in $Names) {
+            $u = Get-ADUser -Identity $n -Properties $props -ErrorAction SilentlyContinue
+            if ($null -eq $u) { continue }
+            [pscustomobject]@{
+              name            = $u.SamAccountName
+              enabled         = [bool]$u.Enabled
+              has_password    = ($null -ne $u.PasswordLastSet)
+              never_expires   = [bool]$u.PasswordNeverExpires
+              password_not_required = [bool]$u.PasswordNotRequired
+              in_group        = ($members -contains $u.SamAccountName)
+            }
+          }
+          # Emitted as objects, not ConvertTo-Json. win_powershell deserializes
+          # pipeline output into .output as a list of dicts already, and the DC
+          # runs Windows PowerShell 5.1 where ConvertTo-Json has no -AsArray -
+          # that combination silently yields an empty .output rather than an
+          # error, which is a confusing way to get no data.
+          $out
+        parameters:
+          Names: "{{ caps_all_names }}"
+          Group: "{{ caps_privileged_group }}"
+      register: caps_state_raw
+      changed_when: false
+      check_mode: false
+
+    - name: Parse the account state
+      ansible.builtin.set_fact:
+        caps_state: >-
+          {{ dict(caps_state_raw.output | map(attribute='name')
+                  | zip(caps_state_raw.output)) }}
+
+    # Cheap to keep: when the assert below fails, the first question is always
+    # "did the query return what I think it did", and this answers it without a
+    # second run.
+    - name: Show what the directory query actually returned
+      ansible.builtin.debug:
+        msg:
+          - "queried: {{ caps_all_names }}"
+          - "returned {{ caps_state_raw.output | length }} row(s): {{ caps_state | list }}"
+
+    # The break-glass account is the reason it is safe to demote anyone. If it
+    # has lost Domain Admins or been disabled, stop before touching the only
+    # other privileged accounts that work.
+    - name: Require an intact break-glass administrator
+      ansible.builtin.assert:
+        that:
+          - caps_state[caps_break_glass] is defined
+          - caps_state[caps_break_glass].enabled
+          - caps_state[caps_break_glass].in_group
+        fail_msg: >-
+          {{ caps_break_glass }} is missing, disabled, or no longer in
+          {{ caps_privileged_group }}. Refusing to proceed: demoting the daily
+          drivers without a working break-glass account risks losing privileged
+          access to the domain entirely.
+
+    - name: Report what would change
+      ansible.builtin.debug:
+        msg: >-
+          {% for p in caps_pairs %}
+          {{ p.admin }}: enabled={{ caps_state[p.admin].enabled | default('ABSENT') }}
+          has_password={{ caps_state[p.admin].has_password | default('n/a') }}
+          in_{{ caps_privileged_group }}={{ caps_state[p.admin].in_group | default('n/a') }}
+          -> {{ 'needs a password' if not (caps_state[p.admin].has_password | default(true)) else 'already usable' }}.
+          {{ p.daily }}: in_{{ caps_privileged_group }}={{ caps_state[p.daily].in_group | default('n/a') }}
+          -> {{ 'would be demoted once ' ~ p.admin ~ ' is proven' if caps_state[p.daily].in_group | default(false) else 'already demoted' }}.
+          {% endfor %}
+          {{ 'REPORT ONLY - nothing will change. Re-run with -e caps_confirm=true.'
+             if not (caps_confirm | bool)
+             else ('CONFIRMED phase 1 (set passwords).'
+                   ~ (' CONFIRMED phase 2 (demote daily drivers).'
+                      if (caps_demote_confirm | bool) else ' Phase 2 NOT confirmed - no demotion.')) }}
+
+    - name: Stop here unless explicitly confirmed
+      ansible.builtin.meta: end_play
+      when: not (caps_confirm | bool)
+
+    # -------------------------------------------------- phase 1: make usable --
+    # Vault first, then AD. If the AD write fails the recorded password is simply
+    # unused; if AD were written first and Vault failed, a Domain Admin password
+    # would exist that nobody holds. Same ordering the svc-syno-ssh rotation
+    # should have used.
+    - name: Generate a password for each admin account that lacks one
+      ansible.builtin.set_fact:
+        caps_generated: >-
+          {{ caps_generated | default({}) | combine({
+               item.admin: (
+                 lookup('ansible.builtin.password', '/dev/null', length=1, chars='ascii_uppercase')
+                 ~ lookup('ansible.builtin.password', '/dev/null', length=1, chars='ascii_lowercase')
+                 ~ lookup('ansible.builtin.password', '/dev/null', length=1, chars='digits')
+                 ~ lookup('ansible.builtin.password', '/dev/null', length=29, chars='ascii_letters,digits')
+               ) }) }}
+      loop: "{{ caps_pairs }}"
+      loop_control:
+        label: "{{ item.admin }}"
+      when: not (caps_state[item.admin].has_password | default(true))
+      no_log: true
+      delegate_to: localhost
+
+    - name: Store the admin password in Vault before setting it in AD
+      ansible.builtin.command:
+        cmd: >-
+          vault kv put -mount=secret {{ item.vault_path }}
+          password=- username={{ item.admin }}@{{ caps_domain }}
+          managed_by=complete_privileged_account_split.yml
+          purpose=privileged-account-split
+        stdin: "{{ caps_generated[item.admin] }}"
+        stdin_add_newline: false
+      loop: "{{ caps_pairs }}"
+      loop_control:
+        label: "{{ item.admin }}"
+      when: caps_generated is defined and item.admin in caps_generated
+      no_log: true
+      delegate_to: localhost
+      changed_when: true
+
+    - name: Stamp rotation metadata so the collector does not read it as ageless
+      ansible.builtin.command:
+        cmd: >-
+          vault kv metadata put -mount=secret
+          -custom-metadata=rotated_at={{ lookup('pipe', 'date -u +%Y-%m-%d') }}
+          -custom-metadata=rotation_interval_days=90
+          -custom-metadata=owner={{ item.daily }}
+          {{ item.vault_path }}
+      loop: "{{ caps_pairs }}"
+      loop_control:
+        label: "{{ item.admin }}"
+      when: caps_generated is defined and item.admin in caps_generated
+      delegate_to: localhost
+      changed_when: true
+
+    - name: Set the password on the admin account
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          $username = $Args[0]
+          $password = $Args[1]
+          Set-ADAccountPassword -Identity $username -Reset `
+            -NewPassword (ConvertTo-SecureString $password -AsPlainText -Force)
+        parameters:
+          Args:
+            - "{{ item.admin }}"
+            - "{{ caps_generated[item.admin] }}"
+      loop: "{{ caps_pairs }}"
+      loop_control:
+        label: "{{ item.admin }}"
+      when: caps_generated is defined and item.admin in caps_generated
+      no_log: true
+
+    # Proving the credential works is what licenses phase 2. Set-ADAccountPassword
+    # succeeding only proves AD accepted the write, not that a logon with it will
+    # succeed. ValidateCredentials negotiates Kerberos/NTLM on the DC itself, so
+    # the password never crosses the network in cleartext and never reaches argv.
+    - name: Verify the admin account can actually authenticate
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+          $ctx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext(
+                   [System.DirectoryServices.AccountManagement.ContextType]::Domain, $Args[0])
+          if ($ctx.ValidateCredentials($Args[1], $Args[2])) { 'VALIDATED' } else { 'REJECTED' }
+        parameters:
+          Args:
+            - "{{ caps_domain }}"
+            - "{{ item.admin }}"
+            - "{{ caps_generated[item.admin] }}"
+      loop: "{{ caps_pairs }}"
+      loop_control:
+        label: "{{ item.admin }}"
+      when: caps_generated is defined and item.admin in caps_generated
+      register: caps_validate
+      no_log: true
+
+    - name: Record which admin accounts are now proven usable
+      ansible.builtin.set_fact:
+        caps_proven: >-
+          {{ (caps_validate.results | default([]))
+             | rejectattr('skipped', 'defined')
+             | selectattr('output', 'defined')
+             | selectattr('output', 'contains', 'VALIDATED')
+             | map(attribute='item.admin') | list
+             + (caps_pairs | selectattr('admin', 'in',
+                 (caps_state | dict2items
+                  | selectattr('value.has_password', 'equalto', true)
+                  | map(attribute='key') | list))
+                | map(attribute='admin') | list) }}
+
+    - name: Show which admin accounts are usable
+      ansible.builtin.debug:
+        msg: >-
+          Usable {{ caps_privileged_group }} accounts after phase 1:
+          {{ caps_proven | unique | join(', ') | default('none', true) }}.
+          Break-glass {{ caps_break_glass }} remains privileged.
+
+    # ------------------------------------------------ phase 2: drop standing --
+    - name: Stop before demotion unless phase 2 is separately confirmed
+      ansible.builtin.meta: end_play
+      when: not (caps_demote_confirm | bool)
+
+    # The invariant: a daily driver only loses Domain Admins if its own
+    # counterpart is proven usable in this run. Demoting rich because roy-super
+    # happens to work would be a plausible and very bad bug.
+    - name: Remove standing privilege from each daily driver whose counterpart is proven
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Remove-ADGroupMember -Identity $Args[0] -Members $Args[1] -Confirm:$false
+          $still = (Get-ADGroupMember -Identity $Args[0] -Recursive |
+                    Select-Object -ExpandProperty SamAccountName) -contains $Args[1]
+          if ($still) { throw "$($Args[1]) is still a member of $($Args[0])" }
+          "REMOVED $($Args[1]) from $($Args[0])"
+        parameters:
+          Args:
+            - "{{ caps_privileged_group }}"
+            - "{{ item.daily }}"
+      loop: "{{ caps_pairs }}"
+      loop_control:
+        label: "{{ item.daily }}"
+      when:
+        - item.admin in (caps_proven | default([]))
+        - caps_state[item.daily].in_group | default(false)
+      register: caps_demote
+
+    - name: Report the result
+      ansible.builtin.debug:
+        msg: >-
+          {{ (caps_demote.results | default([]))
+             | rejectattr('skipped', 'defined')
+             | map(attribute='output') | flatten | join('; ') | default('nothing demoted', true) }}.
+          {{ caps_break_glass }} and the -super accounts retain
+          {{ caps_privileged_group }}. Password expiry on the daily drivers is
+          deliberately unchanged - see the header for why clearing
+          DONT_EXPIRE_PASSWORD here would expire them immediately.
