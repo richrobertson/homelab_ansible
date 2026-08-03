@@ -173,6 +173,38 @@ works for certificates; extend it to passwords.
    absence of this map is why two of three rotations were abandoned. Keep it
    next to the secret, in Vault metadata or in this directory.
 
+   **Started 2026-08-03.** `ansible/proxmox/vars/secret_rotation_classes.yml`
+   classifies all 92 secrets that `VaultSecretsPastRotationInterval` fires on
+   (of 139 total; 20 are 180–365 days old, 72 are 90–180). Every one is assigned
+   a class; none is unclassified.
+
+   | Class | Count | Automatable |
+   |---|---:|---|
+   | `k8s_secret` | 30 | yes, once a non-AD consumer map exists |
+   | `restic_key` | 29 | **no — see below** |
+   | `appliance` | 13 | partial |
+   | `external_provider` | 8 | yes |
+   | `ceph_auth` | 6 | **no — see below** |
+   | `ad_account` | 3 | partial; tooling exists |
+   | `review_obsolete` | 3 | delete rather than rotate |
+
+   **The finding that matters: this alert must not be treated as a bulk
+   action.** 29 of the 92 are VolSync restic repository passwords. A restic
+   repository is encrypted with a master key held in key slots, and
+   `RESTIC_PASSWORD` unlocks a slot rather than being the key. Writing a new
+   value into Vault re-keys nothing: the next backup fails to open the
+   repository, and if the old password has been discarded, every snapshot in it
+   is unrecoverable. The correct order is `restic key add`, verify, `restic key
+   remove`, *then* Vault — the repository operation is the rotation and Vault
+   records it afterwards.
+
+   A further 6 are Ceph CSI keyrings mirroring `ceph auth` entities in the
+   external cluster, where a Vault-only write silently breaks volume
+   attach/detach cluster-wide.
+
+   So 35 of 92 would be actively destructive to rotate the obvious way, which is
+   precisely the dependency mapping this task exists to force.
+
 **Acceptance.** Postgres credentials are leased and short-lived. Every remaining
 static credential has a one-command rotation playbook and a documented consumer
 list.
