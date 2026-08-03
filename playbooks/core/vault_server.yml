@@ -59,9 +59,30 @@
       failed_when: false
       check_mode: false
 
+    # Two independent reasons to disable mlock, and the second is not optional.
+    #
+    #   1. The systemd unit does not raise LimitMEMLOCK, so Vault cannot lock
+    #      memory and would refuse to start without this. Derived, as before.
+    #   2. The storage backend is raft. Raft mmaps its BoltDB file and Vault
+    #      refuses to start on raft with mlock enabled, whatever the unit says.
+    #
+    # Only condition 1 was checked. The HashiCorp package unit DOES set
+    # LimitMEMLOCK=infinity, so the fact evaluates false, `disable_mlock = true`
+    # is never written, and flipping vault_storage_backend to raft produces a
+    # config Vault will not start with. That failure lands mid-maintenance-window
+    # with Vault already stopped and the data already migrated - the worst
+    # possible moment to discover it - which is why the migration runbook calls
+    # this out as "the one that will bite".
+    #
+    # OR-ing the raft condition in makes selecting raft sufficient on its own, so
+    # no operator has to remember to force the variable by hand under time
+    # pressure.
     - name: Set vault_disable_mlock fact
       ansible.builtin.set_fact:
-        vault_disable_mlock: '{{ (vault_systemd_unit.stdout | default("") | lower | regex_search("limitmemlock\\s*=\\s*infinity")) is none }}'
+        vault_disable_mlock: >-
+          {{ (vault_systemd_unit.stdout | default("") | lower
+              | regex_search("limitmemlock\\s*=\\s*infinity")) is none
+             or vault_storage_backend == 'raft' }}
 
     - name: Install Vault package (optional)
       ansible.builtin.package:
