@@ -54,7 +54,12 @@
     caps_demote_confirm: false
     caps_domain: myrobertson.net
     caps_break_glass: Administrator
-    caps_privileged_group: Domain Admins
+    # Every group that confers effective domain admin. Builtin Administrators is
+    # included because on a DC it is equivalent to Domain Admins - omitting it is
+    # what left rich privileged after the first demotion run.
+    caps_privileged_groups:
+      - Domain Admins
+      - Administrators
 
     # daily = the account a human logs into every day and which should NOT hold
     # standing Domain Admins. admin = its dedicated privileged counterpart.
@@ -89,21 +94,33 @@
         # a script that ran cleanly and returned zero rows, which then surfaced
         # as "Administrator is missing" rather than as a quoting error.
         script: |
-          param([string[]]$Names, [string]$Group)
-          $members = (Get-ADGroupMember -Identity $Group -Recursive |
-                      Select-Object -ExpandProperty SamAccountName)
+          param([string[]]$Names, [string[]]$Groups)
+          Import-Module ActiveDirectory
+          # Membership is resolved per group, not against one. Removing rich from
+          # Domain Admins alone left it holding builtin Administrators, which on a
+          # domain controller is equivalent privilege - so the account read as
+          # demoted while still being an admin. Whatever "privileged" means here
+          # has to be the full set, or the play reports a reduction it did not
+          # actually achieve.
+          $byGroup = @{}
+          foreach ($g in $Groups) {
+            $byGroup[$g] = @(Get-ADGroupMember -Identity $g -Recursive |
+                             Select-Object -ExpandProperty SamAccountName)
+          }
           $props = @('SamAccountName','Enabled','PasswordLastSet',
                      'PasswordNeverExpires','PasswordNotRequired','LastLogonDate')
           $out = foreach ($n in $Names) {
             $u = Get-ADUser -Identity $n -Properties $props -ErrorAction SilentlyContinue
             if ($null -eq $u) { continue }
+            $mine = @($Groups | Where-Object { $byGroup[$_] -contains $u.SamAccountName })
             [pscustomobject]@{
               name            = $u.SamAccountName
               enabled         = [bool]$u.Enabled
               has_password    = ($null -ne $u.PasswordLastSet)
               never_expires   = [bool]$u.PasswordNeverExpires
               password_not_required = [bool]$u.PasswordNotRequired
-              in_group        = ($members -contains $u.SamAccountName)
+              groups          = $mine
+              in_group        = ($mine.Count -gt 0)
             }
           }
           # Emitted as objects, not ConvertTo-Json. win_powershell deserializes
@@ -114,7 +131,7 @@
           $out
         parameters:
           Names: "{{ caps_all_names }}"
-          Group: "{{ caps_privileged_group }}"
+          Groups: "{{ caps_privileged_groups }}"
       register: caps_state_raw
       changed_when: false
       check_mode: false
@@ -145,7 +162,7 @@
           - caps_state[caps_break_glass].in_group
         fail_msg: >-
           {{ caps_break_glass }} is missing, disabled, or no longer in
-          {{ caps_privileged_group }}. Refusing to proceed: demoting the daily
+          {{ caps_privileged_groups | join(' / ') }}. Refusing to proceed: demoting the daily
           drivers without a working break-glass account risks losing privileged
           access to the domain entirely.
 
@@ -155,9 +172,9 @@
           {% for p in caps_pairs %}
           {{ p.admin }}: enabled={{ caps_state[p.admin].enabled | default('ABSENT') }}
           has_password={{ caps_state[p.admin].has_password | default('n/a') }}
-          in_{{ caps_privileged_group }}={{ caps_state[p.admin].in_group | default('n/a') }}
+          privileged_in={{ caps_state[p.admin].groups | default([]) | join('+') | default('none', true) }}
           -> {{ 'needs a password' if not (caps_state[p.admin].has_password | default(true)) else 'already usable' }}.
-          {{ p.daily }}: in_{{ caps_privileged_group }}={{ caps_state[p.daily].in_group | default('n/a') }}
+          {{ p.daily }}: privileged_in={{ caps_state[p.daily].groups | default([]) | join('+') | default('none', true) }}
           -> {{ 'would be demoted once ' ~ p.admin ~ ' is proven' if caps_state[p.daily].in_group | default(false) else 'already demoted' }}.
           {% endfor %}
           {{ 'REPORT ONLY - nothing will change. Re-run with -e caps_confirm=true.'
@@ -359,7 +376,7 @@
     - name: Show which admin accounts are usable
       ansible.builtin.debug:
         msg: >-
-          Usable {{ caps_privileged_group }} accounts after phase 1:
+          Usable privileged accounts after phase 1:
           {{ caps_proven | unique | join(', ') | default('none', true) }}.
           Break-glass {{ caps_break_glass }} remains privileged.
 
@@ -368,22 +385,39 @@
       ansible.builtin.meta: end_play
       when: not (caps_demote_confirm | bool)
 
-    # The invariant: a daily driver only loses Domain Admins if its own
-    # counterpart is proven usable in this run. Demoting rich because roy-super
-    # happens to work would be a plausible and very bad bug.
+    # The invariant: a daily driver only loses privilege if its own counterpart
+    # is proven usable in this run. Demoting rich because roy-super happens to
+    # work would be a plausible and very bad bug.
+    #
+    # Removes EVERY privileged group the account holds, in one call, and then
+    # re-reads membership to confirm none remain. The first version of this took
+    # a single group and left rich in builtin Administrators - demoted from
+    # Domain Admins while still an effective domain admin, and reported as a
+    # success. Verifying against the full set is what makes the report honest.
     - name: Remove standing privilege from each daily driver whose counterpart is proven
       ansible.windows.win_powershell:
         script: |
-          param([string]$Group, [string]$Member)
+          param([string[]]$Groups, [string]$Member)
           $ErrorActionPreference = 'Stop'
           Import-Module ActiveDirectory
-          Remove-ADGroupMember -Identity $Group -Members $Member -Confirm:$false
-          $still = (Get-ADGroupMember -Identity $Group -Recursive |
-                    Select-Object -ExpandProperty SamAccountName) -contains $Member
-          if ($still) { throw "$Member is still a member of $Group" }
-          "REMOVED $Member from $Group"
+          $removed = @()
+          foreach ($g in $Groups) {
+            $isMember = @(Get-ADGroupMember -Identity $g -Recursive |
+                          Select-Object -ExpandProperty SamAccountName) -contains $Member
+            if (-not $isMember) { continue }
+            Remove-ADGroupMember -Identity $g -Members $Member -Confirm:$false
+            $removed += $g
+          }
+          $still = @($Groups | Where-Object {
+            @(Get-ADGroupMember -Identity $_ -Recursive |
+              Select-Object -ExpandProperty SamAccountName) -contains $Member })
+          if ($still.Count -gt 0) {
+            throw "$Member still holds: $($still -join ', ')"
+          }
+          if ($removed.Count -eq 0) { "NOOP $Member held no privileged group" }
+          else { "REMOVED $Member from $($removed -join ', ')" }
         parameters:
-          Group: "{{ caps_privileged_group }}"
+          Groups: "{{ caps_privileged_groups }}"
           Member: "{{ item.daily }}"
       loop: "{{ caps_pairs }}"
       loop_control:
@@ -400,6 +434,6 @@
              | rejectattr('skipped', 'defined')
              | map(attribute='output') | flatten | join('; ') | default('nothing demoted', true) }}.
           {{ caps_break_glass }} and the -super accounts retain
-          {{ caps_privileged_group }}. Password expiry on the daily drivers is
-          deliberately unchanged - see the header for why clearing
-          DONT_EXPIRE_PASSWORD here would expire them immediately.
+          {{ caps_privileged_groups | join(' / ') }}. Password expiry on the
+          daily drivers is deliberately unchanged - see the header for why
+          clearing DONT_EXPIRE_PASSWORD here would expire them immediately.
