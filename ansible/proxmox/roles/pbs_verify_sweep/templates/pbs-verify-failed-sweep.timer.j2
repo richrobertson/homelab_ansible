@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Daily sweep for PBS snapshots left failed by transient read errors
+
+[Timer]
+OnCalendar={{ pbs_verify_sweep_on_calendar }}
+RandomizedDelaySec={{ pbs_verify_sweep_randomized_delay }}
+Persistent=true
+Unit={{ pbs_verify_sweep_unit_name }}.service
+
+[Install]
+WantedBy=timers.target

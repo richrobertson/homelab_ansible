@@ -1,0 +1,38 @@
+---
+# Install the daily sweep that re-verifies PBS snapshots left at
+# verify_state=failed by a transient object-store read error.
+#
+# Background. pbs-b2 and pbs-s3 are S3-backed datastores. Chunk fetches
+# occasionally die mid-stream ("can't verify chunk, load failed - error reading a
+# body from connection"); proxmox-s3-client already retries with exponential
+# back-off (3 tries, PBS >= 4.0.15) and exposes no knob to extend that, so a bad
+# enough blip still records a failed verification.
+#
+# The daily verify jobs run ignore-verified=true and therefore skip any snapshot
+# already carrying a verification record, failed ones included. The record only
+# ages out after outdated-after (30 days) or at the monthly ignore-verified=false
+# full pass -- so a two-minute blip can leave PBSSnapshotVerifyFailed critical for
+# weeks, and the only standing remedy re-reads the whole datastore.
+#
+# This sweep re-verifies just the affected snapshots, bounded by a per-snapshot
+# attempt budget and a per-run cap so it can never become an unbounded egress
+# bill, and refuses to touch a datastore holding quarantined .bad chunks (real
+# corruption, which must not be papered over by an automatic retry).
+#
+# Run:
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/pbs_verify_failed_sweep.yml
+#
+# Trigger a run by hand (it is safe to run any time; it defers if a verification
+# task is already active):
+#   systemctl start pbs-verify-failed-sweep.service
+#   journalctl -u pbs-verify-failed-sweep -f
+- name: Install the PBS failed-verification sweep
+  hosts: pbs_servers
+  become: true
+  gather_facts: true
+  tags:
+    - pbs
+    - pbs_verify_sweep
+  roles:
+    - role: pbs_verify_sweep

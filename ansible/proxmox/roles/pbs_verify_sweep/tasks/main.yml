@@ -1,0 +1,75 @@
+---
+- name: Validate the sweep is pointed at real datastores
+  ansible.builtin.assert:
+    that:
+      - pbs_verify_sweep_datastores | length > 0
+      - pbs_verify_sweep_datastores | selectattr('name', 'undefined') | list | length == 0
+      - pbs_verify_sweep_datastores | selectattr('path', 'undefined') | list | length == 0
+      - pbs_verify_sweep_max_attempts | int > 0
+      - pbs_verify_sweep_max_per_run | int > 0
+    fail_msg: >-
+      pbs_verify_sweep_datastores needs at least one entry with both name and
+      path, and the attempt/run budgets must be positive.
+
+- name: Confirm the PBS debug tool is present
+  ansible.builtin.stat:
+    path: /usr/sbin/proxmox-backup-debug
+  register: pbs_verify_sweep_debug_tool
+
+- name: Require the PBS debug tool
+  ansible.builtin.assert:
+    that:
+      - pbs_verify_sweep_debug_tool.stat.exists
+    fail_msg: >-
+      /usr/sbin/proxmox-backup-debug is missing. The sweep needs it both to read
+      snapshot manifests and to call the verify API -- proxmox-backup-manager has
+      no per-snapshot verify subcommand.
+
+- name: Ensure the sweep state directory exists
+  ansible.builtin.file:
+    path: "{{ pbs_verify_sweep_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install the sweep script
+  ansible.builtin.template:
+    src: pbs-verify-failed-sweep.py.j2
+    dest: "{{ pbs_verify_sweep_script }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Verify the sweep script is syntactically valid
+  ansible.builtin.command:
+    cmd: python3 -m py_compile {{ pbs_verify_sweep_script }}
+  changed_when: false
+
+- name: Install the sweep systemd service
+  ansible.builtin.template:
+    src: pbs-verify-failed-sweep.service.j2
+    dest: "/etc/systemd/system/{{ pbs_verify_sweep_unit_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install the sweep systemd timer
+  ansible.builtin.template:
+    src: pbs-verify-failed-sweep.timer.j2
+    dest: "/etc/systemd/system/{{ pbs_verify_sweep_unit_name }}.timer"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Apply pending unit changes before enabling the timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the sweep timer
+  ansible.builtin.systemd_service:
+    name: "{{ pbs_verify_sweep_unit_name }}.timer"
+    enabled: true
+    state: started
+    daemon_reload: true

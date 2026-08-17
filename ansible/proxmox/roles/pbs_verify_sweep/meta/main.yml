@@ -1,0 +1,9 @@
+---
+galaxy_info:
+  role_name: pbs_verify_sweep
+  description: >-
+    Re-verify Proxmox Backup Server snapshots that a transient object-store read
+    error left recorded as verify_state=failed.
+  license: MIT
+  min_ansible_version: "2.14"
+dependencies: []

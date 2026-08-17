@@ -1,0 +1,22 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Re-verify PBS snapshots left failed by transient object-store read errors
+Documentation=file://{{ pbs_verify_sweep_script }}
+After=proxmox-backup-proxy.service
+Wants=proxmox-backup-proxy.service
+
+[Service]
+Type=oneshot
+ExecStart={{ pbs_verify_sweep_script }}
+# Exit 1 means "something is still failed" -- an accurate outcome, not a unit
+# malfunction. PBSSnapshotVerifyFailed remains the authoritative alert for that
+# condition, so do not also surface it as a systemd unit failure.
+SuccessExitStatus=0 1
+# A single snapshot verify can run for over an hour against the object store,
+# and the script may work through several.
+TimeoutStartSec={{ (pbs_verify_sweep_timeout_seconds | int * pbs_verify_sweep_max_per_run | int) + 600 }}
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

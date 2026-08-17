@@ -1,0 +1,62 @@
+---
+# roles/pbs_verify_sweep
+#
+# Re-verify PBS snapshots that a *transient* object-store read error left
+# recorded as verify_state=failed.
+#
+# Why this exists. The S3-backed datastores (pbs-b2, pbs-s3) intermittently lose
+# a chunk fetch mid-stream -- the journal shows "can't verify chunk, load failed
+# - error reading a body from connection". proxmox-s3-client already retries
+# those with exponential back-off (3 tries, since PBS 4.0.15) and there is no
+# knob to extend it, so a bad enough blip still lands as a failed verification.
+#
+# The daily verify jobs run ignore-verified=true, which skips any snapshot that
+# already carries a verification record -- including a failed one. The record
+# only ages out via outdated-after (30 days) or the monthly ignore-verified=false
+# full pass. So a two-minute network blip leaves a *critical* alert standing for
+# up to ~30 days, and the only existing remedy is a full-datastore re-verify that
+# re-reads everything back out of the object store.
+#
+# This sweep closes that window: it re-verifies only the specific failed
+# snapshots, so a transient blip self-heals within a day at negligible egress.
+
+# --- What to sweep -----------------------------------------------------------
+# Datastores to examine. Each entry needs name + path (matching datastore.cfg).
+pbs_verify_sweep_datastores:
+  - name: pbs-b2
+    path: /mnt/datastore/pbs-b2-cache
+  - name: pbs-s3
+    path: /mnt/datastore/pbs-s3-cache
+
+# --- Safety rails ------------------------------------------------------------
+# Re-verifying costs object-store egress, so the sweep is deliberately bounded.
+#
+# Give up on a snapshot after this many sweep attempts. A snapshot that stays
+# failed across this many independent re-reads is not a transient blip; leave it
+# failed so PBSSnapshotVerifyFailed keeps firing and a human looks at it.
+pbs_verify_sweep_max_attempts: 3
+
+# Never re-verify more than this many snapshots in a single run, so a systemic
+# failure cannot turn into an unbounded egress bill.
+pbs_verify_sweep_max_per_run: 3
+
+# Abort the whole sweep if the datastore has any quarantined *.bad chunks. Those
+# mean PBS fetched the chunk and it failed its checksum -- real corruption, not a
+# transport blip. Re-reading will not fix it and must not be automated away.
+pbs_verify_sweep_abort_on_bad_chunks: true
+
+# Per-snapshot wall-clock cap for one verify call. A ~36 GiB snapshot took ~76
+# minutes against B2, so this leaves generous headroom.
+pbs_verify_sweep_timeout_seconds: 14400
+
+# --- Schedule ----------------------------------------------------------------
+# Run well clear of the daily verify jobs (pbs-s3 07:00, pbs-b2 08:15), which on
+# this host can run for several hours. The sweep also refuses to start while any
+# verification task is active, so overlap is handled defensively too.
+pbs_verify_sweep_on_calendar: "*-*-* 18:00:00"
+pbs_verify_sweep_randomized_delay: "15m"
+
+# --- On-host layout ----------------------------------------------------------
+pbs_verify_sweep_script: /usr/local/sbin/pbs-verify-failed-sweep.py
+pbs_verify_sweep_state_dir: /var/lib/pbs-verify-sweep
+pbs_verify_sweep_unit_name: pbs-verify-failed-sweep
