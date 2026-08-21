@@ -148,11 +148,40 @@ Two notes for whoever does the next one:
 The old admin key `...5KQF` is deliberately still **Active** — Nextcloud and PBS
 still use it. It can only be deleted after those two are migrated.
 
+### Step 1 — Nextcloud — NOT APPLICABLE, reclassify as `review_obsolete`
+
+**Do not create a scoped credential for this one. The consumer is dead.**
+
+Investigated 2026-08-21 before making any change:
+
+- `default/nextcloud`, the only workload referencing `nextcloud-s3-secret`, is
+  scaled to **0/0** and last changed state **2026-05-02T06:07:34Z**.
+- The bucket `homelab-prod-nextcloud` holds 2,924 objects / 8.2 GiB, and its most
+  recent object is **2026-05-02 01:14** — the same day the deployment stopped.
+- The Nextcloud that is actually running is `nextcloud/nextcloud-migration-ldap`
+  (3/3). It has **no S3 or AWS environment at all** and stores data on the
+  `nextcloud-data` PVC. It never reads this credential.
+
+So `secret/nextcloud/prod/s3` is a live copy of an admin-scoped AWS key serving a
+workload retired four months ago. Scoping it would be busywork; it should be
+retired, which also removes one of the three places the `...5KQF` key is copied.
+
+**Operator decision required before deleting anything:** the bucket still holds
+8.2 GiB from when S3 was Nextcloud's primary object storage. Confirm that content
+was migrated to the PVC (or is otherwise not needed) before removing the bucket
+or the credential. Retiring the *Vault path* is safe once the deployment is
+confirmed dead; deleting the *bucket data* is a separate, irreversible call.
+
+This is exactly the `review_obsolete` class from
+`ansible/proxmox/vars/secret_rotation_classes.yml` — "delete rather than rotate"
+— and it was sitting in the rotation list as if it needed rotating.
+
 ### Remaining
 
-- Nextcloud (`secret/nextcloud/prod/s3`) — bucket `homelab-prod-nextcloud`.
 - PBS (`/etc/proxmox-backup/s3.cfg` on the PBS VM) — bucket
-  `myrobertson-homelab-pbs`. Not VSO-managed; needs an on-host edit.
+  `myrobertson-homelab-pbs`. The only remaining *live* consumer of `...5KQF`
+  besides Terraform. Not VSO-managed; needs an on-host edit and a
+  `proxmox-backup-proxy` reload.
 - Then Terraform onto its own identity, and only then remove
   `AdministratorAccess` from `homelab`.
 
