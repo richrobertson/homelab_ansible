@@ -371,6 +371,41 @@ The decision belongs with the
 which is being planned separately. This runbook's requirement is only that the
 answer is recorded and the ACEs match it.
 
+#### ANSWER, recorded 2026-08-21: `WRITABLE` stays
+
+The test above is met — users **do** change their AD password through Keycloak —
+so the write delegation is required and the `Reset Password` ACE on `OU=Family`
+stands.
+
+Evidence, from Keycloak's own event table rather than from reasoning:
+
+| Event | When | User | Result |
+| --- | --- | --- | --- |
+| `UPDATE_PASSWORD` | 2026-08-03 16:28 | `rich` (AD-federated) | success |
+| `UPDATE_PASSWORD` | 2026-08-03 16:45 | `roy` (AD-federated) | success |
+| `UPDATE_PASSWORD_ERROR` | 2026-07-30, 2026-08-03 | `rich` | `password_rejected` |
+
+Those rejections are the ones `realm-settings-job.yaml` documents: Keycloak had
+no `passwordPolicy`, so its form accepted a password AD then refused. The policy
+added 2026-08-10 exists **because** `WRITABLE` writes straight to AD as
+`unicodePwd`. Setting `READ_ONLY` would make that work moot.
+
+**Distinguish the two flows — they are not equally load-bearing:**
+
+- **Account-console password change** (`UPDATE_PASSWORD`) — an already
+  authenticated user changing their own password. Needs no email. **This is the
+  flow in actual use and the sole justification for `WRITABLE`.**
+- **Forgot-password reset** (`RESET_PASSWORD`) — needs a delivery channel.
+  **Never used, not once.** Only **5 of 29** federated humans have an email
+  address, so 24 of them could not complete it, and there is no SMS channel.
+
+That asymmetry matters: `reset_password_allowed=true` currently exposes an
+unauthenticated forgot-password endpoint that 83% of users cannot complete and
+nobody has ever used. It is attack surface — username-validity oracle plus a
+mail trigger — bought for no capability. **Disabling it costs nothing real and
+does not touch `editMode`.** Worth doing on its own merits, separately from this
+decision.
+
 Also note the asymmetry already present: Keycloak's `usersDn` is the domain root
 while its group mapper's `groups.dn` is `cn=Users`. Narrow `usersDn` to match
 the granted scope once §5 is complete.
