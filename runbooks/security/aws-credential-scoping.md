@@ -211,15 +211,44 @@ deactivated, confirmed to fail with `InvalidClientTokenId`, and deleted.
 `homelab` now has exactly one key. Note `...BZMN` still carries
 `AdministratorAccess` — the exposure was fixed, the over-permissioning was not.
 
+### Terraform moved to its own identity, and `homelab` deleted — 2026-08-21
+
+`homelab_terraform` already existed but **also carried `AdministratorAccess`**, so
+this move separates duties rather than reducing privilege. Its key was 120 days
+old, so it was rotated rather than adopted: new key `...FOH3`, old `...DEHY`
+deactivated then deleted (it had no Kubernetes consumers). Vault
+`secret/aws/user/homelab_terraform` patched to v5, console fields preserved, and
+`~/.bash_profile` switched over — `sts get-caller-identity` now returns
+`user/homelab_terraform`.
+
+With every workload on its own scoped key, `homelab` had **no consumers left**
+(its last key use was a verification call, service `iam`). It was deleted
+outright: 1 access key, 5 inline policies, `AdministratorAccess` and
+`IAMUserChangePassword` detached, then the user removed. A full snapshot of its
+configuration was captured immediately beforehand.
+
+`secret/aws/user/homelab` was soft-deleted in Vault (recoverable with
+`vault kv undelete`). It was the estate's oldest secret at 3.7x its interval, so
+the credential-age alert loses its worst offender once the exporter next runs.
+
+**Verification limit worth recording:** a real `terraform plan` was attempted and
+failed on missing input variables (`wireguard_ec2_public_key`, `mail_domain`),
+not on credentials — those come from a tfvars file not present locally, and
+`mail_edge` has no `backend "s3"` block, taking backend config from the
+`TF_STATE_*` environment instead. So the new identity was proven against S3
+(including the state bucket), IAM, CloudWatch, SNS, Route53, Lambda, SES and EC2,
+but **not** by a green plan. Run one with real tfvars before relying on it.
+
 ### Remaining
 
-- `secret/nextcloud/prod/s3` still holds the now-deleted `...5KQF` value, and VSO
-  still syncs it to `default/nextcloud-s3-secret`. Harmless — the consuming
-  deployment is 0/0 — but it should go when that path is retired.
-- Point Terraform at its own identity (`homelab_terraform`, `...DEHY`) so the
-  workstation shell stops carrying an admin key.
-- Only then remove `AdministratorAccess` from `homelab`, after a `terraform plan`
-  proves the replacement identity is sufficient.
+- **`homelab_terraform` still holds `AdministratorAccess`.** This is now the only
+  admin identity, used deliberately for Terraform. Narrowing it to what the
+  stacks actually manage (IAM, CloudWatch, SNS, Route53, SES, VPC, S3) is the
+  next reduction, and needs a CloudTrail review to do safely.
+- `secret/nextcloud/prod/s3` still holds the deleted `...5KQF` value and VSO still
+  syncs it to `default/nextcloud-s3-secret`. Harmless — that deployment is 0/0 —
+  but it should go when the path is retired, which depends on the decision about
+  the 8.2 GiB still in `homelab-prod-nextcloud`.
 
 ## Open questions for the operator
 
