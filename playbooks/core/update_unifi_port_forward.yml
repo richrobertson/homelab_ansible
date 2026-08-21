@@ -47,6 +47,11 @@
     unifi_forward_ip_fallback: "{{ lookup('env', 'UNIFI_PORT_FORWARD_TARGET_IP_FALLBACK') | default('10.31.0.69', true) }}"
     unifi_forward_port: "{{ lookup('env', 'UNIFI_PORT_FORWARD_TARGET_PORT') | default(unifi_external_port, true) | int }}"
     unifi_port_forward_updates: "{{ [] }}"
+    # Defaults to true deliberately. The UDM Pro at 192.168.1.1 serves a
+    # self-signed certificate, so against that console every request fails TLS
+    # verification and the run dies at the login task. Export
+    # UNIFI_VALIDATE_CERTS=false for that host rather than lowering the default
+    # here, or install a trusted cert on the console.
     unifi_validate_certs: "{{ lookup('env', 'UNIFI_VALIDATE_CERTS') | default('true', true) | bool }}"
     unifi_network_api_path: "{{ lookup('env', 'UNIFI_NETWORK_API_PATH') | default('/proxy/network/api/s', true) }}"
     unifi_gateway_kube_context: "{{ lookup('env', 'UNIFI_GATEWAY_KUBE_CONTEXT') | default('admin@prod', true) }}"
@@ -165,6 +170,12 @@
       no_log: true
       when: unifi_console_credentials_present
 
+    # The session cookie has to ride in the Cookie HEADER. `cookies_string` is a
+    # RETURN value of ansible.builtin.uri, not an input parameter -- passing it
+    # as one fails the task outright with "Unsupported parameters for
+    # (ansible.legacy.uri) module: cookies_string". Every request below used to
+    # do that, so the API path could never have worked even with credentials
+    # present; combined with the missing secret it failed silently instead.
     - name: Build authenticated UniFi request headers
       ansible.builtin.set_fact:
         unifi_request_headers: >-
@@ -173,6 +184,9 @@
             | combine(
                 ({'X-CSRF-Token': unifi_login.x_csrf_token}
                  if (unifi_login.x_csrf_token is defined and (unifi_login.x_csrf_token | length > 0))
+                 else {}),
+                ({'Cookie': unifi_login.cookies_string}
+                 if (unifi_login.cookies_string is defined and (unifi_login.cookies_string | length > 0))
                  else {}),
                 recursive=True
               )
@@ -188,7 +202,6 @@
         validate_certs: "{{ unifi_validate_certs }}"
         return_content: true
         status_code: 200
-        cookies_string: "{{ unifi_login.cookies_string }}"
       register: unifi_port_forward_rules
       no_log: true
       when: unifi_console_credentials_present
@@ -216,7 +229,6 @@
         body: "{{ unifi_rule_updated }}"
         status_code: 200
         return_content: true
-        cookies_string: "{{ unifi_login.cookies_string }}"
       vars:
         unifi_rule_matches: >-
           {{
@@ -340,7 +352,6 @@
         status_code:
           - 200
           - 204
-        cookies_string: "{{ unifi_login.cookies_string }}"
       failed_when: false
       no_log: true
       when: unifi_console_credentials_present
