@@ -472,6 +472,40 @@ Note for the next person: `while read` over a file with no trailing newline
 silently skips the last entry. That very nearly let one of the seven be destroyed
 without its prefix having been checked.
 
+#### B2 coverage checked before deciding — 2026-08-21
+
+The question that decides it is not "are these referenced" but "is anything else
+holding this data". Checked against the live Backblaze bucket
+`myrobertson-k8s-prod-volsync`, and **all 21 have a B2 counterpart carrying
+restic snapshots**:
+
+| Group | Count | Current protection |
+| --- | ---: | --- |
+| Actively backed up by VolSync | 14 | B2, and **restore-verified 5 days ago** |
+| Database volumes | 4 | CNPG barman to B2, last backup ~5h |
+| Retired app (`authelia`) | 2 | none — but B2 holds the same frozen copy |
+| `netbootxyz-config-ceph` | 1 | **none — see the gap below** |
+
+The restore verification is real evidence rather than inference: the weekly
+`volsync-restore-verify` CronJob in `default` iterates *every* live
+ReplicationSource and performs an actual one-file `restic dump` from each
+repository's latest snapshot. It last completed on 2026-08-16, taking 44 minutes.
+
+**The decisive comparison:** for every one of the 21, the B2 copy is at least as
+recent as the S3 copy — the S3 repositories all froze on 2026-04-24, while B2
+ranges from that same date to today. So deleting the S3 data never leaves
+anything as the sole copy. The database and `authelia` repositories are the
+frozen ones on both sides, which is expected: those workloads moved to CNPG
+barman or were retired at the same cutover.
+
+#### Separate finding: netbootxyz has no current backup
+
+`netbootxyz-config-ceph-v3` and `netbootxyz-assets-ceph-v3` are Bound and 129
+days old, and **no ReplicationSource covers either**. Its last backup of any kind
+is the frozen B2 restic repository from 2026-07-12. This is unrelated to the
+credential cleanup — it surfaced while checking coverage — but it is a live
+backup gap and wants a ReplicationSource.
+
 Three were kept because they are referenced:
 
 | Path | Why kept |
@@ -654,11 +688,13 @@ experimenting on the live engine.
   fixed there because narrowing the wildcard risks breaking dynamic credential
   generation. Fixing it properly means giving Vault's dynamic users a distinct
   path or prefix (`vault-dyn-*`, or an IAM path) and scoping the policy to that.
-- **Retention decision needed on 110 GiB of old S3 restic backups.** 21 of the
-  volsync ghosts are the only keys to repositories that still exist in
-  `homelab-prod-backups`; 7 with no surviving repository were destroyed
-  2026-08-21. Either undelete and reclassify the 21, or delete the S3 data first
-  and then the metadata. See "What the volsync ghosts actually are".
+- **Retention decision on 110 GiB of old S3 restic backups.** B2 coverage was
+  verified 2026-08-21 and every one of the 21 has a counterpart at least as
+  recent, so the S3 copies are redundant rather than sole copies. Remaining
+  decision is simply whether to keep a second copy of the 2026-04-24 state; if
+  not, delete the S3 data first and the Vault metadata second.
+- **`netbootxyz` has no ReplicationSource.** Two Bound PVCs, no current backup of
+  any kind. Unrelated to this work, found while checking coverage.
 - Does anything besides Terraform rely on `homelab` having admin rights? A
   CloudTrail review over 90 days would answer this definitively; it was not run
   as part of this scoping.
