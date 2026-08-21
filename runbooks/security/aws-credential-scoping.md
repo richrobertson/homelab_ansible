@@ -701,10 +701,51 @@ there would create a repository that never appears and adds noise to the weekly
 restore verification.
 
 Worth knowing for whoever looks next: **netbootxyz is deployed in staging, not
-prod.** `apps/prod` contributes only the two `-v3` PVCs via
-`backup-source-pvcs-v3.yaml`; there is no Deployment and no pod. The config data
-is real and worth protecting either way, but whether these PVCs should exist in
-prod at all is a separate question.
+prod.** `apps/prod` contributed only the two `-v3` PVCs via
+`backup-source-pvcs-v3.yaml`; there was no Deployment and no pod.
+
+#### And then removed from prod entirely — 2026-08-21
+
+Both `-v3` PVCs deleted, and with them the ReplicationSource and VaultStaticSecret
+added hours earlier — a backup whose source PVC is being deleted only breaks.
+
+**The backup was verified before the live copy was destroyed**, which is the part
+worth copying. `restic check` against the B2 repository reported *no errors were
+found* across all 4 snapshots, and the newest — taken at 15:22Z that day — listed
+all 444 files. Only then were the PVCs removed. The repository remains as the
+archive of netbootxyz's final prod config; its restic password is the shared live
+one from `secret/backblaze/k8s/prod/volsync`, so it stays readable.
+
+Two mechanics that would each have leaked storage silently:
+
+- The PVCs carry `kustomize.toolkit.fluxcd.io/prune: disabled`, so removing them
+  from git does **not** delete them. That has to be explicit.
+- `csi-cephfs-sc` is **Retain**, so deleting a PVC leaves a `Released` PV and the
+  CephFS subvolume behind. Both PVs were switched to `Delete` first, after which
+  the CSI driver reclaimed them properly. The existing
+  `volsync-released-pv-cleanup` CronJob does not cover these — it only matches
+  `default/volsync-*-backup-src`.
+
+#### Systemic: five PVs stuck terminating since the April migration
+
+Found while cleaning up the above, and **not** specific to netbootxyz. Five PVs
+have carried a `deletionTimestamp` since **2026-04-25**, the v2 -> v3 migration:
+`netbootxyz-config-ceph-v2`, `netbootxyz-assets-ceph-v2`,
+`tautulli-config-ceph-v2`, `trilium-data-ceph-v2`, `authelia-config-ceph-v2`.
+
+They are blocked by the `external-attacher/cephfs-csi-ceph-com` finalizer on
+seven VolumeAttachments that cannot complete. Every one reports a `detachError`
+of `failed to generate volume from volume ID ...`, which normally means the
+CephFS subvolume is already gone and the detach has nothing left to act on. All
+six nodes are Ready, so this is not the usual dead-node case.
+
+**Deliberately not force-removed.** If the subvolumes *do* still exist, deleting
+the finalizers orphans them in CephFS where nothing would ever find them again —
+and that could not be checked: the `rook-ceph-tools` pod in `rook-ceph-external`
+fails with `RADOS permission error (error connecting to the cluster)`, so the
+subvolume list is unavailable. **Fixing the toolbox credentials is the
+prerequisite for cleaning this up**, and is worth doing regardless, since it
+currently means the external Ceph cluster cannot be inspected at all.
 
 Three were kept because they are referenced:
 
@@ -892,9 +933,10 @@ experimenting on the live engine.
   `HomelabS3BackupProvisioningPolicy`, which grants `s3:CreateBucket` and
   `s3:ListAllMyBuckets` on `*`. 1,128 historical CNPG `Backup` CRs still
   reference the emptied bucket and will mislead anyone reading backup history.
-- **netbootxyz exists in prod only as two orphaned `-v3` PVCs.** It is deployed
-  in staging; prod has no Deployment. The config PVC now has a ReplicationSource
-  so its data is protected, but the PVCs themselves may not belong in prod.
+- **The `rook-ceph-tools` pod cannot reach the external Ceph cluster** — every
+  command fails with `RADOS permission error`. That blocks cleanup of five PVs
+  stuck terminating since the April migration, and more generally means the
+  external cluster cannot be inspected from Kubernetes at all.
 - Does anything besides Terraform rely on `homelab` having admin rights? A
   CloudTrail review over 90 days would answer this definitively; it was not run
   as part of this scoping.
