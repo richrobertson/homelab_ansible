@@ -770,6 +770,37 @@ the PVC is gone, confirm the subvolume is absent from
 them. Clearing a PV finalizer while the subvolume still exists would orphan it in
 CephFS where nothing would ever find it.
 
+#### Released PVs cleared — and why two groups needed opposite treatment
+
+Seven `Released` PVs were cleared on 2026-08-21. They needed **inverted**
+handling, and getting it backwards on either group would have been damaging.
+
+**Three `authelia` CephFS volumes → switch `Retain` to `Delete`, then remove.**
+The subvolumes were per-PVC garbage from a retired app (0, 0 and 7452 bytes).
+Deleting the PV object under `Retain` would have orphaned them in CephFS with
+nothing left to reference them. Switching to `Delete` first let the CSI driver
+reclaim them properly: the subvolume count went 67 -> 64, all three confirmed
+gone.
+
+**Four `radarr-*` NFS volumes → switch `Delete` to `Retain`, then remove.** These
+are `nfs.csi.k8s.io` volumes whose `share` is the **whole NFS export** on scooter
+— `/volume1/plex` and `/volume1/radarr/radarr` — with no `subDir`. Deleting them
+under `Delete` would have called `DeleteVolume` against those share paths.
+**Plex is live and mounts exactly those paths right now** (as direct in-line NFS
+volumes; the PVs were vestigial), and they hold **85 TB** of media. Switching to
+`Retain` first means the driver is never invoked and only the Kubernetes object
+goes.
+
+Verified by counting entries in the live Plex mounts before and after:
+`/plex` 10, `/radarr` 4387, `/sonarr` 50, 85T of 98T used — identical on both
+sides. 108 PVs and 108 PVCs, none non-Bound; `plex-0` untouched.
+
+**The rule to carry forward:** the reclaim policy decides whether deleting a PV
+also destroys what is underneath. Before removing any `Released` PV, establish
+what the volume actually is. Per-PVC CSI subvolume that nobody wants -> `Delete`.
+Anything pointing at shared or live storage -> `Retain`, always, and never find
+out the hard way.
+
 ### The Ceph toolbox could not reach the cluster — FIXED 2026-08-21
 
 Every command in `rook-ceph-tools` failed with `RADOS permission error (error
@@ -1033,11 +1064,6 @@ experimenting on the live engine.
   `HomelabS3BackupProvisioningPolicy`, which grants `s3:CreateBucket` and
   `s3:ListAllMyBuckets` on `*`. 1,128 historical CNPG `Backup` CRs still
   reference the emptied bucket and will mislead anyone reading backup history.
-- **Seven `Released` PVs are sitting unreclaimed**, distinct from the stuck ones
-  cleared on 2026-08-21: three `authelia` volumes (retired app) and four
-  `radarr-*` from 2025-11. They carry no `deletionTimestamp`, which is the normal
-  resting state for a `Retain` PV whose PVC is gone — so they are inert, but they
-  are also holding CephFS subvolumes nothing will ever reclaim automatically.
 - Does anything besides Terraform rely on `homelab` having admin rights? A
   CloudTrail review over 90 days would answer this definitively; it was not run
   as part of this scoping.
