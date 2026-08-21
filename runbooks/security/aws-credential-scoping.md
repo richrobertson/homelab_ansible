@@ -679,13 +679,32 @@ The `absent()` rule exists because this exact failure already happened once: a
 label mismatch made monitoring silently useless for 298 days and nothing reported
 the absence.
 
-#### Separate finding: netbootxyz has no current backup
+#### netbootxyz backup gap — CLOSED 2026-08-21
 
-`netbootxyz-config-ceph-v3` and `netbootxyz-assets-ceph-v3` are Bound and 129
-days old, and **no ReplicationSource covers either**. Its last backup of any kind
-is the frozen B2 restic repository from 2026-07-12. This is unrelated to the
-credential cleanup — it surfaced while checking coverage — but it is a live
-backup gap and wants a ReplicationSource.
+`netbootxyz-config-ceph-v3` and `netbootxyz-assets-ceph-v3` were Bound for 129
+days with **no ReplicationSource covering either**, so the newest copy of the
+config was the B2 restic repository frozen on 2026-07-12 — and the older S3 copy
+was deleted earlier the same day as part of the bucket cleanup.
+
+Added `netbootxyz-config-ceph-backup` (hourly at :10) in
+`homelab_flux/infrastructure/configs/volsync/`. Its `repository-name` annotation
+deliberately matches the existing B2 repository, so it resumed that history
+rather than starting a new one. **Verified with a real run**: 43s, mover result
+`Successful`, and a new snapshot object confirmed in B2.
+
+**Config only, and the reason matters.** Both PVCs were inspected directly rather
+than assumed: `netbootxyz-config-ceph-v3` holds 11.9 MiB across 444 real files
+(nginx conf, ipxe menus, `endpoints.yml`), while `netbootxyz-assets-ceph-v3` is
+**completely empty**. Assets are downloadable boot images, and VolSync skips an
+empty source without initialising a repository, so a second ReplicationSource
+there would create a repository that never appears and adds noise to the weekly
+restore verification.
+
+Worth knowing for whoever looks next: **netbootxyz is deployed in staging, not
+prod.** `apps/prod` contributes only the two `-v3` PVCs via
+`backup-source-pvcs-v3.yaml`; there is no Deployment and no pod. The config data
+is real and worth protecting either way, but whether these PVCs should exist in
+prod at all is a separate question.
 
 Three were kept because they are referenced:
 
@@ -873,8 +892,9 @@ experimenting on the live engine.
   `HomelabS3BackupProvisioningPolicy`, which grants `s3:CreateBucket` and
   `s3:ListAllMyBuckets` on `*`. 1,128 historical CNPG `Backup` CRs still
   reference the emptied bucket and will mislead anyone reading backup history.
-- **`netbootxyz` has no ReplicationSource.** Two Bound PVCs, no current backup of
-  any kind. Unrelated to this work, found while checking coverage.
+- **netbootxyz exists in prod only as two orphaned `-v3` PVCs.** It is deployed
+  in staging; prod has no Deployment. The config PVC now has a ReplicationSource
+  so its data is protected, but the PVCs themselves may not belong in prod.
 - Does anything besides Terraform rely on `homelab` having admin rights? A
   CloudTrail review over 90 days would answer this definitively; it was not run
   as part of this scoping.
