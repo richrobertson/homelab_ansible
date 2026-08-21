@@ -168,6 +168,33 @@ works for certificates; extend it to passwords.
    operation. The incident's lesson is that these three steps must be atomic —
    rotating Postgres without rewriting `pdns.conf` breaks DNS, and updating
    Vault without a working VSO changes nothing.
+
+   **First one shipped 2026-08-21: the PBS S3 key**
+   (`ansible/proxmox/pbs_s3_key_rotation.yml`), the estate's last purely static
+   credential. Proven by a forced live rotation the same day, not just deployed.
+   Details in [aws-credential-scoping.md](aws-credential-scoping.md).
+
+   Two things from it generalise to the rest of this task:
+
+   - **Don't let a credential rotate itself.** The easy implementation grants
+     the key `iam:CreateAccessKey` on its own user. That would let a stolen key
+     mint its own successor and survive every future rotation, removing the only
+     thing rotation buys. The rotator identity is leased from Vault's `aws/`
+     engine per run and revoked afterwards, so automating rotation did not
+     create a new static credential that nothing rotates. Any rotation
+     automation that needs provider API rights should be held to the same bar.
+   - **Order it so every failure before the last step is recoverable.** Mint,
+     prove, swap, reload, verify, record, *then* revoke. The provider's support
+     for two live credentials is the safety mechanism, and Vault is written
+     second-to-last because it is a record rather than the thing being rotated.
+     A failure at the record step deliberately leaves two live credentials and
+     exits loudly rather than revoking with a stale record.
+
+   PBS was the easy case: nothing reads its key from Vault, so there is no
+   consumer to restart. The remaining `external_provider` members (Cloudflare,
+   Docker) have Kubernetes consumers, so their rotation is not atomic until the
+   VSO propagation step is included — which is what the prerequisite below is
+   about.
 4. **Map dependencies before automating.** For each credential, record every
    consumer, how it obtains the value, and whether it needs a restart. The
    absence of this map is why two of three rotations were abandoned. Keep it

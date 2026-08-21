@@ -1,0 +1,156 @@
+---
+# roles/pbs_s3_key_rotation
+#
+# Rotate the AWS access key that the pbs-s3 datastore authenticates with, as one
+# atomic operation: mint at AWS, prove the new key works, swap it into PBS,
+# reload, verify, record in Vault, and only then revoke the old key.
+#
+# WHY THIS EXISTS. The PBS S3 credential is the last purely static credential in
+# the estate (runbooks/security/aws-credential-scoping.md, step 6). It lives in
+# /etc/proxmox-backup/s3.cfg, which PBS reads at runtime -- there is no VSO sync
+# and no Vault Agent template behind it, so nothing rotates it and nothing would
+# notice if it aged out. It is now tracked at secret/aws/pbs-backup/credentials
+# so it *alerts* at 90 days, but tracking is not rotation. This role is the
+# rotation.
+#
+# WHY THE ORDER MATTERS. credential-lifecycle-roadmap.md Workstream 3 task 3 is
+# explicit that changing the credential, updating Vault and reloading consumers
+# must be one operation, because the estate has already had rotations abandoned
+# midway. AWS supports two live access keys per user, and that overlap is the
+# whole safety mechanism: the old key stays valid until the new one is proven
+# end-to-end, so every failure mode before the final revoke is recoverable.
+#
+# WHAT MAKES THIS SAFER THAN THE MANUAL PROCEDURE. The manual runbook says "edit
+# the aws-homelab-pbs section of s3.cfg, keeping it 0640 root:backup". Hand
+# editing that file is what caused an outage on 2026-08-21: a script left it
+# 0600 and proxmox-backup-proxy, which runs as `backup`, failed every S3 task
+# with a permission error that reads exactly like a bad credential. This role
+# never edits the file. It calls `proxmox-backup-manager s3 endpoint update`,
+# which writes the config with PBS's own semantics, and it re-asserts ownership
+# and mode afterwards anyway.
+
+# --- What is being rotated ---------------------------------------------------
+# The s3.cfg endpoint stanza. NOT backblaze-b2-pbs, which is a different
+# provider with a different credential and is asserted untouched after the swap.
+pbs_s3_key_rotation_endpoint_id: aws-homelab-pbs
+pbs_s3_key_rotation_bucket: myrobertson-homelab-pbs
+pbs_s3_key_rotation_datastore: pbs-s3
+
+# The IAM user whose keys are rotated. The Vault AWS role below is scoped to
+# this user's ARN alone, so the rotator cannot touch any other principal.
+pbs_s3_key_rotation_iam_user: homelab-pbs-backup
+pbs_s3_key_rotation_aws_account_id: "229517242621"
+pbs_s3_key_rotation_s3_region: us-west-2
+# IAM is a global service; its endpoint is always signed against us-east-1.
+pbs_s3_key_rotation_iam_region: us-east-1
+
+# --- Vault ------------------------------------------------------------------
+pbs_s3_key_rotation_vault_addr: "https://vault.myrobertson.net:8200"
+pbs_s3_key_rotation_vault_ca_file: /etc/vault-agent.d/vault-ca.pem
+
+# The AWS secrets engine role that mints the *rotator* credential. This is the
+# design's load-bearing decision, so it is worth stating plainly:
+#
+# The obvious alternative is to let homelab-pbs-backup rotate its own key, via
+# an iam:CreateAccessKey grant on ${aws:username}. That is a documented AWS
+# pattern and it needs no extra credential -- but it defeats the purpose of
+# rotating. A key that can mint its own successor lets an attacker who steals it
+# survive every future rotation, so the credential lifetime stops being bounded,
+# which is the only thing rotation buys.
+#
+# The other alternative is a dedicated long-lived rotator key, which just moves
+# the problem: it would be a *more* privileged static credential than the one it
+# exists to rotate, and nothing would rotate it either.
+#
+# So the rotator credential is dynamic. Vault mints a throwaway IAM user for the
+# duration of one rotation and the script revokes the lease in a finally block,
+# which deletes it. Nothing long-lived and IAM-capable is ever stored on the PBS
+# host.
+pbs_s3_key_rotation_vault_aws_mount: aws
+pbs_s3_key_rotation_vault_aws_role: pbs-key-rotator
+
+# Where the rotation is recorded. A record, not a source of truth -- PBS reads
+# s3.cfg, so this path exists to feed the credential-age exporter.
+pbs_s3_key_rotation_vault_kv_mount: secret
+pbs_s3_key_rotation_vault_kv_path: aws/pbs-backup/credentials
+
+pbs_s3_key_rotation_policy_name: pbs-s3-key-rotation
+pbs_s3_key_rotation_approle_name: pbs-s3-key-rotation
+# Long enough for a rotation including IAM consistency waits, short enough that
+# a leaked token is not a standing grant.
+pbs_s3_key_rotation_token_ttl_seconds: 900
+pbs_s3_key_rotation_token_max_ttl_seconds: 1800
+# NOTE: there is deliberately no lease TTL for the rotator identity. Vault
+# rejects default_sts_ttl/max_sts_ttl for iam_user credentials, and the only
+# alternative is the mount-wide aws/config/lease, which the terraformRemoteState
+# role shares -- shortening it there would expire Terraform's remote-state
+# credentials mid-apply. The script revokes its lease in a finally block, traps
+# SIGTERM so a systemd stop still revokes, and records the lease id so the next
+# run reaps anything a killed run stranded.
+
+# --- When to rotate ----------------------------------------------------------
+# Must match the rotation_interval_days custom metadata, because that is what
+# the credential-age alert measures against.
+pbs_s3_key_rotation_interval_days: 90
+
+# Rotate at 75 days, not 90. The alert fires at 90, so rotating on the interval
+# itself is a race between the timer and the alert -- exactly the failure the
+# infra-cert threshold bug had, where a renewal and its own alert were scheduled
+# against the same number. 15 days of slack means a couple of failed attempts
+# still resolve before anyone is paged.
+pbs_s3_key_rotation_rotate_after_days: 75
+
+# The timer runs daily and the script exits 0 immediately when the key is
+# younger than rotate_after_days. A daily no-op costs one Vault metadata read.
+# A monthly timer would be cheaper and could drift straight past the 90-day
+# alert, which is the opposite of the point.
+pbs_s3_key_rotation_on_calendar: "*-*-* 03:30:00"
+pbs_s3_key_rotation_randomized_delay: "45m"
+
+# --- Safety rails ------------------------------------------------------------
+# Refuse to rotate while a PBS task is running against the datastore. A backup,
+# verify, GC or prune in flight holds the old credential; swapping the config
+# and reloading underneath it risks failing a job for no reason. There is never
+# urgency here -- the next daily run picks it up.
+pbs_s3_key_rotation_defer_on_active_tasks: true
+
+# Require `s3 check` to pass BEFORE touching anything. If S3 auth is already
+# broken, rotation is not the fix and would destroy the evidence.
+pbs_s3_key_rotation_require_clean_baseline: true
+
+# How long to keep retrying the new key against the bucket before giving up.
+# IAM is eventually consistent: a freshly created access key is routinely
+# rejected for a few seconds, which is not a failure.
+pbs_s3_key_rotation_new_key_wait_seconds: 120
+
+# Same problem one step earlier: the rotator identity Vault mints is itself a
+# brand-new IAM user, and its first calls come back InvalidClientTokenId until
+# AWS propagates it. Measured at a few seconds; 90 is generous.
+pbs_s3_key_rotation_rotator_ready_wait_seconds: 90
+
+# Optionally prove the rotation end-to-end by verifying one real snapshot after
+# the reload. Off by default: `s3 check` already proves the credential against
+# the bucket, and a verify re-reads chunks out of S3 at egress cost. Turn it on
+# if you want the proxy itself, rather than the CLI, to be the thing that proved
+# it -- `s3 check` builds its own S3 client from the config, so strictly it
+# proves the credential and the file, while the journal scan after the reload is
+# what covers the proxy. See "What each check actually proves" in
+# runbooks/security/aws-credential-scoping.md.
+# Measured 2026-08-21: the smallest snapshot in pbs-s3 is ~34 GiB, so this is
+# roughly an hour of re-reading, not a quick sanity check. That cost is the
+# reason it is opt-in rather than the default.
+pbs_s3_key_rotation_verify_snapshot: false
+pbs_s3_key_rotation_verify_timeout_seconds: 3600
+
+# Keep this many timestamped s3.cfg backups. These are the rollback path, and
+# they contain live credentials, so they are 0600 root and pruned.
+pbs_s3_key_rotation_backup_retain: 5
+
+# --- On-host layout ----------------------------------------------------------
+pbs_s3_key_rotation_script: /usr/local/sbin/pbs-rotate-s3-key.py
+pbs_s3_key_rotation_state_dir: /var/lib/pbs-s3-key-rotation
+pbs_s3_key_rotation_unit_name: pbs-rotate-s3-key
+pbs_s3_key_rotation_role_id_file: /etc/vault-agent.d/pbs-rotation-role-id
+pbs_s3_key_rotation_secret_id_file: /etc/vault-agent.d/pbs-rotation-secret-id
+pbs_s3_key_rotation_metrics_file:
+  /var/lib/prometheus/node-exporter/pbs_s3_key_rotation.prom

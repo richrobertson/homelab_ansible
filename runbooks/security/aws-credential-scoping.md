@@ -104,11 +104,10 @@ Vault's `aws/` secrets engine is already mounted and configured
    load-bearing for it.
 4. **Convert the etcd backup to a `VaultDynamicSecret`**, prove the pattern.
 5. **Convert Nextcloud**, with `rolloutRestartTargets` set.
-6. **Schedule PBS rotation** (Ansible or a CronJob) as the only remaining static
-   credential. It is now *tracked* at `secret/aws/pbs-backup/credentials`, so it
-   will raise an overdue alert instead of ageing silently — but tracking is not
-   rotation, and automating it means driving the `s3.cfg` edit + proxy reload +
-   verify, not writing to Vault.
+6. **Schedule PBS rotation** — **DONE 2026-08-21.**
+   `ansible/proxmox/pbs_s3_key_rotation.yml`, proven end to end by a forced
+   rotation the same day. It drives the `s3.cfg` change, the proxy reload and the
+   verify, and updates Vault last; writing to Vault was never the rotation.
 
 ## Progress
 
@@ -219,18 +218,103 @@ nobody, and drifts until someone trusts it during an incident. A `note` field
 carrying this warning is stored *inside* the secret so it is visible to anyone
 who reads the path without finding this runbook.
 
-To actually rotate PBS, in this order:
+**This is now automated — see the next section.** The manual procedure below is
+retained as the fallback and as the description of what the automation does:
 
 1. `aws iam create-access-key --user-name homelab-pbs-backup` (two live keys).
 2. Edit the `aws-homelab-pbs` section of `s3.cfg`, leaving `backblaze-b2-pbs`
    untouched. **Keep the file `0640 root:backup`** — see the trap above.
-3. `systemctl reload proxmox-backup-proxy`, then run a real verify and confirm
-   `0 errors`. Do not treat a clean `systemctl status` as proof.
+3. `systemctl reload proxmox-backup-proxy`, then verify and confirm `0 errors`.
+   Do not treat a clean `systemctl status` as proof.
 4. Update this Vault path and set `rotated_at` to the new date.
 5. Only then delete the old key, and confirm it fails with `InvalidClientTokenId`.
 
 Steps 3 and 5 are the ones worth not skipping: the verify is what proves the new
 key works, and deleting before verifying is what turns a rotation into an outage.
+
+### Rotation automated — 2026-08-21 (closes step 6)
+
+`ansible/proxmox/pbs_s3_key_rotation.yml` and the `pbs_s3_key_rotation` role.
+This was the estate's last purely static credential and the final open item of
+Workstream 3 task 3 in [credential-lifecycle-roadmap.md](credential-lifecycle-roadmap.md).
+
+**Proven end to end on 2026-08-21**, not just deployed: a forced run rotated
+`...KXM2` to `...HOZ6` in 28 seconds, and IAM, the PBS config and Vault were all
+confirmed independently afterwards.
+
+    /usr/local/sbin/pbs-rotate-s3-key.py --check     # validate, change nothing
+    /usr/local/sbin/pbs-rotate-s3-key.py --force     # rotate now
+
+A `pbs-rotate-s3-key.timer` checks daily and rotates at 75 days. **75, not 90**:
+the alert fires at 90, so rotating on the interval itself races the alert — the
+same mistake the infra-cert thresholds made.
+
+#### Where the rotator's own permission comes from
+
+The obvious design is to let `homelab-pbs-backup` rotate its own key with
+`iam:CreateAccessKey` on `${aws:username}`. **Don't.** A key that can mint its
+own successor lets a thief survive every future rotation, which removes the only
+thing rotation buys. A dedicated static rotator key is no better: it would be a
+*more* privileged credential that nothing rotates either.
+
+So the rotator is dynamic. `aws/roles/pbs-key-rotator` mints a throwaway IAM user
+whose inline policy is `iam:*AccessKey*` on exactly one user ARN, and the script
+revokes the lease when it finishes. Nothing long-lived and IAM-capable is stored
+on the PBS host.
+
+Two consequences worth knowing:
+
+- Vault rejects `default_sts_ttl`/`max_sts_ttl` for `iam_user` credentials, and
+  the only other knob is the mount-wide `aws/config/lease` — which
+  `terraformRemoteState` shares, so tightening it there would expire Terraform's
+  remote-state credentials mid-apply. Instead the script records its lease id and
+  the next run reaps anything a killed run stranded. **This is not theoretical:**
+  the first failed `--check` stranded a lease and the next run cleaned it up.
+- The rotator is a brand-new IAM principal, so its first calls return
+  `InvalidClientTokenId` for ~10 seconds. Measured: 4 attempts. Both the rotator
+  and the newly minted PBS key retry past this.
+
+#### What each check actually proves
+
+Worth being precise about, because these are not interchangeable:
+
+| Check | Proves | Does not prove |
+| --- | --- | --- |
+| `s3 ListObjectsV2` with the new key, before any change | the new key is valid at AWS | anything about PBS |
+| `proxmox-backup-manager s3 check` | the credential works — it does a real PUT and read against the bucket — and `s3.cfg` is readable and parseable | that the *proxy* reloaded; the CLI builds its own S3 client from the same file |
+| journal scan after reload | the proxy did not start logging auth or permission errors | — |
+| optional snapshot verify (off by default) | the proxy itself reads chunks from S3 with the new credential | — |
+
+The snapshot verify is opt-in because the smallest snapshot in `pbs-s3` is
+~32 GiB, so it is roughly an hour of re-reading, not a quick sanity check.
+
+**Gotcha:** `proxmox-backup-manager s3 check backblaze-b2-pbs myrobertson-pbs`
+**fails, and always has.** B2 returns `InvalidRequest: Content-MD5 OR
+x-amz-checksum- HTTP header is required for Put Object requests with Object Lock
+parameters` — the check's test PUT is incompatible with an Object Lock bucket.
+It is not a credential problem and not caused by rotation; the B2 stanza was
+confirmed byte-identical before and after. Do not "fix" it by rotating B2.
+
+#### Failure behaviour
+
+AWS allows two live keys, and that overlap is the whole safety mechanism — the
+old key stays valid until the new one is proven, so every failure before the
+final revoke is recoverable.
+
+- Failure at or after the config swap: restores the backed-up `s3.cfg`, reloads,
+  re-checks, and deletes the new key. The host ends as it was found.
+- Failure *recording to Vault*: deliberately does **not** roll back and does
+  **not** revoke. The new key is live and working, so the safe state is two live
+  keys and a loud non-zero exit rather than silently losing track of which key is
+  in use. The next run refuses to start ("already has 2 access keys"), which is
+  the correct signal for a human.
+- `SIGTERM` is trapped, so `systemctl stop` mid-rotation still rolls back and
+  revokes rather than leaving the host half-swapped.
+- It refuses to run at all if `s3 check` is already failing, if a task is active
+  against the datastore, or if IAM and `s3.cfg` disagree about which key is live.
+
+Status is exported for alerting as `pbs_s3_key_rotation_last_status`
+(0 ok / 1 failed / 2 deferred) plus `..._key_age_days`.
 
 ### The `...5KQF` admin key — ROTATED AND DELETED 2026-08-21
 

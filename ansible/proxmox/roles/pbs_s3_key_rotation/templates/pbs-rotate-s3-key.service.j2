@@ -1,0 +1,25 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Rotate the AWS access key used by the {{ pbs_s3_key_rotation_datastore }} PBS datastore
+Documentation=file://{{ pbs_s3_key_rotation_script }}
+# The rotation talks to Vault and AWS, and reloads the proxy it depends on.
+After=network-online.target proxmox-backup-proxy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ pbs_s3_key_rotation_script }}
+# Generous: the script's own budget is the IAM consistency wait plus, when
+# enabled, a snapshot verify. This is only a backstop against a wedged run.
+TimeoutStartSec={{ (pbs_s3_key_rotation_verify_timeout_seconds | int) + 1800 }}
+# The script writes its own status metric and needs to reload the proxy, so it
+# runs as root without further confinement. It already refuses to start twice
+# via flock.
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+[Install]
+WantedBy=multi-user.target

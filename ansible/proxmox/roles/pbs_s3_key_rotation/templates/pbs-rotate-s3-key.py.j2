@@ -1,0 +1,896 @@
+#!/usr/bin/env python3
+# {{ ansible_managed }}
+#
+# Rotate the AWS access key behind the {{ pbs_s3_key_rotation_endpoint_id }} S3
+# endpoint that the {{ pbs_s3_key_rotation_datastore }} datastore uses.
+#
+# The rotation is ordered so that every step before the final revoke is
+# recoverable, because AWS allows two live access keys per user and the old one
+# stays valid throughout:
+#
+#   1. preflight    - config matches IAM, no active tasks, s3 check already passes
+#   2. mint         - CreateAccessKey (now two live keys)
+#   3. prove        - the NEW key lists the bucket directly, retried past IAM's
+#                     eventual consistency
+#   4. swap         - back up s3.cfg, `s3 endpoint update`, re-assert 0640 root:backup
+#   5. reload       - SIGHUP proxmox-backup-proxy so it re-reads the config
+#   6. verify       - s3 check, the untouched-sibling assertion, journal scan
+#   7. record       - write Vault + rotated_at metadata
+#   8. revoke       - DeleteAccessKey on the old key, confirmed gone
+#
+# Any failure from step 4 onwards restores the backed-up config, reloads, and
+# deletes the new key, leaving the host exactly as it was found. A failure at
+# step 7 deliberately stops WITHOUT revoking: the new key is live and working, so
+# the safe state is two live keys and a loud non-zero exit, not a silent loss of
+# the record of which key is in use.
+#
+# No AWS SDK is installed on this host and this script does not add one, so IAM
+# and S3 are called directly with a SigV4 signer. That is ~40 lines of stable,
+# well-specified algorithm versus adding a package to a backup server.
+
+import argparse
+import datetime
+import fcntl
+import hashlib
+import hmac
+import json
+import os
+import pwd
+import grp
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+
+ENDPOINT_ID = "{{ pbs_s3_key_rotation_endpoint_id }}"
+BUCKET = "{{ pbs_s3_key_rotation_bucket }}"
+DATASTORE = "{{ pbs_s3_key_rotation_datastore }}"
+IAM_USER = "{{ pbs_s3_key_rotation_iam_user }}"
+ACCOUNT_ID = "{{ pbs_s3_key_rotation_aws_account_id }}"
+S3_REGION = "{{ pbs_s3_key_rotation_s3_region }}"
+IAM_REGION = "{{ pbs_s3_key_rotation_iam_region }}"
+
+VAULT_ADDR = "{{ pbs_s3_key_rotation_vault_addr }}"
+VAULT_CA = "{{ pbs_s3_key_rotation_vault_ca_file }}"
+VAULT_AWS_MOUNT = "{{ pbs_s3_key_rotation_vault_aws_mount }}"
+VAULT_AWS_ROLE = "{{ pbs_s3_key_rotation_vault_aws_role }}"
+KV_MOUNT = "{{ pbs_s3_key_rotation_vault_kv_mount }}"
+KV_PATH = "{{ pbs_s3_key_rotation_vault_kv_path }}"
+ROLE_ID_FILE = "{{ pbs_s3_key_rotation_role_id_file }}"
+SECRET_ID_FILE = "{{ pbs_s3_key_rotation_secret_id_file }}"
+
+INTERVAL_DAYS = {{ pbs_s3_key_rotation_interval_days | int }}
+ROTATE_AFTER_DAYS = {{ pbs_s3_key_rotation_rotate_after_days | int }}
+NEW_KEY_WAIT = {{ pbs_s3_key_rotation_new_key_wait_seconds | int }}
+ROTATOR_READY_WAIT = {{ pbs_s3_key_rotation_rotator_ready_wait_seconds | int }}
+DEFER_ON_ACTIVE_TASKS = {{ 'True' if pbs_s3_key_rotation_defer_on_active_tasks | bool else 'False' }}
+REQUIRE_CLEAN_BASELINE = {{ 'True' if pbs_s3_key_rotation_require_clean_baseline | bool else 'False' }}
+VERIFY_SNAPSHOT = {{ 'True' if pbs_s3_key_rotation_verify_snapshot | bool else 'False' }}
+VERIFY_TIMEOUT = {{ pbs_s3_key_rotation_verify_timeout_seconds | int }}
+BACKUP_RETAIN = {{ pbs_s3_key_rotation_backup_retain | int }}
+
+STATE_DIR = "{{ pbs_s3_key_rotation_state_dir }}"
+METRICS_FILE = "{{ pbs_s3_key_rotation_metrics_file }}"
+S3_CFG = "/etc/proxmox-backup/s3.cfg"
+LOCK_FILE = os.path.join(STATE_DIR, "rotation.lock")
+# The id of the currently-leased rotator identity. Written the moment the lease
+# exists and removed once it is revoked, so a run that is killed between those
+# two points leaves a breadcrumb the next run can clean up. Vault's aws mount
+# has no per-role lease TTL for iam_user credentials and its global lease
+# setting is shared with the terraformRemoteState role, so tightening that
+# centrally would shorten Terraform's state credentials too. This file is the
+# self-contained alternative.
+LEASE_FILE = os.path.join(STATE_DIR, "rotator.lease")
+PBM = "/usr/sbin/proxmox-backup-manager"
+# proxmox-backup-manager has no snapshot or per-snapshot verify subcommand;
+# both live behind the API, which proxmox-backup-debug can call. Going through
+# the API is also the point: it exercises proxmox-backup-proxy itself rather
+# than a CLI that builds its own S3 client from the same config file.
+DEBUG_TOOL = "/usr/sbin/proxmox-backup-debug"
+
+# The exact ownership PBS requires. proxmox-backup-proxy runs as `backup`; a
+# root-only mode here fails every S3 task with a permission error that reads
+# like a credential problem. This has already cost one outage window.
+CFG_MODE = 0o640
+CFG_OWNER = "root"
+CFG_GROUP = "backup"
+
+
+def log(msg):
+    print("%s %s" % (datetime.datetime.now().strftime("%H:%M:%S"), msg), flush=True)
+
+
+def run(args, timeout=120, env=None, stdin_data=None, check=False):
+    """Run a command, returning (rc, stdout, stderr) with output as text."""
+    proc = subprocess.run(
+        args,
+        input=stdin_data.encode() if stdin_data is not None else None,
+        capture_output=True,
+        timeout=timeout,
+        env=env,
+    )
+    out = proc.stdout.decode("utf-8", "replace").strip()
+    err = proc.stderr.decode("utf-8", "replace").strip()
+    if check and proc.returncode != 0:
+        raise RuntimeError("%s failed rc=%d: %s" % (args[0], proc.returncode, err or out))
+    return proc.returncode, out, err
+
+
+# --------------------------------------------------------------------------
+# SigV4. Only what these two APIs need: no session token (Vault's iam_user
+# credentials are plain long-term keys), no chunked payloads, no presigning.
+# --------------------------------------------------------------------------
+
+def _sign(key, msg):
+    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+
+def _signing_key(secret, datestamp, region, service):
+    k = _sign(("AWS4" + secret).encode("utf-8"), datestamp)
+    k = _sign(k, region)
+    k = _sign(k, service)
+    return _sign(k, "aws4_request")
+
+
+def aws_call(method, host, region, service, access_key, secret_key,
+             path="/", query=None, body=b"", timeout=30):
+    query = query or {}
+    now = datetime.datetime.now(datetime.timezone.utc)
+    amzdate = now.strftime("%Y%m%dT%H%M%SZ")
+    datestamp = now.strftime("%Y%m%d")
+
+    # RFC 3986 encoding, sorted by key: the canonical form the signature covers.
+    canonical_qs = "&".join(
+        "%s=%s" % (urllib.parse.quote(k, safe="-_.~"),
+                   urllib.parse.quote(str(v), safe="-_.~"))
+        for k, v in sorted(query.items())
+    )
+    payload_hash = hashlib.sha256(body).hexdigest()
+
+    headers = {
+        "host": host,
+        "x-amz-date": amzdate,
+        "x-amz-content-sha256": payload_hash,
+    }
+    if body:
+        headers["content-type"] = "application/x-www-form-urlencoded; charset=utf-8"
+
+    signed_headers = ";".join(sorted(headers))
+    canonical_headers = "".join("%s:%s\n" % (k, headers[k]) for k in sorted(headers))
+    canonical_request = "\n".join(
+        [method, path, canonical_qs, canonical_headers, signed_headers, payload_hash]
+    )
+    scope = "%s/%s/%s/aws4_request" % (datestamp, region, service)
+    string_to_sign = "\n".join([
+        "AWS4-HMAC-SHA256",
+        amzdate,
+        scope,
+        hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+    ])
+    signature = hmac.new(
+        _signing_key(secret_key, datestamp, region, service),
+        string_to_sign.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    headers["authorization"] = (
+        "AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s"
+        % (access_key, scope, signed_headers, signature)
+    )
+
+    url = "https://%s%s" % (host, path)
+    if canonical_qs:
+        url = url + "?" + canonical_qs
+    req = urllib.request.Request(url, data=body or None, method=method)
+    for k, v in headers.items():
+        if k != "host":
+            req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+
+
+class AwsError(RuntimeError):
+    def __init__(self, action, status, code):
+        RuntimeError.__init__(
+            self, "%s failed (HTTP %d, %s)" % (action, status, code))
+        self.status = status
+        self.code = code
+
+
+def _strip_ns(elem):
+    for e in elem.iter():
+        if "}" in e.tag:
+            e.tag = e.tag.split("}", 1)[1]
+    return elem
+
+
+def iam_call(action, creds, extra=None):
+    params = {"Action": action, "Version": "2010-05-08"}
+    params.update(extra or {})
+    body = urllib.parse.urlencode(params).encode("utf-8")
+    status, text = aws_call(
+        "POST", "iam.amazonaws.com", IAM_REGION, "iam",
+        creds["access_key"], creds["secret_key"], body=body,
+    )
+    if status != 200:
+        # Surface the AWS error code rather than a bare status, since
+        # AccessDenied and NoSuchEntity mean very different things here.
+        code = "unknown"
+        try:
+            code = _strip_ns(ET.fromstring(text)).findtext(".//Code") or "unknown"
+        except ET.ParseError:
+            pass
+        raise AwsError("iam:%s" % action, status, code)
+    return _strip_ns(ET.fromstring(text))
+
+
+def iam_list_access_keys(creds):
+    root = iam_call("ListAccessKeys", creds, {"UserName": IAM_USER})
+    keys = []
+    for m in root.findall(".//AccessKeyMetadata/member"):
+        keys.append({
+            "id": m.findtext("AccessKeyId"),
+            "status": m.findtext("Status"),
+            "created": m.findtext("CreateDate"),
+        })
+    return keys
+
+
+def iam_create_access_key(creds):
+    root = iam_call("CreateAccessKey", creds, {"UserName": IAM_USER})
+    return {
+        "id": root.findtext(".//AccessKeyId"),
+        "secret": root.findtext(".//SecretAccessKey"),
+    }
+
+
+def iam_delete_access_key(creds, key_id):
+    iam_call("DeleteAccessKey", creds, {"UserName": IAM_USER, "AccessKeyId": key_id})
+
+
+# Vault creates the rotator IAM user and its inline policy moments before this
+# runs, and IAM is eventually consistent: the first calls with a brand-new
+# principal routinely come back InvalidClientTokenId or AccessDenied for a few
+# seconds. Treating that as failure would make the rotation flaky in exactly the
+# way that erodes trust in automation.
+ROTATOR_PROPAGATION_CODES = ("InvalidClientTokenId", "AccessDenied",
+                             "SignatureDoesNotMatch")
+
+
+def wait_for_rotator(creds, budget):
+    deadline = time.time() + budget
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            keys = iam_list_access_keys(creds)
+            if attempt > 1:
+                log("  rotator identity usable after %d attempt(s)" % attempt)
+            return keys
+        except AwsError as exc:
+            if exc.code not in ROTATOR_PROPAGATION_CODES or time.time() >= deadline:
+                raise
+            time.sleep(3)
+
+
+def s3_key_works(access_key, secret_key):
+    """True when the key can list the bucket. This is the proof that a freshly
+    minted key is actually usable, independent of anything PBS does."""
+    host = "%s.s3.%s.amazonaws.com" % (BUCKET, S3_REGION)
+    status, text = aws_call(
+        "GET", host, S3_REGION, "s3", access_key, secret_key,
+        query={"list-type": "2", "max-keys": "1"},
+    )
+    if status == 200:
+        return True, "ok"
+    code = "http %d" % status
+    if "<Code>" in text:
+        code = text.split("<Code>", 1)[1].split("</Code>", 1)[0]
+    return False, code
+
+
+# --------------------------------------------------------------------------
+# Vault. Shelling out to the vault binary rather than reimplementing its auth
+# and TLS handling. Anything carrying a secret goes in on stdin as JSON so it
+# never appears in argv.
+# --------------------------------------------------------------------------
+
+def vault_env(token=None):
+    env = dict(os.environ)
+    env["VAULT_ADDR"] = VAULT_ADDR
+    env["VAULT_CACERT"] = VAULT_CA
+    env.pop("VAULT_TOKEN", None)
+    if token:
+        env["VAULT_TOKEN"] = token
+    return env
+
+
+def vault_login():
+    with open(ROLE_ID_FILE) as fh:
+        role_id = fh.read().strip()
+    with open(SECRET_ID_FILE) as fh:
+        secret_id = fh.read().strip()
+    payload = json.dumps({"role_id": role_id, "secret_id": secret_id})
+    rc, out, err = run(
+        ["vault", "write", "-format=json", "auth/approle/login", "-"],
+        env=vault_env(), stdin_data=payload,
+    )
+    if rc != 0:
+        raise RuntimeError("vault approle login failed: %s" % (err or out))
+    return json.loads(out)["auth"]["client_token"]
+
+
+def vault_aws_creds(token):
+    """Lease a throwaway IAM user scoped to managing this one user's keys."""
+    rc, out, err = run(
+        ["vault", "read", "-format=json",
+         "%s/creds/%s" % (VAULT_AWS_MOUNT, VAULT_AWS_ROLE)],
+        env=vault_env(token),
+    )
+    if rc != 0:
+        raise RuntimeError("could not lease rotator credentials: %s" % (err or out))
+    doc = json.loads(out)
+    lease_id = doc.get("lease_id", "")
+    if lease_id:
+        with open(LEASE_FILE, "w") as fh:
+            fh.write(lease_id)
+        os.chmod(LEASE_FILE, 0o600)
+    return {
+        "access_key": doc["data"]["access_key"],
+        "secret_key": doc["data"]["secret_key"],
+        "lease_id": lease_id,
+    }
+
+
+def vault_revoke(token, lease_id):
+    if not lease_id:
+        return
+    rc, _out, err = run(["vault", "lease", "revoke", lease_id], env=vault_env(token))
+    if rc == 0:
+        log("  revoked rotator lease (throwaway IAM user deleted)")
+        if os.path.exists(LEASE_FILE):
+            os.unlink(LEASE_FILE)
+    else:
+        # Left on disk deliberately so the next run retries the revoke.
+        log("  WARNING: could not revoke rotator lease: %s" % err)
+
+
+def reap_stale_lease(token):
+    """Revoke a rotator lease a previous run leased but never released.
+
+    Without this, a SIGKILL between leasing and revoking would strand an IAM
+    user that can create and delete access keys on the backup user, alive until
+    the mount's default lease TTL -- which is measured in weeks."""
+    if not os.path.exists(LEASE_FILE):
+        return
+    with open(LEASE_FILE) as fh:
+        stale = fh.read().strip()
+    if not stale:
+        os.unlink(LEASE_FILE)
+        return
+    log("found an unrevoked rotator lease from a previous run; revoking it")
+    vault_revoke(token, stale)
+    if os.path.exists(LEASE_FILE):
+        # Already-expired leases 400 on revoke; that is success for our purpose.
+        os.unlink(LEASE_FILE)
+
+
+def vault_rotated_at(token):
+    rc, out, _err = run(
+        ["vault", "kv", "metadata", "get", "-format=json",
+         "-mount=%s" % KV_MOUNT, KV_PATH],
+        env=vault_env(token),
+    )
+    if rc != 0:
+        return None
+    meta = json.loads(out)["data"].get("custom_metadata") or {}
+    raw = meta.get("rotated_at")
+    if not raw:
+        return None
+    try:
+        return datetime.date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+NOTE = (
+    "RECORD ONLY - PBS reads /etc/proxmox-backup/s3.cfg directly. Rotating this "
+    "Vault value does NOT rotate PBS. Rotation is automated by the "
+    "pbs_s3_key_rotation Ansible role (pbs-rotate-s3-key.timer on the PBS host), "
+    "which updates this path after the new key is proven."
+)
+
+
+def vault_record(token, key_id, secret, endpoint_host):
+    payload = json.dumps({
+        "AWS_ACCESS_KEY_ID": key_id,
+        "AWS_SECRET_ACCESS_KEY": secret,
+        "AWS_DEFAULT_REGION": S3_REGION,
+        "S3_ENDPOINT": endpoint_host,
+        "IAM_USER": IAM_USER,
+        "note": NOTE,
+    })
+    rc, out, err = run(
+        ["vault", "kv", "put", "-format=json", "-mount=%s" % KV_MOUNT, KV_PATH, "-"],
+        env=vault_env(token), stdin_data=payload,
+    )
+    if rc != 0:
+        raise RuntimeError("vault kv put failed: %s" % (err or out))
+    today = datetime.date.today().isoformat()
+    rc, out, err = run(
+        ["vault", "kv", "metadata", "put",
+         "-mount=%s" % KV_MOUNT,
+         "-custom-metadata=rotated_at=%s" % today,
+         "-custom-metadata=rotation_interval_days=%d" % INTERVAL_DAYS,
+         KV_PATH],
+        env=vault_env(token),
+    )
+    if rc != 0:
+        raise RuntimeError("vault kv metadata put failed: %s" % (err or out))
+    return today
+
+
+# --------------------------------------------------------------------------
+# PBS
+# --------------------------------------------------------------------------
+
+def pbs_endpoints():
+    rc, out, err = run([PBM, "s3", "endpoint", "list", "--output-format", "json"])
+    if rc != 0:
+        raise RuntimeError("could not list s3 endpoints: %s" % (err or out))
+    return {e["id"]: e for e in json.loads(out)}
+
+
+def config_sections():
+    """Map endpoint id -> raw stanza text, for a byte-level untouched assertion
+    on the sibling endpoint."""
+    with open(S3_CFG) as fh:
+        text = fh.read()
+    sections = {}
+    current = None
+    buf = []
+    for line in text.splitlines(keepends=True):
+        if line.startswith("s3-endpoint:"):
+            if current:
+                sections[current] = "".join(buf)
+            current = line.split(":", 1)[1].strip()
+            buf = [line]
+        elif current:
+            buf.append(line)
+    if current:
+        sections[current] = "".join(buf)
+    return sections
+
+
+def assert_cfg_permissions():
+    st = os.stat(S3_CFG)
+    mode = st.st_mode & 0o777
+    owner = pwd.getpwuid(st.st_uid).pw_name
+    group = grp.getgrgid(st.st_gid).gr_name
+    if mode != CFG_MODE or owner != CFG_OWNER or group != CFG_GROUP:
+        os.chmod(S3_CFG, CFG_MODE)
+        os.chown(S3_CFG, pwd.getpwnam(CFG_OWNER).pw_uid, grp.getgrnam(CFG_GROUP).gr_gid)
+        log("  corrected s3.cfg to %o %s:%s (was %o %s:%s)"
+            % (CFG_MODE, CFG_OWNER, CFG_GROUP, mode, owner, group))
+
+
+def s3_check(timeout=180):
+    rc, out, err = run(
+        [PBM, "s3", "check", ENDPOINT_ID, BUCKET], timeout=timeout
+    )
+    return rc == 0, (err or out or "ok")
+
+
+def active_datastore_tasks():
+    rc, out, _err = run([PBM, "task", "list", "--output-format", "json"])
+    if rc != 0:
+        return []
+    try:
+        tasks = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    hits = []
+    for t in tasks:
+        if t.get("endtime"):
+            continue
+        blob = json.dumps(t)
+        if DATASTORE in blob or ENDPOINT_ID in blob:
+            hits.append(t.get("upid", "?"))
+    return hits
+
+
+def reload_proxy():
+    rc, out, err = run(["systemctl", "reload", "proxmox-backup-proxy"], timeout=60)
+    if rc != 0:
+        raise RuntimeError("proxy reload failed: %s" % (err or out))
+    # SIGHUP is asynchronous; give the proxy a moment to re-read the config
+    # before anything downstream asserts on its behaviour.
+    time.sleep(5)
+
+
+def journal_since(stamp):
+    rc, out, _err = run(
+        ["journalctl", "-u", "proxmox-backup-proxy", "--since", stamp, "--no-pager"],
+        timeout=60,
+    )
+    if rc != 0:
+        return []
+    bad = []
+    for line in out.splitlines():
+        low = line.lower()
+        if any(s in low for s in (
+            "access denied", "invalidaccesskeyid", "signaturedoesnotmatch",
+            "permission denied", "403 forbidden", "unable to read",
+        )):
+            bad.append(line)
+    return bad
+
+
+def backup_config():
+    stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    dest = os.path.join(STATE_DIR, "s3.cfg.%s" % stamp)
+    st = os.stat(S3_CFG)
+    shutil.copy2(S3_CFG, dest)
+    # The backup holds live credentials; unlike the original it is never read by
+    # the proxy, so it does not need the backup group and must not have it.
+    os.chmod(dest, 0o600)
+    os.chown(dest, st.st_uid, 0)
+    return dest
+
+
+def restore_config(backup_path):
+    st = os.stat(S3_CFG)
+    shutil.copyfile(backup_path, S3_CFG)
+    os.chmod(S3_CFG, CFG_MODE)
+    os.chown(S3_CFG, st.st_uid, st.st_gid)
+    assert_cfg_permissions()
+
+
+def prune_backups():
+    entries = sorted(
+        f for f in os.listdir(STATE_DIR) if f.startswith("s3.cfg.")
+    )
+    for stale in entries[:-BACKUP_RETAIN] if len(entries) > BACKUP_RETAIN else []:
+        os.unlink(os.path.join(STATE_DIR, stale))
+
+
+def smallest_snapshot():
+    """The cheapest snapshot to re-read, so an optional end-to-end proof costs
+    as little egress as possible."""
+    rc, out, _err = run(
+        [DEBUG_TOOL, "api", "get",
+         "/admin/datastore/%s/snapshots" % DATASTORE, "--output-format", "json"],
+        timeout=300,
+    )
+    if rc != 0:
+        return None
+    try:
+        snaps = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    usable = [
+        s for s in snaps
+        if s.get("backup-type") and s.get("backup-id")
+        and s.get("backup-time") is not None
+    ]
+    if not usable:
+        return None
+    return min(usable, key=lambda s: s.get("size") or 0)
+
+
+def verify_snapshot(snap):
+    """Verify one snapshot through the API. ignore-verified=false forces a real
+    re-read even if the snapshot already carries a verification record."""
+    cmd = [
+        DEBUG_TOOL, "api", "create", "/admin/datastore/%s/verify" % DATASTORE,
+        "--backup-type", snap["backup-type"],
+        "--backup-id", str(snap["backup-id"]),
+        "--backup-time", str(snap["backup-time"]),
+        "--ignore-verified", "false",
+    ]
+    return run(cmd, timeout=VERIFY_TIMEOUT)
+
+
+# --------------------------------------------------------------------------
+# Metrics
+# --------------------------------------------------------------------------
+
+def write_metrics(status, age_days=None, rotated=False):
+    """status: 0 ok / 1 failed / 2 deferred (nothing attempted)."""
+    if not os.path.isdir(os.path.dirname(METRICS_FILE)):
+        return
+    now = int(time.time())
+    lines = [
+        "# HELP pbs_s3_key_rotation_last_run_timestamp_seconds When the rotation unit last ran.",
+        "# TYPE pbs_s3_key_rotation_last_run_timestamp_seconds gauge",
+        "pbs_s3_key_rotation_last_run_timestamp_seconds %d" % now,
+        "# HELP pbs_s3_key_rotation_last_status 0=ok 1=failed 2=deferred.",
+        "# TYPE pbs_s3_key_rotation_last_status gauge",
+        "pbs_s3_key_rotation_last_status %d" % status,
+    ]
+    if rotated:
+        lines += [
+            "# HELP pbs_s3_key_rotation_last_success_timestamp_seconds When a rotation last completed.",
+            "# TYPE pbs_s3_key_rotation_last_success_timestamp_seconds gauge",
+            "pbs_s3_key_rotation_last_success_timestamp_seconds %d" % now,
+        ]
+    if age_days is not None:
+        lines += [
+            "# HELP pbs_s3_key_rotation_key_age_days Age of the PBS S3 access key in days.",
+            "# TYPE pbs_s3_key_rotation_key_age_days gauge",
+            "pbs_s3_key_rotation_key_age_days %d" % age_days,
+        ]
+    tmp = METRICS_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, METRICS_FILE)
+
+
+# --------------------------------------------------------------------------
+
+def rotate(args):
+    endpoints = pbs_endpoints()
+    if ENDPOINT_ID not in endpoints:
+        raise RuntimeError("endpoint %s is not configured on this host" % ENDPOINT_ID)
+    endpoint_host = endpoints[ENDPOINT_ID].get("endpoint", "")
+    configured_key = endpoints[ENDPOINT_ID].get("access-key")
+    log("preflight: endpoint %s currently uses key ...%s"
+        % (ENDPOINT_ID, (configured_key or "????")[-4:]))
+
+    if DEFER_ON_ACTIVE_TASKS:
+        busy = active_datastore_tasks()
+        if busy:
+            log("deferring: %d task(s) active against %s (%s)"
+                % (len(busy), DATASTORE, busy[0]))
+            write_metrics(2)
+            return 0
+
+    if REQUIRE_CLEAN_BASELINE:
+        ok, detail = s3_check()
+        if not ok:
+            raise RuntimeError(
+                "baseline s3 check already failing (%s) - refusing to rotate on top "
+                "of a broken endpoint; fix the current credential first" % detail
+            )
+        log("preflight: baseline s3 check passes")
+
+    token = vault_login()
+    log("preflight: authenticated to Vault via AppRole")
+    reap_stale_lease(token)
+
+    rotated_at = vault_rotated_at(token)
+    age_days = (datetime.date.today() - rotated_at).days if rotated_at else None
+    if age_days is not None:
+        log("preflight: recorded key age is %d day(s)" % age_days)
+    else:
+        log("preflight: no rotated_at metadata recorded; treating as due")
+
+    # --check deliberately ignores the age gate. Its whole job is to exercise
+    # the credential path -- lease, SigV4, IAM scope -- and a check that returns
+    # "not due yet" without doing any of that validates nothing.
+    if not args.force and not args.check and age_days is not None \
+            and age_days < ROTATE_AFTER_DAYS:
+        log("nothing to do: %d < %d days" % (age_days, ROTATE_AFTER_DAYS))
+        write_metrics(0, age_days=age_days)
+        return 0
+
+    creds = vault_aws_creds(token)
+    log("leased a throwaway rotator identity from Vault (%s/creds/%s)"
+        % (VAULT_AWS_MOUNT, VAULT_AWS_ROLE))
+
+    new_key = None
+    backup_path = None
+    swapped = False
+    try:
+        keys = wait_for_rotator(creds, ROTATOR_READY_WAIT)
+        log("IAM reports %d key(s) for %s: %s"
+            % (len(keys), IAM_USER, ", ".join("...%s/%s" % (k["id"][-4:], k["status"]) for k in keys)))
+
+        if args.check:
+            match = configured_key in [k["id"] for k in keys]
+            log("check: PBS-configured key present in IAM: %s" % match)
+            log("check: SigV4 signing, Vault AppRole, rotator lease and IAM scope all work")
+            log("check: nothing was modified")
+            return 0 if match else 1
+
+        if len(keys) >= 2:
+            raise RuntimeError(
+                "%s already has 2 access keys, which is the AWS maximum. That "
+                "normally means a previous rotation failed after minting. "
+                "Resolve by hand: identify which key s3.cfg uses, confirm it "
+                "works, delete the other, then re-run." % IAM_USER
+            )
+        if not keys:
+            raise RuntimeError("%s has no access keys - nothing to rotate" % IAM_USER)
+
+        old_key = keys[0]
+        if configured_key and old_key["id"] != configured_key:
+            raise RuntimeError(
+                "drift: PBS uses ...%s but IAM's only key is ...%s. Rotating would "
+                "revoke the wrong credential." % (configured_key[-4:], old_key["id"][-4:])
+            )
+
+        # --- 2. mint -------------------------------------------------------
+        new_key = iam_create_access_key(creds)
+        log("minted new key ...%s (old ...%s still live)"
+            % (new_key["id"][-4:], old_key["id"][-4:]))
+
+        # --- 3. prove ------------------------------------------------------
+        deadline = time.time() + NEW_KEY_WAIT
+        ok, detail = False, "not attempted"
+        while time.time() < deadline:
+            ok, detail = s3_key_works(new_key["id"], new_key["secret"])
+            if ok:
+                break
+            # InvalidAccessKeyId here is IAM propagation, not a bad key.
+            time.sleep(5)
+        if not ok:
+            raise RuntimeError(
+                "new key never became usable against %s within %ds (%s)"
+                % (BUCKET, NEW_KEY_WAIT, detail)
+            )
+        log("new key verified directly against s3://%s" % BUCKET)
+
+        # --- 4. swap -------------------------------------------------------
+        before = config_sections()
+        backup_path = backup_config()
+        log("backed up s3.cfg to %s" % backup_path)
+
+        # The secret is passed in argv here. That is a deliberate trade: the
+        # alternative is hand-editing s3.cfg, which is what broke the proxy on
+        # 2026-08-21 by leaving it mode 0600. Letting PBS write its own config
+        # is worth a momentary argv exposure on a host where only root has a
+        # shell; the window is one exec and the key is replaced on failure.
+        rc, out, err = run([
+            PBM, "s3", "endpoint", "update", ENDPOINT_ID,
+            "--access-key", new_key["id"],
+            "--secret-key", new_key["secret"],
+        ], timeout=60)
+        if rc != 0:
+            raise RuntimeError("s3 endpoint update failed: %s" % (err or out))
+        swapped = True
+        assert_cfg_permissions()
+
+        after = config_sections()
+        for name, text in before.items():
+            if name == ENDPOINT_ID:
+                continue
+            if after.get(name) != text:
+                raise RuntimeError(
+                    "endpoint %s changed during the swap - refusing to continue" % name
+                )
+        log("sibling endpoint stanzas byte-identical after swap")
+
+        # --- 5. reload -----------------------------------------------------
+        reload_stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        reload_proxy()
+        log("reloaded proxmox-backup-proxy")
+
+        # --- 6. verify -----------------------------------------------------
+        ok, detail = s3_check()
+        if not ok:
+            raise RuntimeError("post-swap s3 check failed: %s" % detail)
+        log("post-swap s3 check passes")
+
+        complaints = journal_since(reload_stamp)
+        if complaints:
+            raise RuntimeError(
+                "proxy journal shows auth/permission errors after reload: %s"
+                % complaints[0][:200]
+            )
+
+        if VERIFY_SNAPSHOT:
+            snap = smallest_snapshot()
+            if snap:
+                label = "%s/%s/%s" % (snap["backup-type"], snap["backup-id"],
+                                      snap["backup-time"])
+                log("verifying %s end-to-end (reads chunks back out of S3)" % label)
+                rc, out, err = verify_snapshot(snap)
+                if rc != 0:
+                    raise RuntimeError("post-rotation verify failed: %s" % (err or out))
+                log("snapshot verify passed")
+            else:
+                log("WARNING: no snapshot available to verify; relying on s3 check")
+
+        # --- 7. record -----------------------------------------------------
+        # Past this point the new key is live and proven. A Vault failure must
+        # NOT roll back a working config, and must not revoke the old key
+        # either: leaving two live keys is recoverable and detectable, whereas
+        # revoking with a stale record loses track of what is in use.
+        try:
+            today = vault_record(token, new_key["id"], new_key["secret"], endpoint_host)
+        except Exception as exc:
+            log("ERROR: rotation succeeded but recording it in Vault failed: %s" % exc)
+            log("       %s is LIVE and working on key ...%s" % (ENDPOINT_ID, new_key["id"][-4:]))
+            log("       the old key ...%s was deliberately NOT revoked" % old_key["id"][-4:])
+            log("       fix Vault, update %s/%s by hand, then delete the old key"
+                % (KV_MOUNT, KV_PATH))
+            write_metrics(1)
+            return 1
+        log("recorded in %s/%s with rotated_at=%s" % (KV_MOUNT, KV_PATH, today))
+
+        # --- 8. revoke -----------------------------------------------------
+        iam_delete_access_key(creds, old_key["id"])
+        remaining = [k["id"] for k in iam_list_access_keys(creds)]
+        if old_key["id"] in remaining:
+            raise RuntimeError("old key ...%s still present after delete" % old_key["id"][-4:])
+        log("revoked old key ...%s; %s now has exactly %d key"
+            % (old_key["id"][-4:], IAM_USER, len(remaining)))
+
+        prune_backups()
+        write_metrics(0, age_days=0, rotated=True)
+        log("ROTATION COMPLETE: %s now uses ...%s" % (ENDPOINT_ID, new_key["id"][-4:]))
+        return 0
+
+    except Exception as exc:
+        log("ERROR: %s" % exc)
+        if swapped and backup_path:
+            log("rolling back to %s" % backup_path)
+            try:
+                restore_config(backup_path)
+                reload_proxy()
+                ok, detail = s3_check()
+                log("rollback %s (s3 check: %s)" % ("OK" if ok else "FAILED", detail))
+            except Exception as rb:
+                log("CRITICAL: rollback failed: %s" % rb)
+                log("CRITICAL: restore %s to %s by hand, chown root:backup, chmod 0640, "
+                    "then systemctl reload proxmox-backup-proxy" % (backup_path, S3_CFG))
+        if new_key:
+            try:
+                iam_delete_access_key(creds, new_key["id"])
+                log("deleted the unused new key ...%s" % new_key["id"][-4:])
+            except Exception as de:
+                log("WARNING: could not delete new key ...%s: %s"
+                    % (new_key["id"][-4:], de))
+        write_metrics(1)
+        return 1
+    finally:
+        vault_revoke(token, creds.get("lease_id", ""))
+
+
+def _on_signal(signum, _frame):
+    # Raised as a normal exception rather than letting the default handler kill
+    # the process, so a `systemctl stop` mid-rotation still runs the rollback
+    # and still revokes the rotator lease.
+    raise RuntimeError("interrupted by signal %d" % signum)
+
+
+def main():
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+
+    parser = argparse.ArgumentParser(description="Rotate the PBS S3 access key.")
+    parser.add_argument("--check", action="store_true",
+                        help="validate Vault auth, the rotator lease and IAM scope "
+                             "without changing anything")
+    parser.add_argument("--force", action="store_true",
+                        help="rotate regardless of recorded key age")
+    args = parser.parse_args()
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    os.chmod(STATE_DIR, 0o750)
+
+    with open(LOCK_FILE, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log("another rotation is already running; exiting")
+            return 0
+        try:
+            return rotate(args)
+        except Exception as exc:
+            log("ERROR: %s" % exc)
+            write_metrics(1)
+            return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

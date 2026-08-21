@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  role_name: pbs_s3_key_rotation
+  description: >-
+    Rotate the AWS access key behind the PBS S3 datastore as one atomic
+    operation - mint, prove, swap, reload, verify, record in Vault, revoke -
+    using a short-lived rotator identity leased from Vault's AWS secrets engine.
+  license: MIT
+  min_ansible_version: "2.14"
+dependencies: []

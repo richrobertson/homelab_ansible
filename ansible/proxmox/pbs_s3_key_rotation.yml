@@ -1,0 +1,214 @@
+---
+# Automate rotation of the AWS access key behind the pbs-s3 datastore.
+#
+# This is step 6 of runbooks/security/aws-credential-scoping.md and the last
+# open item of Workstream 3 task 3 in
+# runbooks/security/credential-lifecycle-roadmap.md ("write rotation playbooks
+# that change the credential *and* update Vault *and* restart consumers as one
+# operation"). It was the estate's last purely static credential: nothing
+# rotated it and, until it was recorded at secret/aws/pbs-backup/credentials,
+# nothing would have noticed it ageing out.
+#
+# WHAT THIS PROVISIONS
+#
+#   Vault  aws/roles/pbs-key-rotator   dynamic IAM identity, scoped to managing
+#                                      access keys on ONE user
+#          sys/policies/acl/...        read that role + write the KV record
+#          auth/approle/role/...       how the PBS host authenticates
+#   PBS    /usr/local/sbin/pbs-rotate-s3-key.py, plus a daily timer
+#
+# WHY A DYNAMIC ROTATOR IDENTITY. Letting the PBS key rotate itself would let a
+# stolen key mint its own successor and survive every future rotation, which is
+# the one thing rotation is meant to prevent. A dedicated static rotator key
+# would just be a more privileged credential that nothing rotates either. So
+# Vault mints a throwaway IAM user per rotation and the script revokes the
+# lease when it finishes.
+#
+# Run:
+#   export VAULT_ADDR=https://vault.myrobertson.net:8200 VAULT_TOKEN=...
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/pbs_s3_key_rotation.yml
+#
+# Validate the whole credential path without touching a key:
+#   /usr/local/sbin/pbs-rotate-s3-key.py --check
+#
+# Rotate right now, ignoring the age gate:
+#   systemd-run --unit=pbs-rotate-now --wait --collect \
+#     /usr/local/sbin/pbs-rotate-s3-key.py --force
+#   journalctl -u pbs-rotate-now --no-pager
+
+- name: Provision Vault for the PBS S3 key rotation
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+
+  vars_files:
+    - roles/pbs_s3_key_rotation/defaults/main.yml
+
+  vars:
+    boot_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    boot_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    aws_mount: "{{ pbs_s3_key_rotation_vault_aws_mount }}"
+    aws_role: "{{ pbs_s3_key_rotation_vault_aws_role }}"
+    kv_mount: "{{ pbs_s3_key_rotation_vault_kv_mount }}"
+    kv_path: "{{ pbs_s3_key_rotation_vault_kv_path }}"
+    policy_name: "{{ pbs_s3_key_rotation_policy_name }}"
+    approle: "{{ pbs_s3_key_rotation_approle_name }}"
+
+  tasks:
+    - name: Require Vault environment
+      ansible.builtin.assert:
+        that:
+          - boot_addr | length > 0
+          - boot_token | length > 0
+        fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running this playbook.
+
+    # The entire blast radius of a leaked rotator credential. iam:*AccessKey* on
+    # exactly one user ARN: it cannot read the key it manages, cannot touch any
+    # other principal, and cannot attach a policy to anything.
+    - name: Render the rotator IAM policy
+      ansible.builtin.set_fact:
+        rotator_iam_policy:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: RotateThisUsersAccessKeysOnly
+              Effect: Allow
+              Action:
+                - iam:ListAccessKeys
+                - iam:CreateAccessKey
+                - iam:DeleteAccessKey
+                - iam:UpdateAccessKey
+                - iam:GetAccessKeyLastUsed
+              Resource: >-
+                arn:aws:iam::{{ pbs_s3_key_rotation_aws_account_id
+                }}:user/{{ pbs_s3_key_rotation_iam_user }}
+
+    - name: Create the Vault AWS role that mints the rotator identity
+      community.hashi_vault.vault_write:
+        url: "{{ boot_addr }}"
+        token: "{{ boot_token }}"
+        path: "{{ aws_mount }}/roles/{{ aws_role }}"
+        data:
+          # iam_user, not assumed_role or federation_token: a federation token
+          # cannot call IAM at all, and assumed_role would need a standing role
+          # to exist. Vault's engine root is already scoped to user/vault-* so
+          # the throwaway users it creates land inside that scope.
+          #
+          # No TTL is set here on purpose. default_sts_ttl/max_sts_ttl are
+          # rejected for iam_user credentials, and the only other knob is the
+          # mount-wide aws/config/lease, which terraformRemoteState shares --
+          # shortening it centrally would expire Terraform's state credentials
+          # mid-apply. The script instead revokes its own lease in a finally
+          # block and reaps any lease a killed run left behind.
+          credential_type: iam_user
+          policy_document: "{{ rotator_iam_policy | to_json }}"
+
+    - name: Render the rotation Vault policy
+      ansible.builtin.set_fact:
+        rotation_policy_hcl: |
+          # Lease the throwaway rotator identity.
+          path "{{ aws_mount }}/creds/{{ aws_role }}" {
+            capabilities = ["read"]
+          }
+
+          # Revoke it again when the rotation finishes, rather than leaving a
+          # live IAM user around until the lease TTL reaps it. The lease id is
+          # part of the PATH for this endpoint (PUT sys/leases/revoke/<id>), so
+          # granting the bare path is not enough -- that denial is only visible
+          # at revoke time, long after the interesting part of a rotation.
+          path "sys/leases/revoke/*" {
+            capabilities = ["update"]
+          }
+
+          path "sys/leases/revoke" {
+            capabilities = ["update"]
+          }
+
+          # The rotation record itself. Read is needed for the age gate, which
+          # is what makes the daily timer a no-op until the key is due.
+          path "{{ kv_mount }}/data/{{ kv_path }}" {
+            capabilities = ["create", "update", "read"]
+          }
+
+          path "{{ kv_mount }}/metadata/{{ kv_path }}" {
+            capabilities = ["create", "update", "read"]
+          }
+
+    - name: Read the current rotation Vault policy
+      community.hashi_vault.vault_read:
+        url: "{{ boot_addr }}"
+        token: "{{ boot_token }}"
+        path: "sys/policies/acl/{{ policy_name }}"
+      register: existing_policy
+      failed_when: false
+
+    # Compared with whitespace collapsed: Vault returns the policy verbatim and
+    # an insignificant newline difference must not rewrite it on every run.
+    - name: Write the rotation Vault policy
+      community.hashi_vault.vault_write:
+        url: "{{ boot_addr }}"
+        token: "{{ boot_token }}"
+        path: "sys/policies/acl/{{ policy_name }}"
+        data:
+          policy: "{{ rotation_policy_hcl }}"
+      vars:
+        current: >-
+          {{ (existing_policy.data.data.policy | default(''))
+             | regex_replace('\s+', ' ') | trim }}
+        wanted: >-
+          {{ rotation_policy_hcl | regex_replace('\s+', ' ') | trim }}
+      when: current != wanted
+
+    - name: Read the current rotation AppRole
+      community.hashi_vault.vault_read:
+        url: "{{ boot_addr }}"
+        token: "{{ boot_token }}"
+        path: "auth/approle/role/{{ approle }}"
+      register: existing_approle
+      failed_when: false
+
+    - name: Create the rotation AppRole
+      community.hashi_vault.vault_write:
+        url: "{{ boot_addr }}"
+        token: "{{ boot_token }}"
+        path: "auth/approle/role/{{ approle }}"
+        data:
+          token_policies: "{{ policy_name }}"
+          token_ttl: "{{ pbs_s3_key_rotation_token_ttl_seconds }}"
+          token_max_ttl: "{{ pbs_s3_key_rotation_token_max_ttl_seconds }}"
+          secret_id_num_uses: 0
+          secret_id_ttl: 0
+      vars:
+        cur: "{{ existing_approle.data.data | default({}) }}"
+        ttl: "{{ pbs_s3_key_rotation_token_ttl_seconds }}"
+        max_ttl: "{{ pbs_s3_key_rotation_token_max_ttl_seconds }}"
+      when: >-
+        cur.token_policies | default([]) != [policy_name]
+        or cur.token_ttl | default(0) | int != ttl | int
+        or cur.token_max_ttl | default(0) | int != max_ttl | int
+
+    - name: Read the rotation AppRole role_id
+      community.hashi_vault.vault_read:
+        url: "{{ boot_addr }}"
+        token: "{{ boot_token }}"
+        path: "auth/approle/role/{{ approle }}/role-id"
+      register: pbs_rot_role_id
+      no_log: true
+
+- name: Install the PBS S3 key rotation
+  hosts: pbs_servers
+  become: true
+  gather_facts: true
+  tags:
+    - pbs
+    - pbs_s3_key_rotation
+
+  vars:
+    pbs_s3_key_rotation_role_id: >-
+      {{ hostvars['localhost'].pbs_rot_role_id.data.data.role_id }}
+    pbs_s3_key_rotation_bootstrap_vault_token: >-
+      {{ lookup('env', 'VAULT_TOKEN') }}
+
+  roles:
+    - role: pbs_s3_key_rotation

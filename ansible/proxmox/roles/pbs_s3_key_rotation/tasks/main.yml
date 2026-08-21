@@ -1,0 +1,157 @@
+---
+- name: Require the AppRole credentials the rotation authenticates with
+  ansible.builtin.assert:
+    that:
+      - pbs_s3_key_rotation_role_id | default('') | length > 0
+      - pbs_s3_key_rotation_bootstrap_vault_token | default('') | length > 0
+    fail_msg: >-
+      pbs_s3_key_rotation needs a role_id and a bootstrap Vault token. The
+      calling playbook provisions the AppRole against Vault and passes them in;
+      run ansible/proxmox/pbs_s3_key_rotation.yml rather than this role
+      directly.
+
+- name: Confirm the tools the rotation depends on are present
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: pbs_s3_key_rotation_tools
+  loop:
+    - /usr/sbin/proxmox-backup-manager
+    - /usr/sbin/proxmox-backup-debug
+    - /usr/bin/vault
+    - "{{ pbs_s3_key_rotation_vault_ca_file }}"
+
+- name: Require those tools
+  ansible.builtin.assert:
+    that:
+      - pbs_s3_key_rotation_tools.results
+        | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing one of proxmox-backup-manager, proxmox-backup-debug, the vault
+      CLI, or the Vault CA at
+      {{ pbs_s3_key_rotation_vault_ca_file }}. The CA is installed by
+      ansible/proxmox/provision_certificates.yml.
+
+# Fail here rather than at 03:30 on the day the key comes due.
+- name: Read the configured S3 endpoints
+  ansible.builtin.command:
+    cmd: proxmox-backup-manager s3 endpoint list --output-format json
+  register: pbs_s3_key_rotation_endpoints
+  changed_when: false
+
+- name: Require the endpoint this role rotates
+  ansible.builtin.assert:
+    that:
+      - pbs_s3_key_rotation_endpoint_id in
+        (pbs_s3_key_rotation_endpoints.stdout | from_json
+         | map(attribute='id') | list)
+    fail_msg: >-
+      S3 endpoint '{{ pbs_s3_key_rotation_endpoint_id }}' is not configured on
+      this host. Configured: {{ pbs_s3_key_rotation_endpoints.stdout | from_json
+      | map(attribute='id') | list | join(', ') }}.
+
+- name: Ensure the rotation state directory exists
+  ansible.builtin.file:
+    path: "{{ pbs_s3_key_rotation_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+# Deliberately a separate AppRole from the certificate agent's. Widening that
+# one to mint AWS credentials would mean a leaked cert-renewal credential could
+# also rotate IAM keys.
+- name: Install the rotation AppRole role_id
+  ansible.builtin.copy:
+    content: "{{ pbs_s3_key_rotation_role_id }}"
+    dest: "{{ pbs_s3_key_rotation_role_id_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Check whether this host already holds a rotation secret_id
+  ansible.builtin.stat:
+    path: "{{ pbs_s3_key_rotation_secret_id_file }}"
+  register: pbs_s3_key_rotation_secret_id_stat
+
+# Minted only when the host has none, so re-running the playbook does not churn
+# the credential on every pass.
+- name: Mint a rotation secret_id for this host
+  community.hashi_vault.vault_write:
+    url: "{{ pbs_s3_key_rotation_vault_addr }}"
+    token: "{{ pbs_s3_key_rotation_bootstrap_vault_token }}"
+    path: "auth/approle/role/{{ pbs_s3_key_rotation_approle_name }}/secret-id"
+    data:
+      metadata: '{"node": "{{ inventory_hostname }}"}'
+  register: pbs_s3_key_rotation_secret_id_result
+  when: not pbs_s3_key_rotation_secret_id_stat.stat.exists
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: Install the rotation AppRole secret_id
+  ansible.builtin.copy:
+    content: "{{ pbs_s3_key_rotation_secret_id_result.data.data.secret_id }}"
+    dest: "{{ pbs_s3_key_rotation_secret_id_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: not pbs_s3_key_rotation_secret_id_stat.stat.exists
+  no_log: true
+
+- name: Install the rotation script
+  ansible.builtin.template:
+    src: pbs-rotate-s3-key.py.j2
+    dest: "{{ pbs_s3_key_rotation_script }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Verify the rotation script is syntactically valid
+  ansible.builtin.command:
+    cmd: python3 -m py_compile {{ pbs_s3_key_rotation_script }}
+  changed_when: false
+
+- name: Install the rotation systemd service
+  ansible.builtin.template:
+    src: pbs-rotate-s3-key.service.j2
+    dest: "/etc/systemd/system/{{ pbs_s3_key_rotation_unit_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install the rotation systemd timer
+  ansible.builtin.template:
+    src: pbs-rotate-s3-key.timer.j2
+    dest: "/etc/systemd/system/{{ pbs_s3_key_rotation_unit_name }}.timer"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Apply pending unit changes before enabling the timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the rotation timer
+  ansible.builtin.systemd_service:
+    name: "{{ pbs_s3_key_rotation_unit_name }}.timer"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# Proves the whole credential chain end to end -- AppRole login, the leased
+# rotator identity, SigV4 signing and the IAM scope -- without touching a key.
+# A rotation path that is only exercised once every 75 days is a rotation path
+# that is broken when you need it.
+- name: Validate the rotation path without changing anything
+  ansible.builtin.command:
+    cmd: "{{ pbs_s3_key_rotation_script }} --check"
+  register: pbs_s3_key_rotation_check
+  changed_when: false
+  when: pbs_s3_key_rotation_run_check | default(true) | bool
+
+- name: Show the validation result
+  ansible.builtin.debug:
+    var: pbs_s3_key_rotation_check.stdout_lines
+  when: pbs_s3_key_rotation_run_check | default(true) | bool

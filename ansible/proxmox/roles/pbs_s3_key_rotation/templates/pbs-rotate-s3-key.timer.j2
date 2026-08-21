@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Daily due-check for the {{ pbs_s3_key_rotation_datastore }} S3 access key rotation
+Documentation=file://{{ pbs_s3_key_rotation_script }}
+
+[Timer]
+# Runs daily but rotates only when the recorded key age reaches
+# {{ pbs_s3_key_rotation_rotate_after_days }} days; every other run is a single
+# Vault metadata read and an immediate exit. Checking daily rather than monthly
+# is what keeps the rotation from drifting past the {{ pbs_s3_key_rotation_interval_days }}-day
+# alert threshold.
+OnCalendar={{ pbs_s3_key_rotation_on_calendar }}
+RandomizedDelaySec={{ pbs_s3_key_rotation_randomized_delay }}
+# Catch up after downtime: a PBS host that was off for a fortnight should
+# evaluate the key on the next boot rather than waiting for the next window.
+Persistent=true
+Unit={{ pbs_s3_key_rotation_unit_name }}.service
+
+[Install]
+WantedBy=timers.target
