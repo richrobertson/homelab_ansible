@@ -99,12 +99,33 @@ part:
   — cloudwatch, sns, sqs, route53, ses/sesv2, lambda, logs, events, ssm, ec2/vpc,
   kms:Decrypt, sts.
 
-## Do this first
+## Trail enabled — 2026-08-21
 
-**Enable a CloudTrail trail with S3 data events for the state bucket.** Right now
-there is no durable audit record — Event History is 90 days, is not exportable,
-and omits exactly the object-level access that matters for a state file. Any
-future review of this question hits the same wall this one did.
+`homelab-management-trail`, multi-region, log-file validation on, delivering to
+`s3://myrobertson-homelab-cloudtrail` (public access blocked, AES256 + bucket
+keys, versioned, 400-day expiry with 30-day noncurrent expiry to cap storage).
+
+Two advanced event selectors:
+
+| Selector | Captures |
+| --- | --- |
+| `management-events` | all management events, all regions |
+| `management-and-state-bucket` | `AWS::S3::Object` data events, ARN prefix `arn:aws:s3:::myrobertson-homelab-terraform/` only |
+
+**Data events are deliberately scoped to the state bucket alone.** They are
+billed per event (~$0.10/100k); enabling them across the backup buckets, which
+hold millions of restic and PBS chunk objects, would be expensive for no
+investigative value. Management events are free for the first trail.
+
+Gotcha worth recording: `CreateTrail` fails with
+`InsufficientS3BucketPolicyException` if the bucket policy's `s3:GetBucketAcl`
+statement carries an `aws:SourceArn` condition — CloudTrail validates that call
+before the trail exists, so the condition cannot match. Keep `SourceArn` on the
+`s3:PutObject` statement, leave it off the ACL check.
+
+**Not yet codified in Terraform.** This was created with the CLI because a
+`terraform apply` is currently blocked on missing tfvars, so it will show as
+drift. It should become an `aws_cloudtrail` resource plus the bucket and policy.
 
 ## Honest limitation
 
