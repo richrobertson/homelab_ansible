@@ -54,10 +54,19 @@ for conf in "${CONF_DIR}"/*.conf; do
   fi
 
   # Stagger start times so several guests never trim at once -- discard is real
-  # work for a 3-OSD Ceph cluster. 30 minutes apart, and always at :17 past the
-  # hour so a sweep can never begin inside the :00-:10 window when Prometheus
-  # TSDB compaction saturates the cluster.
-  offset=$(( idx * 30 ))
+  # work for a 3-OSD Ceph cluster.
+  #
+  # The offset has to be unique CLUSTER-wide, not just per node. This script runs
+  # independently on each node, so an index-only stagger gives every node's first
+  # guest the same slot: the first version of this put vm-1001, vm-1002 and
+  # vm-101 all at 04:17. Adding a per-node base derived from the hostname's
+  # numeric suffix (pve3/4/5 -> 0/10/20 minutes) separates the nodes, while
+  # idx*30 keeps guests on the same node apart. Result here: 04:17, 04:27, 04:37,
+  # 04:47 -- four distinct slots, all at :17/:27/:37/:47 so a run can never begin
+  # inside the :00-:10 window when Prometheus TSDB compaction saturates Ceph.
+  node_num="$(printf '%s' "${NODE}" | grep -oE '[0-9]+$' || true)"
+  node_base=$(( ${node_num:-0} % 3 * 10 ))
+  offset=$(( node_base + idx * 30 ))
   hour=$(( BASE_HOUR + offset / 60 ))
   minute=$(( 17 + offset % 60 ))
   [ "${minute}" -ge 60 ] && { minute=$(( minute - 60 )); hour=$(( hour + 1 )); }
