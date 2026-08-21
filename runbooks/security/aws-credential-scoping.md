@@ -396,8 +396,32 @@ no consumer at all.
 ### Orphaned path cleanup — 2026-08-21
 
 Of the 31 paths still holding the dead key, 28 had **no VSO consumer and no
-reference anywhere in the three repos**. Soft-deleted (recoverable with
-`vault kv undelete`), which also removes them from the credential-age metrics.
+reference anywhere in the three repos**. Soft-deleted, and so recoverable with
+`vault kv undelete`.
+
+> **Correction, later the same day: soft-deleting does _not_ remove them from the
+> credential-age metrics, as originally claimed here.** `vault kv delete` removes
+> the *data* and leaves the *metadata*, and the collector is metadata-only by
+> design — it needs a date, not a password. So all 28 still export
+> `credential_vault_secret_rotated_timestamp_seconds` with their original
+> `rotated_at`, still count toward the rotation backlog, and still feed
+> `VaultSecretsSeverelyOverdue`. Measured 2026-08-21: 29 of 148 tracked secrets
+> were records for things that no longer exist.
+>
+> Fully removing one needs `vault kv metadata delete`, which is **permanent** —
+> it destroys every version, so `undelete` is no longer possible. That is the
+> reason not to do it reflexively here: `secret/volsync/prod/*` are restic
+> configs, and `secret_rotation_classes.yml -> restic_key` explains that
+> discarding a restic password can strand every snapshot in that repository
+> permanently. Confirm each repository is genuinely abandoned before destroying
+> its metadata; the soft-deleted state is the safer place to leave them until
+> then.
+>
+> `secret/aws/user/homelab` **was** fully removed, because it is an
+> `external_provider` record rather than a restic key and the IAM user it
+> described is confirmed gone (`NoSuchEntity`). It was the single oldest tracked
+> secret in the estate at 332 days — a ghost topping the age table. Tracked count
+> 148 -> 147.
 
 Three were kept because they are referenced:
 
@@ -459,8 +483,81 @@ patch will hold.
   but it should go when the path is retired, which depends on the decision about
   the 8.2 GiB still in `homelab-prod-nextcloud`.
 
+### The Vault AWS engine root key — ROTATED 2026-08-21
+
+`...2UM7` on the IAM user `vault`, **331 days old** against a 90-day interval and
+by a wide margin the oldest credential in the estate once the workload keys were
+scoped. Rotated to `...QHAH`.
+
+This one is delicate because it is the credential the `aws/` secrets engine runs
+on: both `aws/roles/terraformRemoteState` and `aws/roles/pbs-key-rotator` mint
+through it, so breaking it breaks Terraform's remote state *and* the PBS rotation.
+It is used for nothing else — `iam` in `us-east-1` only, no copy in any KV path,
+no reference in any repo, and not Terraform-managed.
+
+**The blocker, which is not obvious.** The policy `vault.myrobertson.com` scopes
+key management to `arn:...:user/vault-*`. That wildcard does **not** match
+`user/vault` — the user itself — so `vault write -f aws/config/rotate-root` would
+have failed with AccessDenied. Fixed by adding a second statement granting
+`iam:GetUser`, `iam:ListAccessKeys`, `iam:CreateAccessKey`, `iam:DeleteAccessKey`
+on `user/vault` alone (policy **v3**; roll back with
+`aws iam set-default-policy-version --policy-arn <arn> --version-id v2`).
+
+Verified with `simulate-principal-policy` that the grant is exactly that narrow:
+the engine root can rotate its own key, and still **cannot** touch
+`homelab-pbs-backup` or `homelab_terraform`, and cannot attach or inline a policy
+to itself.
+
+Rotation used Vault's own `aws/config/rotate-root` rather than a manual
+two-key overlap, so **the new secret is known only to Vault** and never passed
+through a shell, a file or this session. That is the one case where the
+mint-prove-swap-verify-revoke ordering used everywhere else is worth giving up:
+there is no way to verify a credential you are not allowed to see, and the
+recovery path is cheap — an admin can create a fresh key and rewrite
+`aws/config/root` at any time.
+
+Deliberately **not** recorded in a KV path. A record nothing updates is the trap
+documented above for PBS, and here it would also be a second copy of the most
+privileged credential in the account.
+
+Verified after rotation: `aws/config/root` reports `...QHAH`; IAM shows exactly
+one key; both engine roles leased successfully on the first attempt and their
+test leases revoked cleanly with no leftover dynamic users; and
+`pbs-rotate-s3-key.py --check` passed end to end on the PBS host, which exercises
+the whole chain through the new root.
+
+**It will age again.** Vault 1.20.4 *has* the `rotation_period` /
+`rotation_schedule` fields on `aws/config/root`, but setting either returns
+`rotation manager capabilities not supported in Vault community edition` —
+**automated root rotation is Enterprise-only.** Scheduling it therefore needs an
+external job calling `aws/config/rotate-root`; the natural home is a Kubernetes
+CronJob authenticating through the existing `prod-kubernetes` auth mount, since
+the call needs no secret material at all. Until that exists this key is manual,
+and nothing tracks its age.
+
+Incidentally confirmed safe: a partial write to `config/root` (rotation fields
+only, no `access_key`) does **not** wipe the stored credential. Established on a
+throwaway `aws` mount configured with a deliberately fake key rather than by
+experimenting on the live engine.
+
 ## Open questions for the operator
 
+- **`vault-offsite-snapshot` sits inside the engine root's wildcard.** The
+  `user/vault-*` grant was written for the throwaway users Vault creates, but it
+  also matches `vault-offsite-snapshot`, a real, permanent user backing the Vault
+  offsite snapshot job. So the AWS secrets engine can create and delete access
+  keys on it. Pre-existing, not introduced by the 2026-08-21 rotation, and not
+  fixed there because narrowing the wildcard risks breaking dynamic credential
+  generation. Fixing it properly means giving Vault's dynamic users a distinct
+  path or prefix (`vault-dyn-*`, or an IAM path) and scoping the policy to that.
+- **Schedule the engine root rotation.** It is manual today and Vault community
+  edition cannot self-schedule it (see above). Nothing measures its age either,
+  because it deliberately has no KV record — so the 331-day drift that prompted
+  this would recur silently.
+- **28 ghost `secret/volsync/prod/*` records still inflate the rotation alerts.**
+  They need `vault kv metadata delete`, which is irreversible, so each one's
+  restic repository should be confirmed abandoned first. See the correction under
+  "Orphaned path cleanup".
 - Does anything besides Terraform rely on `homelab` having admin rights? A
   CloudTrail review over 90 days would answer this definitively; it was not run
   as part of this scoping.
