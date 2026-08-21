@@ -1,0 +1,9 @@
+---
+galaxy_info:
+  role_name: guest_fstrim
+  description: >-
+    Return freed-but-allocated RBD blocks to Ceph by enabling discard on Proxmox
+    guest disks and running fstrim inside guests via the qemu guest agent.
+  license: MIT
+  min_ansible_version: "2.14"
+dependencies: []

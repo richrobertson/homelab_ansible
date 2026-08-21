@@ -1,0 +1,67 @@
+#!/bin/bash
+# {{ ansible_managed }}
+#
+# Add discard=on to this node's guest disks backed by the Ceph pools listed
+# below, so that fstrim inside the guest can actually release RBD objects.
+#
+# Idempotent: a disk that already carries discard=on is left untouched.
+#
+# NOTE: for a running guest Proxmox records this as a PENDING change. It takes
+# effect only after that guest is next stopped and started. This script never
+# restarts anything.
+#
+# --dry-run prints what it would change and exits 0.
+set -uo pipefail
+
+POOLS=({% for p in guest_fstrim_discard_pools %}"{{ p }}" {% endfor %})
+NODE="$(hostname)"
+CONF_DIR="/etc/pve/nodes/${NODE}/qemu-server"
+DRY=0
+[ "${1:-}" = "--dry-run" ] && DRY=1
+
+changed=0
+pending=0
+
+shopt -s nullglob
+for conf in "${CONF_DIR}"/*.conf; do
+  vmid="$(basename "${conf}" .conf)"
+
+  while IFS= read -r line; do
+    dev="${line%%:*}"
+    spec="${line#*: }"
+
+    # Only real disks on the pools we manage.
+    matched=0
+    for p in "${POOLS[@]}"; do
+      case "${spec}" in "${p}:"*) matched=1 ;; esac
+    done
+    [ "${matched}" = "1" ] || continue
+
+    # Skip cloud-init and cdrom entries; they are tiny and not trimmable.
+    case "${spec}" in *cloudinit*|*media=cdrom*) continue ;; esac
+
+    # Already trimmable?
+    case "${spec}" in *discard=on*) continue ;; esac
+
+    if [ "${DRY}" = "1" ]; then
+      echo "would set: vm-${vmid} ${dev} -> ${spec},discard=on"
+      changed=$((changed + 1))
+      continue
+    fi
+
+    if qm set "${vmid}" --"${dev}" "${spec},discard=on" >/dev/null 2>&1; then
+      echo "set discard=on: vm-${vmid} ${dev}"
+      changed=$((changed + 1))
+      if qm status "${vmid}" 2>/dev/null | grep -q running; then
+        echo "  NOTE vm-${vmid} is running; change is PENDING until its next stop/start"
+        pending=$((pending + 1))
+      fi
+    else
+      echo "FAILED to set discard on vm-${vmid} ${dev}" >&2
+    fi
+  # Match disk lines: scsi0/virtio0/sata0/ide0 etc.
+  done < <(grep -E '^(scsi|virtio|sata|ide)[0-9]+: ' "${conf}" 2>/dev/null)
+done
+
+echo "discard: ${changed} disk(s) updated on ${NODE}, ${pending} awaiting a guest restart"
+exit 0

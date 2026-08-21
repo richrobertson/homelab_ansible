@@ -1,0 +1,19 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Trim guest filesystems to return freed blocks to Ceph
+Documentation=file://{{ guest_fstrim_script }}
+After=pve-cluster.service
+Wants=pve-cluster.service
+
+[Service]
+Type=oneshot
+ExecStart={{ guest_fstrim_script }}
+# One guest at a time with a {{ guest_fstrim_pause_between_guests }}s pause, so a
+# node with many guests can legitimately run for a long while.
+TimeoutStartSec=14400
+# Trim is pure housekeeping; never let it compete with production IO.
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

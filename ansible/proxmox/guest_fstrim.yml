@@ -1,0 +1,57 @@
+---
+# Return freed-but-still-allocated RBD blocks to Ceph from the Proxmox side.
+#
+# Nothing in this estate ever trimmed. A filesystem frees a block on delete, but
+# with no discard reaching RBD the object stays allocated, so every image grows
+# to its high-water mark and never shrinks. Measured 2026-08-20: Ceph 75.35%
+# full (3 OSDs, 5.2 TiB raw) with a large share of that already-freed space.
+#
+# Six guest disks had no discard=on at all and so could never shrink -- and they
+# are exactly the images `rbd du` showed fully allocated:
+#
+#   vm-101  virtio0  80G   (79G allocated)
+#   vm-112  scsi0    80G   (80G allocated, completely full)
+#   vm-119  scsi0    32G
+#   vm-129  scsi0    32G   (25G allocated)
+#   vm-1001 scsi0    42G   (42G allocated, completely full)
+#   vm-1002 scsi0    42G   (32G allocated)
+#
+# This playbook installs a weekly, paced fstrim sweep driven through the qemu
+# guest agent (every guest here has agent=1) and adds discard=on where missing.
+#
+# TWO CAVEATS WORTH READING BEFORE RUNNING:
+#
+#  1. discard=on applied to a RUNNING guest is a PENDING change in Proxmox. It
+#     does not take effect until that guest is next stopped and started. This
+#     playbook never restarts a guest. Until those six are cycled, their images
+#     still cannot shrink.
+#
+#  2. This covers the Proxmox half only. The larger prize -- ~148 GiB logical /
+#     445 GiB raw in Kubernetes RBD PVCs, dominated by the Prometheus PVC
+#     (83 GiB allocated vs 24.6 GiB in use) and the CNPG WAL volumes -- lives on
+#     Talos nodes. Talos has no SSH and its guest agent will not exec a shell, so
+#     Ansible cannot reach it. That half needs a privileged DaemonSet managed
+#     through Flux.
+#
+# Run:
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/guest_fstrim.yml
+#
+# Preview only (shows which disks would gain discard=on, changes nothing):
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/guest_fstrim.yml --check
+#
+# Trim now rather than waiting for the timer (paced, one guest at a time):
+#   systemctl start pve-guest-fstrim.service
+#   journalctl -u pve-guest-fstrim -f
+- name: Install the Proxmox guest fstrim sweep
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: true
+  serial: 1
+  tags:
+    - proxmox
+    - fstrim
+    - ceph
+  roles:
+    - role: guest_fstrim

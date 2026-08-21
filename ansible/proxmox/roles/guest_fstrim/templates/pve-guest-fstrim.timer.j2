@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Weekly guest fstrim sweep
+
+[Timer]
+OnCalendar={{ guest_fstrim_on_calendar }}
+RandomizedDelaySec={{ guest_fstrim_randomized_delay }}
+Persistent=true
+Unit={{ guest_fstrim_unit_name }}.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,106 @@
+---
+- name: Confirm this is a Proxmox node with the qm CLI
+  ansible.builtin.stat:
+    path: /usr/sbin/qm
+  register: guest_fstrim_qm
+
+- name: Require the qm CLI
+  ansible.builtin.assert:
+    that:
+      - guest_fstrim_qm.stat.exists
+    fail_msg: >-
+      /usr/sbin/qm is missing, so this is not a Proxmox VE node. The guest_fstrim
+      role drives trims through `qm guest exec` and cannot run anywhere else.
+
+- name: Install the discard-enabling script
+  ansible.builtin.template:
+    src: pve-enable-disk-discard.sh.j2
+    dest: "{{ guest_fstrim_discard_script }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install the guest fstrim script
+  ansible.builtin.template:
+    src: pve-guest-fstrim.sh.j2
+    dest: "{{ guest_fstrim_script }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Syntax-check the installed scripts
+  ansible.builtin.command:
+    cmd: bash -n {{ item }}
+  loop:
+    - "{{ guest_fstrim_discard_script }}"
+    - "{{ guest_fstrim_script }}"
+  changed_when: false
+
+# Report what discard=on would change before changing it, so a --check run and
+# the playbook output both show the blast radius.
+- name: Preview guest disks missing discard=on
+  ansible.builtin.command:
+    cmd: "{{ guest_fstrim_discard_script }} --dry-run"
+  register: guest_fstrim_discard_preview
+  changed_when: false
+  # Run the preview even under --check; it only reads config and prints. Tolerate
+  # failure because on a first --check run the template above has not written the
+  # script yet, so there is nothing to preview.
+  check_mode: false
+  failed_when: false
+  when: guest_fstrim_enable_discard | bool
+
+- name: Show guest disks missing discard=on
+  ansible.builtin.debug:
+    var: guest_fstrim_discard_preview.stdout_lines
+  when:
+    - guest_fstrim_enable_discard | bool
+    - guest_fstrim_discard_preview.stdout_lines | default([]) | length > 0
+
+- name: Enable discard=on where it is missing
+  ansible.builtin.command:
+    cmd: "{{ guest_fstrim_discard_script }}"
+  register: guest_fstrim_discard_run
+  changed_when: "'0 disk(s) updated' not in guest_fstrim_discard_run.stdout"
+  when:
+    - guest_fstrim_enable_discard | bool
+    - not ansible_check_mode
+
+- name: Report the discard outcome
+  ansible.builtin.debug:
+    var: guest_fstrim_discard_run.stdout_lines
+  when:
+    - guest_fstrim_enable_discard | bool
+    - guest_fstrim_discard_run.stdout_lines is defined
+
+- name: Install the fstrim systemd service
+  ansible.builtin.template:
+    src: pve-guest-fstrim.service.j2
+    dest: "/etc/systemd/system/{{ guest_fstrim_unit_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install the fstrim systemd timer
+  ansible.builtin.template:
+    src: pve-guest-fstrim.timer.j2
+    dest: "/etc/systemd/system/{{ guest_fstrim_unit_name }}.timer"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Apply pending unit changes before enabling the timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the fstrim timer
+  ansible.builtin.systemd_service:
+    name: "{{ guest_fstrim_unit_name }}.timer"
+    enabled: true
+    state: started
+    daemon_reload: true
+  # Under --check the unit files above were never written, so systemd cannot
+  # find the timer and this would fail on a preview run rather than reporting
+  # what it would do.
+  when: not ansible_check_mode

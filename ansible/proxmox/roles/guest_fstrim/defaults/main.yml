@@ -1,0 +1,70 @@
+---
+# roles/guest_fstrim
+#
+# Return freed-but-still-allocated RBD blocks to Ceph.
+#
+# WHY THIS EXISTS. Nothing in this estate ever trimmed. ext4 (and the guest
+# filesystems) free a block on delete, but without a discard reaching the RBD
+# layer the object stays allocated, so every volume grows to its high-water mark
+# and never shrinks. On 2026-08-20 Ceph read 75.35% full (3 OSDs, 5.2 TiB raw)
+# while a large share of that was space the filesystems had already released.
+#
+# Two independent halves, and this role only covers the first:
+#
+#   1. Proxmox guest disks in the p0 pool  <- THIS ROLE
+#      Every VM has agent=1, so `qm guest exec <vmid> -- fstrim -av` works from
+#      the PVE host. Six disks were also missing discard=on entirely and could
+#      never shrink at all (vm-101 virtio0, vm-112 scsi0, vm-119 scsi0,
+#      vm-129 scsi0, vm-1001 scsi0, vm-1002 scsi0) -- exactly the images that
+#      `rbd du` showed fully allocated.
+#
+#   2. Kubernetes RBD PVCs in rook_prod  <- NOT THIS ROLE
+#      ~148 GiB logical / 445 GiB raw, dominated by the Prometheus PVC
+#      (83 GiB allocated against 24.6 GiB in use) and the CNPG WAL volumes
+#      (19 GiB allocated against ~0.5 GiB in use). Those are mounted by Talos
+#      nodes, which have no SSH and whose guest agent will not exec a shell, so
+#      Ansible cannot reach them. They need a privileged DaemonSet/CronJob
+#      managed through Flux.
+
+# --- discard=on ---------------------------------------------------------------
+# Add discard=on to p0/rook_prod-backed guest disks that lack it. Without this,
+# fstrim inside the guest has nowhere to go and the image can never shrink.
+#
+# IMPORTANT: changing discard on a *running* VM is recorded by Proxmox as a
+# pending change. It does NOT take effect until that VM is next powered off and
+# started. This role never restarts a guest to force it -- that is the
+# operator's call.
+guest_fstrim_enable_discard: true
+
+# Storage pools whose disks should get discard=on.
+guest_fstrim_discard_pools:
+  - p0
+  - rook_prod
+
+# --- Trim pacing --------------------------------------------------------------
+# fstrim is real work for Ceph: it issues a discard for every freed extent. This
+# cluster already stalls etcd on Ceph write latency during the 2-hourly
+# Prometheus compaction burst, so the sweep is deliberately gentle -- one guest
+# at a time, with a pause between them, never in parallel.
+guest_fstrim_pause_between_guests: 60
+
+# Per-guest cap for the agent exec, in seconds.
+guest_fstrim_timeout: 900
+
+# VMIDs to skip entirely. Talos guests run the qemu agent but refuse arbitrary
+# exec, so they would fail every run; the script already treats an unsupported
+# agent as a skip rather than an error, but listing them keeps the logs clean.
+# Leave empty to attempt every running guest.
+guest_fstrim_exclude_vmids: []
+
+# --- Schedule -----------------------------------------------------------------
+# Weekly, deliberately NOT on an even hour: Prometheus truncates its TSDB head
+# block every 2 hours on even hours and that burst is what stalls etcd. Trimming
+# on top of it would compound the contention.
+guest_fstrim_on_calendar: "Sun *-*-* 03:17:00"
+guest_fstrim_randomized_delay: "20m"
+
+# --- On-host layout -----------------------------------------------------------
+guest_fstrim_script: /usr/local/sbin/pve-guest-fstrim.sh
+guest_fstrim_discard_script: /usr/local/sbin/pve-enable-disk-discard.sh
+guest_fstrim_unit_name: pve-guest-fstrim

@@ -1,0 +1,125 @@
+#!/bin/bash
+# {{ ansible_managed }}
+#
+# Trim guest filesystems via the qemu guest agent so freed blocks are returned
+# to Ceph.
+#
+# WHY `qm guest cmd ... fstrim` AND NOT `qm guest exec ... -- fstrim -av`:
+# the guests here run qemu-guest-agent with guest-exec DISABLED (the distro
+# default hardening), so exec fails with "Command guest-exec has been disabled".
+# `guest-fstrim` is a first-class agent command and is permitted, so it works
+# where exec does not. Verified on this estate 2026-08-20.
+#
+# WINDOWS GUESTS cannot be trimmed this way. The agent answers, but returns a
+# bare "C:\" path with no `trimmed` count (and sometimes
+# "Incorrect function. (0x80070001)"). Windows needs its own TRIM -- a scheduled
+# `defrag /L` or Optimize-Volume inside the guest. They are reported as skipped
+# here rather than counted as failures.
+#
+# Deliberately serial and paced: fstrim issues a discard per freed extent, which
+# is real work for a 3-OSD cluster that already stalls etcd on Ceph write latency
+# during the 2-hourly Prometheus compaction burst.
+#
+# Exit codes:
+#   0  every eligible guest was trimmed or cleanly skipped
+#   1  at least one guest failed for a reason other than "cannot trim"
+set -uo pipefail
+
+NODE="$(hostname)"
+CONF_DIR="/etc/pve/nodes/${NODE}/qemu-server"
+PAUSE={{ guest_fstrim_pause_between_guests }}
+TIMEOUT={{ guest_fstrim_timeout }}
+EXCLUDE=({% for v in guest_fstrim_exclude_vmids %}"{{ v }}" {% endfor %})
+
+trimmed=0
+skipped=0
+failed=0
+total_bytes=0
+
+is_excluded() {
+  local want="$1"
+  for v in ${EXCLUDE[@]+"${EXCLUDE[@]}"}; do
+    [ "${v}" = "${want}" ] && return 0
+  done
+  return 1
+}
+
+# Sum the per-path "trimmed" byte counts out of the agent's JSON reply.
+# Prints the total, or nothing if the reply carried no trim counts at all
+# (which is how a Windows guest answers).
+sum_trimmed() {
+  python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+paths=d.get("paths") or []
+vals=[p.get("trimmed") for p in paths if isinstance(p.get("trimmed"),int)]
+if not vals: sys.exit(2)
+print(sum(vals))
+' 2>/dev/null
+}
+
+shopt -s nullglob
+first=1
+for conf in "${CONF_DIR}"/*.conf; do
+  vmid="$(basename "${conf}" .conf)"
+
+  if is_excluded "${vmid}"; then
+    echo "vm-${vmid}: excluded by configuration"
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  grep -qE '^agent:[[:space:]]*[1-9]' "${conf}" || { skipped=$((skipped + 1)); continue; }
+  qm status "${vmid}" 2>/dev/null | grep -q running || { skipped=$((skipped + 1)); continue; }
+
+  # `agent: 1` only enables the virtio-serial channel; it says nothing about
+  # whether an agent is actually running inside. The Talos k8s nodes here all
+  # advertise agent=1 and run none, so without this precheck every run would log
+  # a dozen failures. Ping also fails fast where a blind call can hang.
+  if ! timeout 5 qm agent "${vmid}" ping >/dev/null 2>&1; then
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  if [ "${first}" = "0" ]; then
+    sleep "${PAUSE}"
+  fi
+  first=0
+
+  out="$(timeout "${TIMEOUT}" qm guest cmd "${vmid}" fstrim 2>&1)"
+  rc=$?
+
+  if [ "${rc}" != "0" ]; then
+    case "${out}" in
+      *"not running"*|*"not supported"*|*"has been disabled"*|*"not allowed"*|*"Incorrect function"*)
+        echo "vm-${vmid}: cannot trim (agent declined), skipping"
+        skipped=$((skipped + 1))
+        ;;
+      *)
+        echo "vm-${vmid}: FAILED rc=${rc}: $(echo "${out}" | tr '\n' ' ' | head -c 160)" >&2
+        failed=$((failed + 1))
+        ;;
+    esac
+    continue
+  fi
+
+  bytes="$(printf '%s' "${out}" | sum_trimmed)"
+  if [ -z "${bytes}" ]; then
+    # Agent replied but reported no trim counts -- Windows guest.
+    echo "vm-${vmid}: agent reported no trimmable paths (Windows guest?), skipping"
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  total_bytes=$((total_bytes + bytes))
+  trimmed=$((trimmed + 1))
+  printf 'vm-%s: trimmed %.2f GiB\n' "${vmid}" "$(echo "${bytes}" | awk '{print $1/1073741824}')"
+done
+
+printf 'fstrim on %s: %d trimmed (%.2f GiB total), %d skipped, %d failed\n' \
+  "${NODE}" "${trimmed}" "$(echo "${total_bytes}" | awk '{print $1/1073741824}')" "${skipped}" "${failed}"
+[ "${failed}" = "0" ] || exit 1
+exit 0
