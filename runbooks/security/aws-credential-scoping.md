@@ -107,6 +107,55 @@ Vault's `aws/` secrets engine is already mounted and configured
 6. **Schedule PBS rotation** (Ansible or a CronJob) as the only remaining static
    credential.
 
+## Progress
+
+### Step 1 — Talos etcd backup — DONE 2026-08-21
+
+IAM user **`homelab-talos-etcd-backup`**, no managed policies, one inline policy
+`talos-etcd-backup-s3`. Key `...H7SW` written to `secret/talos/backup/prod` with
+`vault kv patch` (v1 -> v2) so the other six keys at that path were preserved.
+
+The policy is much narrower than the `s3:*` it replaces, because the CronJob does
+exactly one S3 operation — `aws s3 cp` of a single snapshot, no list, no delete:
+
+```
+PutObject, AbortMultipartUpload, ListMultipartUploadParts
+  on arn:aws:s3:::myrobertson-homelab-talos-etcd-backups/*
+ListBucket, GetBucketLocation
+  on arn:aws:s3:::myrobertson-homelab-talos-etcd-backups
+```
+
+That answers the open question about `homelabTalosEtcdBackups` granting `s3:*` —
+it was over-scoped and nothing needed it.
+
+Verified, in order: the new key uploads to its own bucket; it is **denied** on
+`s3 ls` of all buckets, on the Nextcloud bucket, on the PBS bucket, and on
+`iam list-users`; VSO propagated the new value to
+`talos-etcd-backup/talos-etcd-backup-credentials`; and a real job run uploaded a
+242.7 MiB snapshot successfully.
+
+Two notes for whoever does the next one:
+
+- **IAM is eventually consistent.** The first upload with a brand-new key failed
+  with `InvalidAccessKeyId` and succeeded ~10 s later. Retry before concluding
+  the policy is wrong.
+- **`refreshAfter` on this VaultStaticSecret is 5m, not 60s.** A three-minute
+  wait looks like VSO has stopped propagating when it simply has not run yet.
+  Check `refreshAfter` on the specific resource before diagnosing. `destination.
+  overwrite: false` (set on 66 of 77) is *not* a blocker — VSO owns these Secrets
+  via ownerReference, and that flag only guards Secrets it does not own.
+
+The old admin key `...5KQF` is deliberately still **Active** — Nextcloud and PBS
+still use it. It can only be deleted after those two are migrated.
+
+### Remaining
+
+- Nextcloud (`secret/nextcloud/prod/s3`) — bucket `homelab-prod-nextcloud`.
+- PBS (`/etc/proxmox-backup/s3.cfg` on the PBS VM) — bucket
+  `myrobertson-homelab-pbs`. Not VSO-managed; needs an on-host edit.
+- Then Terraform onto its own identity, and only then remove
+  `AdministratorAccess` from `homelab`.
+
 ## Open questions for the operator
 
 - Does anything besides Terraform rely on `homelab` having admin rights? A
