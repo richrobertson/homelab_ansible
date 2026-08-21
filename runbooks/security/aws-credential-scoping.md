@@ -33,7 +33,7 @@ Nextcloud and etcd backups, because neither reads that path.
 | --- | --- | --- | --- |
 | Nextcloud primary storage | `secret/nextcloud/prod/s3` | VSO -> `default/nextcloud-s3-secret` | `homelab-prod-nextcloud` |
 | Talos etcd backup | `secret/talos/backup/prod` | VSO -> `talos-etcd-backup/talos-etcd-backup-credentials` | `myrobertson-homelab-talos-etcd-backups` |
-| PBS `pbs-s3` datastore | `/etc/proxmox-backup/s3.cfg` on the PBS VM | **nothing — static file** | `myrobertson-homelab-pbs` |
+| PBS `pbs-s3` datastore | `/etc/proxmox-backup/s3.cfg` on the PBS VM | **nothing — static file.** `secret/aws/pbs-backup/credentials` is a rotation record only, read by nobody | `myrobertson-homelab-pbs` |
 | Terraform (run from the workstation) | `~/.bash_profile` | shell env | `myrobertson-homelab-terraform` + everything else |
 | Backup provisioning | inline policy only | — | `homelab-prod-backups` |
 
@@ -105,7 +105,10 @@ Vault's `aws/` secrets engine is already mounted and configured
 4. **Convert the etcd backup to a `VaultDynamicSecret`**, prove the pattern.
 5. **Convert Nextcloud**, with `rolloutRestartTargets` set.
 6. **Schedule PBS rotation** (Ansible or a CronJob) as the only remaining static
-   credential.
+   credential. It is now *tracked* at `secret/aws/pbs-backup/credentials`, so it
+   will raise an overdue alert instead of ageing silently — but tracking is not
+   rotation, and automating it means driving the `s3.cfg` edit + proxy reload +
+   verify, not writing to Vault.
 
 ## Progress
 
@@ -196,6 +199,38 @@ not. Restore ownership/mode and reload the proxy.
 Verified: scoped key does put/list/delete on its own bucket and is denied on
 all-buckets, the etcd bucket and `iam list-users`; after the permissions fix and
 a reload, a real verify of `pbs-s3 vm/119` read archives from S3 with `0 errors`.
+
+#### Tracked in Vault at `secret/aws/pbs-backup/credentials` — 2026-08-21
+
+The key lived **only** in `s3.cfg`, so the rotation exporter could not see it and
+it would have aged past 90 days silently. It is now recorded in Vault with
+`rotated_at=2026-08-21` (matching the IAM `CreateDate` of
+`2026-08-21T05:27:07Z`) and `rotation_interval_days=90`, alongside `IAM_USER`
+and the S3 endpoint. Confirmed exported as
+`credential_vault_secret_rotated_timestamp_seconds{path="aws/pbs-backup/credentials"}`.
+
+**This path is a rotation *record*, not the source of truth, and the distinction
+is load-bearing.** PBS reads `/etc/proxmox-backup/s3.cfg` at runtime. There is no
+VSO sync, no Vault Agent template and no reload hook behind this path, so
+`vault kv put` here changes **nothing** about what PBS authenticates with. That
+is exactly the trap the 28 orphaned `secret/volsync/prod/*` paths set (see
+"Orphaned path cleanup" below): a path that looks authoritative, is read by
+nobody, and drifts until someone trusts it during an incident. A `note` field
+carrying this warning is stored *inside* the secret so it is visible to anyone
+who reads the path without finding this runbook.
+
+To actually rotate PBS, in this order:
+
+1. `aws iam create-access-key --user-name homelab-pbs-backup` (two live keys).
+2. Edit the `aws-homelab-pbs` section of `s3.cfg`, leaving `backblaze-b2-pbs`
+   untouched. **Keep the file `0640 root:backup`** — see the trap above.
+3. `systemctl reload proxmox-backup-proxy`, then run a real verify and confirm
+   `0 errors`. Do not treat a clean `systemctl status` as proof.
+4. Update this Vault path and set `rotated_at` to the new date.
+5. Only then delete the old key, and confirm it fails with `InvalidClientTokenId`.
+
+Steps 3 and 5 are the ones worth not skipping: the verify is what proves the new
+key works, and deleting before verifying is what turns a rotation into an outage.
 
 ### The `...5KQF` admin key — ROTATED AND DELETED 2026-08-21
 
