@@ -176,14 +176,50 @@ This is exactly the `review_obsolete` class from
 `ansible/proxmox/vars/secret_rotation_classes.yml` — "delete rather than rotate"
 — and it was sitting in the rotation list as if it needed rotating.
 
+### Step 1 — PBS — DONE 2026-08-21
+
+IAM user **`homelab-pbs-backup`**, key `...KXM2`, one inline policy
+`pbs-s3-datastore` scoped to `myrobertson-homelab-pbs` (get/put/delete plus the
+multipart actions on objects; list/multipart-list/location on the bucket). PBS
+needs delete because GC and prune remove chunks, unlike the etcd job.
+
+Written directly into the `aws-homelab-pbs` section of
+`/etc/proxmox-backup/s3.cfg`; the `backblaze-b2-pbs` section was verified
+byte-identical afterwards. Backup at `/etc/proxmox-backup/s3.cfg.bak.<stamp>`.
+
+**Trap that cost an outage window: `s3.cfg` must stay `0640 root:backup`.**
+The edit script set it `0600`, and `proxmox-backup-proxy` runs as `backup`, so
+every S3 task failed with `unable to read '/etc/proxmox-backup/s3.cfg' -
+Permission denied (os error 13)`. That reads like a credential problem and is
+not. Restore ownership/mode and reload the proxy.
+
+Verified: scoped key does put/list/delete on its own bucket and is denied on
+all-buckets, the etcd bucket and `iam list-users`; after the permissions fix and
+a reload, a real verify of `pbs-s3 vm/119` read archives from S3 with `0 errors`.
+
+### The `...5KQF` admin key — ROTATED AND DELETED 2026-08-21
+
+The secret for this key was exposed in plaintext during this work (a failed
+redaction while reading `s3.cfg`), so it was treated as compromised rather than
+merely overdue.
+
+Replaced with `...BZMN` on the same `homelab` user, using the two-live-keys
+overlap: minted, verified against IAM/S3/CloudWatch/SNS/Route53/Lambda, written
+to `secret/aws/user/homelab` (v2) and `~/.bash_profile`, then the old key was
+deactivated, confirmed to fail with `InvalidClientTokenId`, and deleted.
+
+`homelab` now has exactly one key. Note `...BZMN` still carries
+`AdministratorAccess` — the exposure was fixed, the over-permissioning was not.
+
 ### Remaining
 
-- PBS (`/etc/proxmox-backup/s3.cfg` on the PBS VM) — bucket
-  `myrobertson-homelab-pbs`. The only remaining *live* consumer of `...5KQF`
-  besides Terraform. Not VSO-managed; needs an on-host edit and a
-  `proxmox-backup-proxy` reload.
-- Then Terraform onto its own identity, and only then remove
-  `AdministratorAccess` from `homelab`.
+- `secret/nextcloud/prod/s3` still holds the now-deleted `...5KQF` value, and VSO
+  still syncs it to `default/nextcloud-s3-secret`. Harmless — the consuming
+  deployment is 0/0 — but it should go when that path is retired.
+- Point Terraform at its own identity (`homelab_terraform`, `...DEHY`) so the
+  workstation shell stops carrying an admin key.
+- Only then remove `AdministratorAccess` from `homelab`, after a `terraform plan`
+  proves the replacement identity is sufficient.
 
 ## Open questions for the operator
 
