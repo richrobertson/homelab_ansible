@@ -1,0 +1,171 @@
+---
+# Vault-side provisioning for the scheduled rotation of the AWS secrets engine's
+# own root credential.
+#
+# WHY THIS EXISTS. The IAM user `vault` backs the aws/ secrets engine, so both
+# aws/roles/terraformRemoteState and aws/roles/pbs-key-rotator mint through it.
+# It reached 331 days before being rotated on 2026-08-21 because nothing rotated
+# it and nothing measured it: it deliberately has no KV record, so the
+# credential-age collector cannot see it. See
+# runbooks/security/aws-credential-scoping.md.
+#
+# Vault 1.20 *has* rotation_period/rotation_schedule on aws/config/root, but
+# setting either returns "rotation manager capabilities not supported in Vault
+# community edition" -- automated root rotation is an Enterprise feature. Hence
+# an external scheduler.
+#
+# WHY A KUBERNETES CRONJOB. Rotating the root needs no secret material at all:
+# the caller asks Vault to rotate its own credential, and the new value never
+# leaves Vault. So the job needs an identity but no stored credential, which is
+# exactly what the prod-kubernetes auth mount provides. Any host-based scheduler
+# would have needed an AppRole secret_id on disk -- a static credential to
+# protect the rotation of a static credential.
+#
+# The Kubernetes manifests live in homelab_flux:
+#   infrastructure/configs/vault-root-rotation/
+#
+# Run:
+#   export VAULT_ADDR=https://vault.myrobertson.net:8200 VAULT_TOKEN=...
+#   ansible-playbook ansible/vault/aws_root_rotation.yml
+
+- name: Provision Vault for the scheduled AWS engine root rotation
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+
+  vars:
+    boot_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    boot_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+
+    aws_mount: aws
+    selftest_role: rotation-selftest
+    policy_name: vault-aws-root-rotation
+    k8s_auth_mount: prod-kubernetes
+    k8s_role_name: vault-aws-root-rotation
+    k8s_namespace: vault-maintenance
+    k8s_service_account: vault-root-rotation
+    # Short: the job authenticates, rotates and exits within seconds.
+    token_ttl_seconds: 600
+    token_max_ttl_seconds: 1200
+
+  tasks:
+    - name: Require Vault environment
+      ansible.builtin.assert:
+        that:
+          - boot_addr | length > 0
+          - boot_token | length > 0
+        fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running this playbook.
+
+    # The job must prove the *new* root credential actually works, not merely
+    # that config/root changed -- a rotation that silently leaves the engine
+    # unable to reach IAM would break Terraform's remote state and the PBS key
+    # rotation, and nothing would notice for weeks.
+    #
+    # Minting from this role forces Vault to call IAM with the new credential
+    # (CreateUser, PutUserPolicy, CreateAccessKey), which is the proof. The
+    # resulting identity is deliberately powerless: an explicit Deny on
+    # everything. So the verification grants the job no AWS capability at all,
+    # unlike pointing it at a real role such as pbs-key-rotator.
+    - name: Create the powerless self-test AWS role
+      community.hashi_vault.vault_write:
+        url: "{{ boot_addr }}"
+        token: "{{ boot_token }}"
+        path: "{{ aws_mount }}/roles/{{ selftest_role }}"
+        data:
+          credential_type: iam_user
+          policy_document: >-
+            {"Version":"2012-10-17","Statement":[{"Sid":"NoPermissionsByDesign",
+            "Effect":"Deny","Action":"*","Resource":"*"}]}
+
+    - name: Render the rotation Vault policy
+      vars:
+        creds_path: "{{ aws_mount }}/creds/{{ selftest_role }}"
+      ansible.builtin.set_fact:
+        rotation_policy_hcl: |
+          # Ask Vault to rotate its own AWS root credential. The new secret is
+          # generated inside Vault and never returned, so this grants the job no
+          # ability to read the credential it rotates.
+          path "{{ aws_mount }}/config/rotate-root" {
+            capabilities = ["update"]
+          }
+
+          # Read back the access key ID (not the secret) to confirm the rotation
+          # actually changed it.
+          path "{{ aws_mount }}/config/root" {
+            capabilities = ["read"]
+          }
+
+          # Mint the powerless self-test identity, which is what proves the new
+          # root credential can still reach IAM.
+          path "{{ creds_path }}" {
+            capabilities = ["read"]
+          }
+
+          # Clean the self-test identity up again, scoped to this one role's
+          # leases. Deliberately NOT sys/leases/revoke-prefix, which is a sudo
+          # endpoint -- revoking a known lease id by path needs no sudo, and
+          # this job should not hold sudo on anything.
+          path "sys/leases/revoke/{{ creds_path }}/*" {
+            capabilities = ["update"]
+          }
+
+    - name: Read the current rotation Vault policy
+      community.hashi_vault.vault_read:
+        url: "{{ boot_addr }}"
+        token: "{{ boot_token }}"
+        path: "sys/policies/acl/{{ policy_name }}"
+      register: existing_policy
+      failed_when: false
+
+    # Compared with whitespace collapsed: Vault returns the policy verbatim and
+    # an insignificant newline difference must not rewrite it on every run.
+    - name: Write the rotation Vault policy
+      community.hashi_vault.vault_write:
+        url: "{{ boot_addr }}"
+        token: "{{ boot_token }}"
+        path: "sys/policies/acl/{{ policy_name }}"
+        data:
+          policy: "{{ rotation_policy_hcl }}"
+      vars:
+        current: >-
+          {{ (existing_policy.data.data.policy | default(''))
+             | regex_replace('\s+', ' ') | trim }}
+        wanted: >-
+          {{ rotation_policy_hcl | regex_replace('\s+', ' ') | trim }}
+      when: current != wanted
+
+    # Bound to one service account in one namespace. Note that this alone is not
+    # sufficient for the job to authenticate: auth/prod-kubernetes/config has no
+    # token_reviewer_jwt, so Vault performs the TokenReview using the *client's*
+    # own JWT, which means the service account also needs system:auth-delegator.
+    # That ClusterRoleBinding is the real allow-list and lives in homelab_flux
+    # alongside the CronJob.
+    - name: Create the Kubernetes auth role
+      community.hashi_vault.vault_write:
+        url: "{{ boot_addr }}"
+        token: "{{ boot_token }}"
+        path: "auth/{{ k8s_auth_mount }}/role/{{ k8s_role_name }}"
+        data:
+          bound_service_account_names: "{{ k8s_service_account }}"
+          bound_service_account_namespaces: "{{ k8s_namespace }}"
+          token_policies: "{{ policy_name }}"
+          token_ttl: "{{ token_ttl_seconds }}"
+          token_max_ttl: "{{ token_max_ttl_seconds }}"
+          alias_name_source: serviceaccount_uid
+
+    - name: Confirm the role reads back as expected
+      community.hashi_vault.vault_read:
+        url: "{{ boot_addr }}"
+        token: "{{ boot_token }}"
+        path: "auth/{{ k8s_auth_mount }}/role/{{ k8s_role_name }}"
+      register: role_check
+
+    - name: Show what was provisioned
+      ansible.builtin.debug:
+        msg:
+          - "aws role:     {{ aws_mount }}/roles/{{ selftest_role }} (Deny-all)"
+          - "policy:       {{ policy_name }}"
+          - "k8s role:     {{ k8s_role_name }}"
+          - "bound to:     {{ k8s_namespace }}/{{ k8s_service_account }}"
+          - "policies:     {{ role_check.data.data.token_policies }}"
