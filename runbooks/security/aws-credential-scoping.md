@@ -739,13 +739,73 @@ of `failed to generate volume from volume ID ...`, which normally means the
 CephFS subvolume is already gone and the detach has nothing left to act on. All
 six nodes are Ready, so this is not the usual dead-node case.
 
-**Deliberately not force-removed.** If the subvolumes *do* still exist, deleting
-the finalizers orphans them in CephFS where nothing would ever find them again —
-and that could not be checked: the `rook-ceph-tools` pod in `rook-ceph-external`
-fails with `RADOS permission error (error connecting to the cluster)`, so the
-subvolume list is unavailable. **Fixing the toolbox credentials is the
-prerequisite for cleaning this up**, and is worth doing regardless, since it
-currently means the external Ceph cluster cannot be inspected at all.
+This was deliberately not force-removed until the subvolumes could be checked —
+if they still existed, clearing the finalizers would orphan them in CephFS where
+nothing would ever find them again. See the toolbox fix below, which unblocked
+that check.
+
+**Resolved for netbootxyz — 2026-08-21.** With admin access, all five subvolumes
+were confirmed **already absent** from `kubernetes-prod-cephfs/csi` (67 subvolumes
+present, none of them these). So the finalizers were stale and there was no space
+leak, only stale API objects. Clearing the finalizer on the two blocking
+VolumeAttachments was enough — the PVs then deleted themselves immediately, with
+no need to touch the PVs at all. netbootxyz now has no PV, PVC or
+VolumeAttachment anywhere in prod.
+
+The other three (`tautulli-config-ceph-v2`, `trilium-data-ceph-v2`,
+`authelia-config-ceph-v2`) are the same defect and now verified safe to clear the
+same way, but were left alone as outside the scope of the netbootxyz cleanup.
+
+### The Ceph toolbox could not reach the cluster — FIXED 2026-08-21
+
+Every command in `rook-ceph-tools` failed with `RADOS permission error (error
+connecting to the cluster)`, which reads like broken credentials. **The
+credentials were fine.**
+
+The toolbox entrypoint writes the keyring as `[${ROOK_CEPH_USERNAME}]` —
+correctly `client.healthchecker`, because an external cluster does not hand Rook
+an admin key — but `write_endpoints()` hardcodes `[client.admin]` in `ceph.conf`.
+So `ceph` defaulted to `client.admin`, found no matching entry in the keyring, and
+refused to connect. Proven by `ceph -s --id healthchecker` returning `HEALTH_OK`
+with the very same secret.
+
+Fixed by using `ROOK_CEPH_USERNAME` for the config section as well, plus a
+`CEPH_ARGS=--id healthchecker` pod env so a bare `ceph -s` works under
+`kubectl exec`. That has to be in the pod env rather than exported by the
+entrypoint, because exec sessions inherit the pod's environment and not anything
+the entrypoint sets.
+
+**`ceph fs subvolume ls` still returns EACCES, and that is correct.**
+`client.healthchecker` holds `mgr "allow command config"` only. It is a
+health-check identity, not an administrative one, and widening it would widen a
+credential that lives inside the cluster. Subvolume administration belongs on the
+Proxmox nodes, which hold `client.admin`.
+
+#### A key was exposed during this work, and rotated
+
+While inspecting the `rook-ceph-mon` Secret, a field dump printed the
+`client.healthchecker` key in cleartext. The redaction filtered on field *names*
+containing "secret" or "key", and the offending field was **`_raw`** — VSO's copy
+of the entire Vault response as JSON, which contains every field again and whose
+name looks harmless.
+
+The key was not trivial: `osd "profile rbd-read-only"` grants read access to
+**every RBD image in the cluster**, which is VM disks and PVC block data, plus
+some RGW pool write access. It requires reachability to the storage-network mons
+rather than being internet-exposed, but it was rotated rather than argued about.
+
+`ceph auth rotate client.healthchecker` on pve3, `vault kv patch` so the other
+five fields at `secret/proxmox/cl0/ceph/rook-ceph-mon` were preserved, VSO
+propagated within one refresh, toolbox restarted. **Verified with a control:** the
+old key now returns `RADOS permission denied` while the new one returns
+`HEALTH_OK`, both tested against the mons with an isolated config so pve's own
+`ceph.conf` could not silently substitute a different keyring. `rotated_at` was
+also 327 days stale and is now current.
+
+`excludeRaw: true` is now set on that VaultStaticSecret, so the duplicate `_raw`
+copy is no longer materialised at all. **Other Rook secrets in
+`infrastructure/controllers/rook-ceph/rook-ceph-external.yaml` still lack it** and
+carry the same duplicate — worth the same treatment.
 
 Three were kept because they are referenced:
 
@@ -933,10 +993,13 @@ experimenting on the live engine.
   `HomelabS3BackupProvisioningPolicy`, which grants `s3:CreateBucket` and
   `s3:ListAllMyBuckets` on `*`. 1,128 historical CNPG `Backup` CRs still
   reference the emptied bucket and will mislead anyone reading backup history.
-- **The `rook-ceph-tools` pod cannot reach the external Ceph cluster** — every
-  command fails with `RADOS permission error`. That blocks cleanup of five PVs
-  stuck terminating since the April migration, and more generally means the
-  external cluster cannot be inspected from Kubernetes at all.
+- **Three PVs remain stuck terminating since 2026-04-25** —
+  `tautulli-config-ceph-v2`, `trilium-data-ceph-v2`, `authelia-config-ceph-v2`.
+  Their CephFS subvolumes are confirmed gone, so clearing the VolumeAttachment
+  finalizers is safe; the netbootxyz pair was cleared this way.
+- **Other Rook VaultStaticSecrets still materialise a `_raw` duplicate.** Only
+  `rook-ceph-mon` has `excludeRaw` set. The rest carry a second copy of their key
+  in a field whose name does not look like a secret.
 - Does anything besides Terraform rely on `homelab` having admin rights? A
   CloudTrail review over 90 days would answer this definitively; it was not run
   as part of this scoping.
