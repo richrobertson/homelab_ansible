@@ -1,0 +1,99 @@
+#!/bin/bash
+# {{ ansible_managed }}
+#
+# Install a weekly TRIM scheduled task inside this node's Windows guests.
+#
+# WHY WINDOWS NEEDS SEPARATE HANDLING. `qm guest cmd <vmid> fstrim` works on
+# Linux guests but not Windows: the agent answers with a bare "C:\" path, no
+# `trimmed` count, and sometimes "Incorrect function. (0x80070001)". Windows
+# issues TRIM through its own storage optimizer instead, so the only way to make
+# a Windows guest release blocks is to schedule Optimize-Volume -ReTrim inside
+# it. Verified on this estate 2026-08-20 against vm-112.
+#
+# Conveniently, the reverse is also true for exec: the Linux guests here run
+# qemu-guest-agent with guest-exec DISABLED, but the Windows guests allow it --
+# so schtasks can be driven straight through the agent, with no WinRM, no domain
+# credentials and no Vault lookup.
+#
+# IMPORTANT: a scheduled TRIM only reclaims anything once the guest's disk
+# actually carries discard=on AND the guest has been power-cycled so that change
+# is live. Proxmox records discard on a running VM as a pending change. Installing
+# this task first is deliberate: it means the reboot, when it happens, is
+# immediately useful instead of being a second disruption later.
+#
+# --dry-run prints what it would do and exits 0.
+set -uo pipefail
+
+NODE="$(hostname)"
+CONF_DIR="/etc/pve/nodes/${NODE}/qemu-server"
+TASK_NAME="{{ guest_fstrim_windows_task_name }}"
+DAY="{{ guest_fstrim_windows_day }}"
+BASE_HOUR={{ guest_fstrim_windows_base_hour }}
+DRY=0
+[ "${1:-}" = "--dry-run" ] && DRY=1
+
+created=0
+skipped=0
+failed=0
+
+shopt -s nullglob
+idx=0
+for conf in "${CONF_DIR}"/*.conf; do
+  vmid="$(basename "${conf}" .conf)"
+
+  # Windows guests only.
+  grep -qiE '^ostype:[[:space:]]*w' "${conf}" || continue
+
+  qm status "${vmid}" 2>/dev/null | grep -q running || {
+    echo "vm-${vmid}: not running, skipping"
+    skipped=$((skipped + 1)); continue; }
+
+  if ! timeout 5 qm agent "${vmid}" ping >/dev/null 2>&1; then
+    echo "vm-${vmid}: no live guest agent, skipping"
+    skipped=$((skipped + 1)); continue
+  fi
+
+  # Stagger start times so several guests never trim at once -- discard is real
+  # work for a 3-OSD Ceph cluster. 30 minutes apart, and always at :17 past the
+  # hour so a sweep can never begin inside the :00-:10 window when Prometheus
+  # TSDB compaction saturates the cluster.
+  offset=$(( idx * 30 ))
+  hour=$(( BASE_HOUR + offset / 60 ))
+  minute=$(( 17 + offset % 60 ))
+  [ "${minute}" -ge 60 ] && { minute=$(( minute - 60 )); hour=$(( hour + 1 )); }
+  start="$(printf '%02d:%02d' "${hour}" "${minute}")"
+  idx=$(( idx + 1 ))
+
+  action='powershell.exe -NoProfile -ExecutionPolicy Bypass -Command Optimize-Volume -DriveLetter C -ReTrim'
+
+  if [ "${DRY}" = "1" ]; then
+    echo "would create on vm-${vmid}: ${TASK_NAME} weekly ${DAY} ${start} -> ${action}"
+    created=$((created + 1))
+    continue
+  fi
+
+  out="$(timeout 90 qm guest exec "${vmid}" --timeout 60 -- \
+    schtasks /Create /TN "${TASK_NAME}" /TR "${action}" \
+    /SC WEEKLY /D "${DAY}" /ST "${start}" /RU SYSTEM /RL HIGHEST /F 2>&1)"
+  rc=$?
+
+  # The agent wraps the guest's exit status in JSON; a non-zero *guest* exitcode
+  # is the failure that matters, not the qm exit code.
+  guest_rc="$(printf '%s' "${out}" | python3 -c '
+import sys,json
+try: print(json.load(sys.stdin).get("exitcode", 1))
+except Exception: print("?")
+' 2>/dev/null)"
+
+  if [ "${rc}" = "0" ] && [ "${guest_rc}" = "0" ]; then
+    echo "vm-${vmid}: scheduled ${TASK_NAME} weekly ${DAY} ${start}"
+    created=$((created + 1))
+  else
+    echo "vm-${vmid}: FAILED to schedule (qm rc=${rc} guest rc=${guest_rc}): $(printf '%s' "${out}" | tr '\n' ' ' | head -c 200)" >&2
+    failed=$((failed + 1))
+  fi
+done
+
+echo "windows trim schedule on ${NODE}: ${created} created, ${skipped} skipped, ${failed} failed"
+[ "${failed}" = "0" ] || exit 1
+exit 0

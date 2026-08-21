@@ -57,6 +57,28 @@ guest_fstrim_timeout: 900
 # Leave empty to attempt every running guest.
 guest_fstrim_exclude_vmids: []
 
+# --- Windows guests -----------------------------------------------------------
+# Windows cannot be trimmed through `qm guest cmd fstrim`: the agent answers with
+# a bare "C:\" and no trim count. It issues TRIM through its own storage
+# optimizer, so the only way to make a Windows guest release blocks is a
+# scheduled Optimize-Volume -ReTrim inside it.
+#
+# Conveniently the exec situation is the mirror image of Linux here -- the Linux
+# guests have guest-exec disabled, the Windows guests allow it -- so schtasks can
+# be driven straight through the agent with no WinRM, no domain credentials and
+# no Vault lookup.
+#
+# NOTE this only reclaims once the guest's disk carries discard=on AND the guest
+# has been power-cycled to make that live. Installing the task first means the
+# eventual reboot is immediately useful rather than a second disruption.
+guest_fstrim_windows_schedule: true
+guest_fstrim_windows_task_name: Ceph-ReTrim
+guest_fstrim_windows_day: SUN
+# First guest starts at this hour :17; each subsequent guest on the node is
+# staggered 30 minutes later. Always :17 past so a run can never begin inside the
+# :00-:10 window when Prometheus TSDB compaction saturates Ceph.
+guest_fstrim_windows_base_hour: 4
+
 # --- Schedule -----------------------------------------------------------------
 # Weekly, deliberately NOT on an even hour: Prometheus truncates its TSDB head
 # block every 2 hours on even hours and that burst is what stalls etcd. Trimming
@@ -67,4 +89,5 @@ guest_fstrim_randomized_delay: "20m"
 # --- On-host layout -----------------------------------------------------------
 guest_fstrim_script: /usr/local/sbin/pve-guest-fstrim.sh
 guest_fstrim_discard_script: /usr/local/sbin/pve-enable-disk-discard.sh
+guest_fstrim_windows_script: /usr/local/sbin/pve-windows-trim-schedule.sh
 guest_fstrim_unit_name: pve-guest-fstrim

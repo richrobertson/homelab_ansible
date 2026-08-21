@@ -73,6 +73,53 @@
     - guest_fstrim_enable_discard | bool
     - guest_fstrim_discard_run.stdout_lines is defined
 
+- name: Install the Windows TRIM scheduling script
+  ansible.builtin.template:
+    src: pve-windows-trim-schedule.sh.j2
+    dest: "{{ guest_fstrim_windows_script }}"
+    owner: root
+    group: root
+    mode: "0750"
+  when: guest_fstrim_windows_schedule | bool
+
+- name: Syntax-check the Windows scheduling script
+  ansible.builtin.command:
+    cmd: bash -n {{ guest_fstrim_windows_script }}
+  changed_when: false
+  when: guest_fstrim_windows_schedule | bool
+
+- name: Preview the Windows TRIM tasks that would be scheduled
+  ansible.builtin.command:
+    cmd: "{{ guest_fstrim_windows_script }} --dry-run"
+  register: guest_fstrim_windows_preview
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: guest_fstrim_windows_schedule | bool
+
+- name: Show the Windows TRIM plan
+  ansible.builtin.debug:
+    var: guest_fstrim_windows_preview.stdout_lines
+  when:
+    - guest_fstrim_windows_schedule | bool
+    - guest_fstrim_windows_preview.stdout_lines | default([]) | length > 0
+
+- name: Schedule TRIM inside the Windows guests
+  ansible.builtin.command:
+    cmd: "{{ guest_fstrim_windows_script }}"
+  register: guest_fstrim_windows_run
+  changed_when: "'0 created' not in guest_fstrim_windows_run.stdout"
+  when:
+    - guest_fstrim_windows_schedule | bool
+    - not ansible_check_mode
+
+- name: Report the Windows TRIM scheduling outcome
+  ansible.builtin.debug:
+    var: guest_fstrim_windows_run.stdout_lines
+  when:
+    - guest_fstrim_windows_schedule | bool
+    - guest_fstrim_windows_run.stdout_lines is defined
+
 - name: Install the fstrim systemd service
   ansible.builtin.template:
     src: pve-guest-fstrim.service.j2

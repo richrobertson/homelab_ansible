@@ -33,6 +33,18 @@
 #     Ansible cannot reach it. That half needs a privileged DaemonSet managed
 #     through Flux.
 #
+# WINDOWS GUESTS. Rhonda (101), janice (112), dns-01 (1001) and bdc/dc1 (1002)
+# are win11 and cannot be trimmed by `qm guest cmd fstrim` -- the agent returns a
+# bare "C:\" with no trim count. This playbook instead installs a weekly
+# Optimize-Volume -ReTrim scheduled task inside each of them, driven through the
+# guest agent. Note the exec situation is the mirror image of Linux: the Linux
+# guests here have guest-exec disabled while the Windows guests allow it, so no
+# WinRM, domain credentials or Vault lookup are needed.
+#
+# Start times are staggered 30 minutes apart (04:17, 04:47, 05:17, 05:47) and
+# always at :17/:47 so a run can never begin inside the :00-:10 window when
+# Prometheus TSDB compaction saturates Ceph and stalls etcd.
+#
 # Run:
 #   ansible-playbook -i inventory/environments/production.ini \
 #     ansible/proxmox/guest_fstrim.yml
