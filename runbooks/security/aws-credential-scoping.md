@@ -526,14 +526,69 @@ test leases revoked cleanly with no leftover dynamic users; and
 `pbs-rotate-s3-key.py --check` passed end to end on the PBS host, which exercises
 the whole chain through the new root.
 
-**It will age again.** Vault 1.20.4 *has* the `rotation_period` /
-`rotation_schedule` fields on `aws/config/root`, but setting either returns
-`rotation manager capabilities not supported in Vault community edition` —
-**automated root rotation is Enterprise-only.** Scheduling it therefore needs an
-external job calling `aws/config/rotate-root`; the natural home is a Kubernetes
-CronJob authenticating through the existing `prod-kubernetes` auth mount, since
-the call needs no secret material at all. Until that exists this key is manual,
-and nothing tracks its age.
+**Automated root rotation is Enterprise-only.** Vault 1.20.4 *has* the
+`rotation_period` / `rotation_schedule` fields on `aws/config/root`, but setting
+either returns `rotation manager capabilities not supported in Vault community
+edition`. So the schedule had to live outside Vault — see below.
+
+#### Scheduled — 2026-08-21
+
+`vault-aws-root-rotation`, a monthly CronJob in the `vault-maintenance`
+namespace (`homelab_flux/infrastructure/configs/vault-root-rotation/`), with the
+Vault policy, self-test role and Kubernetes auth role provisioned by
+`homelab_ansible/ansible/vault/aws_root_rotation.yml`.
+
+**Proven on its first real run**, not just deployed: it rotated `...QHAH` to
+`...6H5S`, and IAM, `aws/config/root`, both engine roles and the PBS rotation
+chain were all confirmed independently afterwards.
+
+    kubectl -n vault-maintenance create job \
+      --from=cronjob/vault-aws-root-rotation manual-1
+    kubectl -n vault-maintenance logs job/manual-1
+
+Monthly against a 90-day interval, so the key stays far younger than the limit
+and two consecutive failures still leave room before anything is overdue.
+
+**Why a CronJob and not a host timer.** This rotation needs no secret material:
+the job asks Vault to rotate its own credential and the new value never leaves
+Vault, so a Kubernetes ServiceAccount is a complete identity for it. A host-based
+timer would have needed an AppRole `secret_id` on disk — a static credential
+whose only job is protecting the rotation of another static credential.
+
+**It verifies rather than assumes.** Confirming `config/root` changed does not
+prove the new credential can reach IAM, and a broken engine takes out Terraform's
+remote state and the PBS key rotation silently for weeks. So the job mints from
+`aws/roles/rotation-selftest`, whose inline policy is an explicit `Deny` on
+everything — that forces Vault to call IAM with the new credential, which is the
+actual proof, while handing the job no AWS capability at all. Pointing the check
+at a real role such as `pbs-key-rotator` would have proven the same thing and
+given the job the ability to manage the PBS key. It retries past IAM's eventual
+consistency, then revokes the identity.
+
+Three things that are load-bearing and easy to mistake for boilerplate:
+
+- **The `system:auth-delegator` ClusterRoleBinding is required.**
+  `auth/prod-kubernetes/config` has no `token_reviewer_jwt`, so Vault performs
+  the TokenReview using the *client's* JWT. Without the binding the Vault role
+  exists, the ServiceAccount exists, and login still fails — with a *Kubernetes*
+  permission error, which sends you looking in the wrong place.
+- **Revocation is by lease id, not `sys/leases/revoke-prefix`.** That endpoint
+  requires `sudo`; revoking a known lease id by path does not. This job holds
+  `sudo` on nothing.
+- **TLS is verified, unlike the VSO `VaultConnection`, which sets
+  `skipTLSVerify`.** The job presents a token exchangeable for one that can
+  rotate the engine root, so anything able to impersonate Vault to it would
+  capture that. Pinned to the Vault *intermediate* rather than the
+  `myrobertson-DC1-CA-1` root that issued it: both verify, but trusting the root
+  would accept any certificate the domain CA has ever issued.
+
+Failures surface as `KubeJobFailed`, which is already active — no custom rule
+needed. `backoffLimit` is 1 because `rotate-root` is not idempotent and each
+retry burns another access key.
+
+Its age is still not in the credential-age metrics, and deliberately so: a KV
+record would be a stale copy nothing updates, and the schedule now answers the
+freshness question structurally instead.
 
 Incidentally confirmed safe: a partial write to `config/root` (rotation fields
 only, no `access_key`) does **not** wipe the stored credential. Established on a
@@ -550,10 +605,6 @@ experimenting on the live engine.
   fixed there because narrowing the wildcard risks breaking dynamic credential
   generation. Fixing it properly means giving Vault's dynamic users a distinct
   path or prefix (`vault-dyn-*`, or an IAM path) and scoping the policy to that.
-- **Schedule the engine root rotation.** It is manual today and Vault community
-  edition cannot self-schedule it (see above). Nothing measures its age either,
-  because it deliberately has no KV record — so the 331-day drift that prompted
-  this would recur silently.
 - **28 ghost `secret/volsync/prod/*` records still inflate the rotation alerts.**
   They need `vault kv metadata delete`, which is irreversible, so each one's
   restic repository should be confirmed abandoned first. See the correction under
