@@ -296,13 +296,35 @@ Note `vault kv get` **exits 0 on a soft-deleted KV-v2 path** — it returns
 metadata carrying `deletion_time`. Checking the exit code says "still there";
 check whether `data.data` is populated instead.
 
+### Terraform credential paths separated — 2026-08-21 (homelab_bootstrap `03dab63`)
+
+`data.vault_generic_secret.volsync_s3_settings` was feeding two things it should
+never have fed, both now split out:
+
+| Consumer | Was | Now |
+| --- | --- | --- |
+| `provider "aws"` | `secret/volsync/prod/plex-config-ceph` | `secret/aws/terraform/provider` |
+| `secret/talos/backup/<env>` writer | same volsync path | `secret/aws/talos-etcd-backup/credentials` |
+
+The second was the dangerous one and was **not** noticed until reading
+`talos_backup_vault_secret.tf`: Terraform *writes* the etcd backup's Vault secret,
+using whatever credentials that data source held. The next `terraform apply`
+would therefore have overwritten the scoped `...H7SW` key with the provider's
+`AdministratorAccess` credential and silently re-privileged the backup job —
+undoing the scoping done earlier the same day, with no error and no alert.
+
+Both new paths were seeded with the values already in use, so applying is a no-op.
+`volsync_s3_settings` now supplies only `RESTIC_REPOSITORY`, used to derive the S3
+region, so the data source finally matches its name.
+
+**Generalisable lesson:** when Terraform both *reads* a credential and *writes*
+it into another system's secret, scoping the consumer is not enough — the
+Terraform code has to be changed too, or the next apply reverts it. Check for
+`vault_kv_secret_v2` resources writing credentials before assuming a manual Vault
+patch will hold.
+
 ### Remaining
 
-- **Terraform's AWS credentials should move out of `volsync/prod/plex-config-ceph`.**
-  An admin-capable key living under a `volsync` path is why it was missed.
-  `secret/aws/user/homelab_terraform` is the obvious home, but the field names
-  differ (`access_key` vs `AWS_ACCESS_KEY_ID`), so the data source or the secret
-  needs adjusting to match.
 - **`homelab_terraform` still holds `AdministratorAccess`.** This is now the only
   admin identity, used deliberately for Terraform. Narrowing it to what the
   stacks actually manage (IAM, CloudWatch, SNS, Route53, SES, VPC, S3) is the
