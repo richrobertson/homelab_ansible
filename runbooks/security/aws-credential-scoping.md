@@ -423,6 +423,55 @@ reference anywhere in the three repos**. Soft-deleted, and so recoverable with
 > secret in the estate at 332 days — a ghost topping the age table. Tracked count
 > 148 -> 147.
 
+### What the volsync ghosts actually are — 2026-08-21
+
+Investigated before deleting them, and the answer inverts the original
+assessment. **These are not disposable records.**
+
+Each `secret/volsync/prod/<pvc>` holds a **unique** `RESTIC_PASSWORD` for a
+repository under `s3://homelab-prod-backups/volsync/default/<pvc>` — the *old*
+AWS-S3 backup scheme. That is why they held the dead `...5KQF` key at all. Live
+VolSync now backs up to Backblaze B2: all 31 `restic-config-*` Secrets are built
+from the single path `secret/backblaze/k8s/prod/volsync`, and **no**
+VaultStaticSecret references any of these per-PVC paths. So they are genuinely
+unreferenced — but "unreferenced" is not "safe to destroy".
+
+**The old S3 repositories were never deleted.** As of 2026-08-21
+`s3://homelab-prod-backups/volsync/default/` still holds **12,133 objects,
+182.7 GiB**, across 22 repository prefixes, all last written 2026-04-24 — the
+migration cutover. A restic repository is encrypted with a master key that the
+password unlocks, so for each of these the Vault record is **the only thing that
+can ever read that repository again**. `vault kv metadata delete` on them would
+strand 110 GiB of retained backups permanently.
+
+Split, after checking every prefix against S3 directly:
+
+| | Count | Action |
+| --- | ---: | --- |
+| No surviving repository | 7 | **Destroyed 2026-08-21.** Tracked 147 -> 140. |
+| Repository still holds data | 21 | **Left alone.** 110 GiB; needs a retention decision. |
+
+The 21 are `immich-data-files-pvc-ceph` (101.4 GiB) and `radarr-config-ceph`
+(6.8 GiB), which are almost all of it, plus 19 small ones. `plex-config-ceph`
+accounts for a further 72.7 GiB in the same bucket but is not a ghost — it is the
+one live path in that tree.
+
+**Their current soft-deleted state is the wrong resting place either way.** The
+only keys to 110 GiB sit in a state that reads as already-discarded, so a routine
+bulk `metadata delete` would destroy them without anyone noticing. Resolve it in
+one of two directions:
+
+- **Keeping the old backups:** `vault kv undelete` the 21 so the keys are live
+  and visible, and reclassify them so the age alert reflects that they are
+  archival keys rather than credentials in rotation.
+- **Not keeping them:** delete the S3 data first, *then* destroy the metadata.
+  Doing it in that order means nothing is ever stranded, and it also stops paying
+  for 182.7 GiB of S3 Standard (~$4/month).
+
+Note for the next person: `while read` over a file with no trailing newline
+silently skips the last entry. That very nearly let one of the seven be destroyed
+without its prefix having been checked.
+
 Three were kept because they are referenced:
 
 | Path | Why kept |
@@ -605,10 +654,11 @@ experimenting on the live engine.
   fixed there because narrowing the wildcard risks breaking dynamic credential
   generation. Fixing it properly means giving Vault's dynamic users a distinct
   path or prefix (`vault-dyn-*`, or an IAM path) and scoping the policy to that.
-- **28 ghost `secret/volsync/prod/*` records still inflate the rotation alerts.**
-  They need `vault kv metadata delete`, which is irreversible, so each one's
-  restic repository should be confirmed abandoned first. See the correction under
-  "Orphaned path cleanup".
+- **Retention decision needed on 110 GiB of old S3 restic backups.** 21 of the
+  volsync ghosts are the only keys to repositories that still exist in
+  `homelab-prod-backups`; 7 with no surviving repository were destroyed
+  2026-08-21. Either undelete and reclassify the 21, or delete the S3 data first
+  and then the metadata. See "What the volsync ghosts actually are".
 - Does anything besides Terraform rely on `homelab` having admin rights? A
   CloudTrail review over 90 days would answer this definitively; it was not run
   as part of this scoping.
