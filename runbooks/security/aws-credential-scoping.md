@@ -817,9 +817,35 @@ old key now returns `RADOS permission denied` while the new one returns
 also 327 days stale and is now current.
 
 `excludeRaw: true` is now set on that VaultStaticSecret, so the duplicate `_raw`
-copy is no longer materialised at all. **Other Rook secrets in
-`infrastructure/controllers/rook-ceph/rook-ceph-external.yaml` still lack it** and
-carry the same duplicate — worth the same treatment.
+copy is no longer materialised at all.
+
+#### All seven Ceph secrets now exclude `_raw` — 2026-08-21
+
+The other six carried the same duplicate and were given the same treatment:
+`rgw-admin-ops-user`, the four `rook-csi-*` credentials, and `csi-cephfs-secret`
+in the `ceph-csi` namespace (a seventh, in a different file, easily missed by a
+search that stops at the rook directory).
+
+Two of them deserve the emphasis. The four `rook-csi-*` secrets back the
+StorageClasses for provisioning, node-stage and expansion, so they gate **every**
+volume operation in the cluster. And `csi-cephfs-secret` carries an
+`encryptionPassphrase` alongside its `userKey`, so its `_raw` duplicate was two
+secrets in one innocuous-looking field.
+
+Field sets confirmed unchanged apart from the removal — `userID`/`userKey`,
+`accessKey`/`secretKey`, `encryptionPassphrase` and rook-ceph-mon's six all
+intact.
+
+**Verified by actually using the storage, not by reading the diff.** A test PVC
+was provisioned, mounted, written and read back on *both* classes — `ceph-block`
+(RBD) and `csi-cephfs-sc` (CephFS) — exercising the provisioner and node-stage
+secrets end to end. 108 PVCs Bound cluster-wide, all `ceph-csi` and
+`rook-ceph-external` pods Running.
+
+A small object lesson in the cleanup: the test itself left a `Released` PV,
+because `csi-cephfs-sc` is `Retain`. It was reclaimed with the documented
+procedure — switch to `Delete`, then remove — and the CephFS subvolume count
+returned to exactly its previous 67.
 
 Three were kept because they are referenced:
 
@@ -1007,9 +1033,11 @@ experimenting on the live engine.
   `HomelabS3BackupProvisioningPolicy`, which grants `s3:CreateBucket` and
   `s3:ListAllMyBuckets` on `*`. 1,128 historical CNPG `Backup` CRs still
   reference the emptied bucket and will mislead anyone reading backup history.
-- **Other Rook VaultStaticSecrets still materialise a `_raw` duplicate.** Only
-  `rook-ceph-mon` has `excludeRaw` set. The rest carry a second copy of their key
-  in a field whose name does not look like a secret.
+- **Seven `Released` PVs are sitting unreclaimed**, distinct from the stuck ones
+  cleared on 2026-08-21: three `authelia` volumes (retired app) and four
+  `radarr-*` from 2025-11. They carry no `deletionTimestamp`, which is the normal
+  resting state for a `Retain` PV whose PVC is gone — so they are inert, but they
+  are also holding CephFS subvolumes nothing will ever reclaim automatically.
 - Does anything besides Terraform rely on `homelab` having admin rights? A
   CloudTrail review over 90 days would answer this definitively; it was not run
   as part of this scoping.
