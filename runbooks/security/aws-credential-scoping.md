@@ -536,6 +536,47 @@ credentials, Talos configs and CA certificates — and are exactly the classes
 `secret_rotation_classes.yml` marks as not rotatable by writing Vault. Removing
 ghosts was never going to fix those.
 
+#### `plex-config-ceph` retired too — 2026-08-21
+
+The last of the old S3 scheme: 4,573 objects / 72.7 GiB deleted, then the Vault
+record. `secret/volsync/prod/` no longer exists. Tracked secrets 119 -> 118.
+
+**It needed three code changes first, and finding them is the whole lesson.**
+This path was live rather than a ghost, and searching for consumers turned up one
+more each time:
+
+1. `data.vault_generic_secret.volsync_s3_settings` in Terraform — used *only* to
+   recover an AWS region by regex-matching the S3 hostname out of the
+   `RESTIC_REPOSITORY` string. It produced `us-west-2`, which was already the
+   literal fallback at the end of the same `coalesce`, so the read bought nothing
+   while making a Plex backup secret undeletable: removing it would have failed
+   every plan on a missing data source.
+2. `scripts/backup_talos_etcd_to_s3.sh` — still defaulted to reading
+   `RESTIC_REPOSITORY` *and* the AWS credentials from this path. Now uses
+   `secret/aws/talos-etcd-backup/credentials`, the scoped key.
+3. `docs/runbooks/talos-etcd-backups.md` — still described the credentials as
+   coming from here.
+
+That is the third, fourth and fifth consumer of a path named for a Plex backup,
+after the provider credentials found on 2026-08-21. A credential path named after
+one workload but read by others is the recurring failure in this estate, and
+grep-before-delete is what keeps catching it. Verified afterwards with
+`terraform validate` and a read-only plan showing no reference to
+`volsync_s3_settings` and no missing-data-source error.
+
+#### Still in `homelab-prod-backups`: 151.7 GiB of stale CNPG backups
+
+Deleting the volsync tree left the bucket non-empty. A `cnpg/` prefix holds
+**12,572 objects, 151.7 GiB** for six clusters, all last written 2026-04-23/24 —
+the same cutover. Every live CNPG cluster now backs up to
+`s3://myrobertson-k8s-prod-volsync/cnpg/...` on Backblaze, so this is stale by
+exactly the same reasoning as the restic repositories.
+
+Unlike those, there is no key to strand: barman backups are not sealed behind a
+password held in Vault, so this is purely a retention decision and carries none
+of the same risk. Left in place because it was outside the scope of the volsync
+cleanup.
+
 #### Separate finding: netbootxyz has no current backup
 
 `netbootxyz-config-ceph-v3` and `netbootxyz-assets-ceph-v3` are Bound and 129
@@ -726,12 +767,9 @@ experimenting on the live engine.
   fixed there because narrowing the wildcard risks breaking dynamic credential
   generation. Fixing it properly means giving Vault's dynamic users a distinct
   path or prefix (`vault-dyn-*`, or an IAM path) and scoping the policy to that.
-- **`plex-config-ceph` is the last of the old S3 scheme.** 4,573 objects /
-  72.7 GiB, and the only remaining path under `secret/volsync/prod/`. Plex is
-  actively backed up to B2 and restore-verified weekly, so this copy is
-  redundant on the same reasoning as the 21 deleted on 2026-08-21 — but it was
-  deliberately left in scope for a separate decision because its Vault path is
-  live rather than a ghost.
+- **151.7 GiB of stale CNPG backups remain in `homelab-prod-backups`.** Frozen at
+  the 2026-04-24 cutover; every live cluster now backs up to Backblaze. No key to
+  strand, so this is purely a retention decision. See the section above.
 - **`netbootxyz` has no ReplicationSource.** Two Bound PVCs, no current backup of
   any kind. Unrelated to this work, found while checking coverage.
 - Does anything besides Terraform rely on `homelab` having admin rights? A
