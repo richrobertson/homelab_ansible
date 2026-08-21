@@ -325,7 +325,13 @@ patch will hold.
 
 ### Remaining
 
-- **`homelab_terraform` still holds `AdministratorAccess`.** This is now the only
+- **`homelab_terraform` still holds `AdministratorAccess`.** Reviewed against
+  CloudTrail 2026-08-21 — see
+  [terraform-iam-cloudtrail-review.md](terraform-iam-cloudtrail-review.md). The
+  finding: because Terraform manages IAM users, access keys and roles, any policy
+  permitting that is privilege-escalation-capable, so narrowing it only helps if
+  paired with a permissions boundary. Also blocked on there being no CloudTrail
+  trail, which means S3 object access is invisible to any review. This is now the only
   admin identity, used deliberately for Terraform. Narrowing it to what the
   stacks actually manage (IAM, CloudWatch, SNS, Route53, SES, VPC, S3) is the
   next reduction, and needs a CloudTrail review to do safely.
