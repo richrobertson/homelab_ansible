@@ -594,18 +594,54 @@ Two leftovers worth knowing:
   `HomelabS3BackupProvisioningPolicy` which grants `s3:CreateBucket` and
   `s3:ListAllMyBuckets` on `*`. Both are now candidates for removal.
 
-#### Gap: most CNPG clusters have no restore verification
+#### CNPG restore verification completed to 10/10 — 2026-08-21
 
-Surfaced while checking coverage, and it matters more now that the second copy is
-gone. Only **4 of 10** clusters have a `cnpg-restore-verify-*` CronJob —
-`keycloak`, `guacamole`, `grafana` and `nextcloud-migration-clean`. The other six,
-including `cluster-immich-ceph` and `nextcloud-migration-ldap-cnpg` (352 GiB in
-B2, the largest dataset in the estate), have backups that are scheduled and
-completing but never proven restorable.
+Only **4 of 10** clusters had a `cnpg-restore-verify-*` CronJob, and the two
+largest datasets were among the six without one. Added the missing six; all ten
+now do a real `barman-cloud-restore` of the newest base backup weekly and check
+the result is a coherent data directory (`PG_VERSION`, `base/`, `pg_controldata`).
 
-The VolSync side is better served: its single weekly job iterates *every* live
-ReplicationSource. The CNPG jobs are per-cluster, so each new cluster needs one
-adding and nothing notices when that is forgotten.
+**All six were run manually and pass**, each verifying that morning's backup.
+
+Three things the existing four never had to deal with, each found by running the
+jobs rather than by reading the manifests:
+
+1. **The image must match the cluster's PostgreSQL major version.**
+   `pg_controldata` refuses a data directory written by a different major, and two
+   of these are not on 18 — `cluster-immich-ceph` runs 16.5 via the pgvecto.rs
+   image and `nextcloud-migration-ldap-cnpg` runs 17.5. Copying the existing jobs'
+   18.3 image would have produced six jobs of which two always failed.
+2. **`barman-cloud-restore latest` does not exist in older barman.** The PG16
+   image failed with `Unknown backup 'latest'`. Every job now resolves the newest
+   backup id from `barman-cloud-backup-list`, which works on any version and logs
+   *which* backup was verified.
+3. **mawk on Debian 11 does not support `{n}` interval quantifiers.** The id-
+   matching pattern `[0-9]{8}T[0-9]{6}` silently matched nothing in exactly the two
+   Debian 11 based images, so both reported "no base backups found" against
+   repositories that plainly had them — while the four Debian 13 images matched it
+   fine. That is what made the failure look cluster-specific rather than
+   image-specific. Uses `[0-9]+T[0-9]+` instead.
+
+Two sizing decisions worth keeping:
+
+- `nextcloud-migration-ldap-cnpg` is **49.5 GiB** and node ephemeral storage tops
+  out at 41 GiB allocatable, so that one job restores into a Ceph-backed ephemeral
+  volume rather than an `emptyDir`, which would either fail or push the node into
+  disk pressure. It takes ~8m40s. Its retention is also tighter (1 success, 2-day
+  TTL) because a completed pod holds its volume until deleted, and the default
+  would park ~100 GiB on Ceph between weekly runs.
+- The other five hold =<1.2 GiB and keep the `emptyDir` pattern.
+
+**Freshness is now asserted too.** A restore that succeeds against a months-old
+backup is still a failed backup schedule, and with no CNPG metrics scraped nothing
+else would notice. Each job fails if the newest base backup is more than 3 days
+old against a daily schedule.
+
+**Still per-cluster, though.** The VolSync side has one job that iterates *every*
+live ReplicationSource, so new sources are covered automatically. These are one
+job per cluster, so cluster eleven will be missed the same way six were. The fix
+is to scrape the CNPG operator's metrics — currently `cnpg_*` is entirely absent
+from Prometheus — and alert on clusters with no recent verification.
 
 #### Separate finding: netbootxyz has no current backup
 
@@ -801,9 +837,10 @@ experimenting on the live engine.
   `HomelabS3BackupProvisioningPolicy`, which grants `s3:CreateBucket` and
   `s3:ListAllMyBuckets` on `*`. 1,128 historical CNPG `Backup` CRs still
   reference the emptied bucket and will mislead anyone reading backup history.
-- **6 of 10 CNPG clusters have no restore verification**, including the two
-  largest datasets. Backups are scheduled and completing, but nothing proves they
-  restore. See the section above.
+- **Nothing scrapes CNPG operator metrics.** `cnpg_*` is entirely absent from
+  Prometheus, which is why restore-verification coverage has to be tracked by
+  hand and why a new cluster with no verification job would go unnoticed. Adding
+  that ServiceMonitor would also give backup-age metrics directly.
 - **`netbootxyz` has no ReplicationSource.** Two Bound PVCs, no current backup of
   any kind. Unrelated to this work, found while checking coverage.
 - Does anything besides Terraform rely on `homelab` having admin rights? A
