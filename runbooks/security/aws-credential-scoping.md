@@ -564,18 +564,48 @@ grep-before-delete is what keeps catching it. Verified afterwards with
 `terraform validate` and a read-only plan showing no reference to
 `volsync_s3_settings` and no missing-data-source error.
 
-#### Still in `homelab-prod-backups`: 151.7 GiB of stale CNPG backups
+#### Stale CNPG backups deleted, bucket now empty — 2026-08-21
 
-Deleting the volsync tree left the bucket non-empty. A `cnpg/` prefix holds
-**12,572 objects, 151.7 GiB** for six clusters, all last written 2026-04-23/24 —
-the same cutover. Every live CNPG cluster now backs up to
-`s3://myrobertson-k8s-prod-volsync/cnpg/...` on Backblaze, so this is stale by
-exactly the same reasoning as the restic repositories.
+The `cnpg/` prefix held **12,572 objects, 151.8 GiB** for six clusters, all last
+written 2026-04-23/24 — the same cutover. Every live CNPG cluster now backs up to
+`s3://myrobertson-k8s-prod-volsync/cnpg/...` on Backblaze.
 
-Unlike those, there is no key to strand: barman backups are not sealed behind a
-password held in Vault, so this is purely a retention decision and carries none
-of the same risk. Left in place because it was outside the scope of the volsync
-cleanup.
+The risk here was different from the restic repositories. There is no key to
+strand — barman backups are not sealed behind a password held in Vault — so the
+danger was a *reference*: a cluster bootstrapping or recovering from the old
+object store would have broken. Checked and clear: no repository references the
+bucket, no cluster declares `externalClusters`, and all ten bootstrap with
+`initdb` rather than `recovery`.
+
+Every one of the six had a **newer** B2 counterpart, including the retired
+`cluster-authelia-ceph` whose B2 copy runs to 2026-08-02, so nothing became a
+sole copy. A manifest was captured first.
+
+`homelab-prod-backups` is now **completely empty** — 0 objects, no versions, no
+delete markers. Verified afterwards: all ten clusters fully ready and every
+`ScheduledBackup` reporting a completed run within the last ~6 hours.
+
+Two leftovers worth knowing:
+
+- **1,128 `Backup` CRs still reference the deleted bucket.** They are historical
+  records of pre-migration backups, not live configuration, and now point at
+  nothing. Harmless, but they will mislead anyone reading backup history.
+- **The bucket itself still exists**, empty, along with
+  `HomelabS3BackupProvisioningPolicy` which grants `s3:CreateBucket` and
+  `s3:ListAllMyBuckets` on `*`. Both are now candidates for removal.
+
+#### Gap: most CNPG clusters have no restore verification
+
+Surfaced while checking coverage, and it matters more now that the second copy is
+gone. Only **4 of 10** clusters have a `cnpg-restore-verify-*` CronJob —
+`keycloak`, `guacamole`, `grafana` and `nextcloud-migration-clean`. The other six,
+including `cluster-immich-ceph` and `nextcloud-migration-ldap-cnpg` (352 GiB in
+B2, the largest dataset in the estate), have backups that are scheduled and
+completing but never proven restorable.
+
+The VolSync side is better served: its single weekly job iterates *every* live
+ReplicationSource. The CNPG jobs are per-cluster, so each new cluster needs one
+adding and nothing notices when that is forgotten.
 
 #### Separate finding: netbootxyz has no current backup
 
@@ -767,9 +797,13 @@ experimenting on the live engine.
   fixed there because narrowing the wildcard risks breaking dynamic credential
   generation. Fixing it properly means giving Vault's dynamic users a distinct
   path or prefix (`vault-dyn-*`, or an IAM path) and scoping the policy to that.
-- **151.7 GiB of stale CNPG backups remain in `homelab-prod-backups`.** Frozen at
-  the 2026-04-24 cutover; every live cluster now backs up to Backblaze. No key to
-  strand, so this is purely a retention decision. See the section above.
+- **`homelab-prod-backups` is now empty and can probably go**, along with
+  `HomelabS3BackupProvisioningPolicy`, which grants `s3:CreateBucket` and
+  `s3:ListAllMyBuckets` on `*`. 1,128 historical CNPG `Backup` CRs still
+  reference the emptied bucket and will mislead anyone reading backup history.
+- **6 of 10 CNPG clusters have no restore verification**, including the two
+  largest datasets. Backups are scheduled and completing, but nothing proves they
+  restore. See the section above.
 - **`netbootxyz` has no ReplicationSource.** Two Bound PVCs, no current backup of
   any kind. Unrelated to this work, found while checking coverage.
 - Does anything besides Terraform rely on `homelab` having admin rights? A
