@@ -449,7 +449,7 @@ Split, after checking every prefix against S3 directly:
 | | Count | Action |
 | --- | ---: | --- |
 | No surviving repository | 7 | **Destroyed 2026-08-21.** Tracked 147 -> 140. |
-| Repository still holds data | 21 | **Left alone.** 110 GiB; needs a retention decision. |
+| Repository still holds data | 21 | **Resolved 2026-08-21** — S3 data deleted, then the records. See below. |
 
 The 21 are `immich-data-files-pvc-ceph` (101.4 GiB) and `radarr-config-ceph`
 (6.8 GiB), which are almost all of it, plus 19 small ones. `plex-config-ceph`
@@ -497,6 +497,44 @@ ranges from that same date to today. So deleting the S3 data never leaves
 anything as the sole copy. The database and `authelia` repositories are the
 frozen ones on both sides, which is expected: those workloads moved to CNPG
 barman or were retired at the same cutover.
+
+#### Resolved: old S3 repositories deleted, then the records — 2026-08-21
+
+Done in that order deliberately, so that an interruption at any point would leave
+data with its key rather than a key with no data, or worse, data with no key.
+
+**Deleted** `s3://homelab-prod-backups/volsync/default/` for the 21: 7,560
+objects, **110.0 GiB**, verified as zero objects remaining per prefix. The bucket
+is unversioned with no object lock and no lifecycle rules, so the space is
+genuinely released rather than hidden behind delete markers. A manifest of every
+deleted object key was captured first.
+
+`plex-config-ceph` was **excluded** — it is the one live path in that tree, not a
+ghost. Its 4,573 objects / 72.7 GiB remain, and it is now the only thing left in
+the bucket.
+
+**Then destroyed** the 21 Vault metadata records. `secret/volsync/prod/` now
+contains only `plex-config-ceph`.
+
+Verified afterwards: B2 untouched and still growing (13,995 objects), all 26
+ReplicationSources reporting a `lastSyncTime` with the newest landing *during*
+the deletion, and all 77 VaultStaticSecrets synced.
+
+Effect on the metrics, which was the original reason for touching any of this:
+
+| | Before | After |
+| --- | ---: | ---: |
+| Tracked secrets | 148 | 119 |
+| Rotation backlog (past interval) | 92 | 64 |
+| Severely overdue (>2x interval) | 20 | 19 |
+
+The severely-overdue figure barely moved, and that is the honest result: at ~142
+days against a 90-day interval the volsync ghosts were in the general backlog but
+never in the >180-day set. The single drop there came from `aws/user/homelab` at
+332 days. **The 19 that remain are all real** — Ceph CSI keyrings, docker
+credentials, Talos configs and CA certificates — and are exactly the classes
+`secret_rotation_classes.yml` marks as not rotatable by writing Vault. Removing
+ghosts was never going to fix those.
 
 #### Separate finding: netbootxyz has no current backup
 
@@ -688,11 +726,12 @@ experimenting on the live engine.
   fixed there because narrowing the wildcard risks breaking dynamic credential
   generation. Fixing it properly means giving Vault's dynamic users a distinct
   path or prefix (`vault-dyn-*`, or an IAM path) and scoping the policy to that.
-- **Retention decision on 110 GiB of old S3 restic backups.** B2 coverage was
-  verified 2026-08-21 and every one of the 21 has a counterpart at least as
-  recent, so the S3 copies are redundant rather than sole copies. Remaining
-  decision is simply whether to keep a second copy of the 2026-04-24 state; if
-  not, delete the S3 data first and the Vault metadata second.
+- **`plex-config-ceph` is the last of the old S3 scheme.** 4,573 objects /
+  72.7 GiB, and the only remaining path under `secret/volsync/prod/`. Plex is
+  actively backed up to B2 and restore-verified weekly, so this copy is
+  redundant on the same reasoning as the 21 deleted on 2026-08-21 — but it was
+  deliberately left in scope for a separate decision because its Vault path is
+  live rather than a ghost.
 - **`netbootxyz` has no ReplicationSource.** Two Bound PVCs, no current backup of
   any kind. Unrelated to this work, found while checking coverage.
 - Does anything besides Terraform rely on `homelab` having admin rights? A
