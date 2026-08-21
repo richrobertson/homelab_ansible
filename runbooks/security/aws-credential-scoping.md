@@ -753,8 +753,22 @@ no need to touch the PVs at all. netbootxyz now has no PV, PVC or
 VolumeAttachment anywhere in prod.
 
 The other three (`tautulli-config-ceph-v2`, `trilium-data-ceph-v2`,
-`authelia-config-ceph-v2`) are the same defect and now verified safe to clear the
-same way, but were left alone as outside the scope of the netbootxyz cleanup.
+`authelia-config-ceph-v2`) were cleared the same way shortly afterwards, after
+re-confirming their PVCs no longer existed and their subvolumes were still absent
+from Ceph. Five more VolumeAttachments needed the finalizer removed — two of the
+three PVs had more than one, having been attached to several workers before the
+migration. **Zero PVs now sit terminating, and zero VolumeAttachments.**
+
+Live `tautulli` and `trilium` were unaffected, as expected: they run on separate
+`-v3` PVCs, both still Bound with backups completing `Successful`. `authelia` is
+retired. No PVC anywhere is non-Bound and no pod was disrupted.
+
+**The recipe, since this will recur if a migration is interrupted again:** confirm
+the PVC is gone, confirm the subvolume is absent from
+`ceph fs subvolume ls kubernetes-prod-cephfs csi`, then clear the finalizer on the
+*VolumeAttachments* — not the PV. The PVs delete themselves once nothing holds
+them. Clearing a PV finalizer while the subvolume still exists would orphan it in
+CephFS where nothing would ever find it.
 
 ### The Ceph toolbox could not reach the cluster — FIXED 2026-08-21
 
@@ -993,10 +1007,6 @@ experimenting on the live engine.
   `HomelabS3BackupProvisioningPolicy`, which grants `s3:CreateBucket` and
   `s3:ListAllMyBuckets` on `*`. 1,128 historical CNPG `Backup` CRs still
   reference the emptied bucket and will mislead anyone reading backup history.
-- **Three PVs remain stuck terminating since 2026-04-25** —
-  `tautulli-config-ceph-v2`, `trilium-data-ceph-v2`, `authelia-config-ceph-v2`.
-  Their CephFS subvolumes are confirmed gone, so clearing the VolumeAttachment
-  finalizers is safe; the netbootxyz pair was cleared this way.
 - **Other Rook VaultStaticSecrets still materialise a `_raw` duplicate.** Only
   `rook-ceph-mon` has `excludeRaw` set. The rest carry a second copy of their key
   in a field whose name does not look like a secret.
