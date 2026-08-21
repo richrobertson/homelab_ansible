@@ -239,8 +239,70 @@ not on credentials — those come from a tfvars file not present locally, and
 (including the state bucket), IAM, CloudWatch, SNS, Route53, Lambda, SES and EC2,
 but **not** by a green plan. Run one with real tfvars before relying on it.
 
+### Deleting the key broke Terraform — the consumer map was incomplete
+
+**Read this before deleting any credential.** The map above listed Kubernetes
+secrets and three Vault paths. It was wrong. A full sweep of Vault afterwards
+found **32 paths still holding `...5KQF`**, and one of them mattered:
+
+```
+terraform/main.tf:34
+  aws_access_key_id = var.aws_access_key_id != null ? var.aws_access_key_id
+                    : data.vault_generic_secret.volsync_s3_settings.data["AWS_ACCESS_KEY_ID"]
+terraform/variables.tf:30
+  default = "secret/volsync/prod/plex-config-ceph"
+```
+
+Terraform's `provider "aws"` takes its credentials from a Vault path named
+**`volsync/prod/plex-config-ceph`** — via a `vault_generic_secret` data source,
+not via VSO and not from the environment. Deleting the key therefore failed every
+plan with `InvalidClientTokenId`. Fixed by patching that path to `...FOH3`.
+
+**Scan all of Vault, not just the paths you expect.** Grepping the repos for a
+path name finds `vault_generic_secret` consumers that a Kubernetes-only scan
+misses entirely.
+
+What was *not* broken, verified rather than assumed:
+
+- **CNPG backs up to Backblaze B2**, not AWS (`endpointURL:
+  https://s3.us-west-002.backblazeb2.com`). Its live secret holds a B2 key, not
+  an `AKIA` one. All ten clusters had successful backups throughout.
+- **VolSync reads `secret/backblaze/k8s/prod/volsync`** — 33 VaultStaticSecrets
+  point there. All 26 replicationsources kept syncing, including one at
+  05:55:45Z, the minute the key was deleted.
+
+So the 29 `secret/volsync/prod/*` paths holding AWS keys were legacy copies with
+no consumer at all.
+
+### Orphaned path cleanup — 2026-08-21
+
+Of the 31 paths still holding the dead key, 28 had **no VSO consumer and no
+reference anywhere in the three repos**. Soft-deleted (recoverable with
+`vault kv undelete`), which also removes them from the credential-age metrics.
+
+Three were kept because they are referenced:
+
+| Path | Why kept |
+| --- | --- |
+| `secret/cnpg/prod/backup-s3` | named in `secret_rotation_classes.yml` |
+| `secret/nextcloud/prod/s3` | still has a VSO consumer (the 0/0 deployment) |
+| `secret/talos/backup/stage` | referenced in `clusters/staging/infrastructure.yaml` |
+
+Post-cleanup health, all verified: VolSync 26/26 synced within 2h, CNPG 10/10
+with successful backups, VaultStaticSecrets 77/77 synced, Terraform 0
+`InvalidClientTokenId`.
+
+Note `vault kv get` **exits 0 on a soft-deleted KV-v2 path** — it returns
+metadata carrying `deletion_time`. Checking the exit code says "still there";
+check whether `data.data` is populated instead.
+
 ### Remaining
 
+- **Terraform's AWS credentials should move out of `volsync/prod/plex-config-ceph`.**
+  An admin-capable key living under a `volsync` path is why it was missed.
+  `secret/aws/user/homelab_terraform` is the obvious home, but the field names
+  differ (`access_key` vs `AWS_ACCESS_KEY_ID`), so the data source or the secret
+  needs adjusting to match.
 - **`homelab_terraform` still holds `AdministratorAccess`.** This is now the only
   admin identity, used deliberately for Terraform. Narrowing it to what the
   stacks actually manage (IAM, CloudWatch, SNS, Route53, SES, VPC, S3) is the
