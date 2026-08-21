@@ -637,11 +637,47 @@ backup is still a failed backup schedule, and with no CNPG metrics scraped nothi
 else would notice. Each job fails if the newest base backup is more than 3 days
 old against a daily schedule.
 
-**Still per-cluster, though.** The VolSync side has one job that iterates *every*
-live ReplicationSource, so new sources are covered automatically. These are one
-job per cluster, so cluster eleven will be missed the same way six were. The fix
-is to scrape the CNPG operator's metrics — currently `cnpg_*` is entirely absent
-from Prometheus — and alert on clusters with no recent verification.
+#### CNPG metrics scraped, and the coverage gap now alerts — 2026-08-21
+
+`cnpg_*` was **entirely absent from Prometheus**, which is why backup health could
+only be read by hand. Two independent causes:
+
+1. **The operator's chart-managed PodMonitor carried a label matching no
+   selector.** The HelmRelease set `podMonitorAdditionalLabels: {release:
+   cloudnative-pg}`, but this Prometheus selects PodMonitors on
+   `app.kubernetes.io/component=monitoring`. Note `serviceMonitorSelector` is `{}`
+   and matches everything while `podMonitorSelector` is not — so a ServiceMonitor
+   would have worked and the PodMonitor silently did not. Monitoring was
+   "enabled" and scraping nothing for **298 days**.
+2. **Nothing scraped the instance pods at all**, and `cnpg_collector_*` — the
+   backup metrics — come from them on port 9187, not from the operator.
+
+Fixed with the label correction plus one `cnpg-instances` PodMonitor selecting
+`cnpg.io/podRole=instance` across all namespaces. Deliberately *not* the
+per-Cluster `spec.monitoring.enablePodMonitor` flag: per-cluster opt-in has
+exactly the failure mode this whole thread is about. Selecting by role covers a
+new cluster the moment its pods start. Result: 23/23 targets up, **97 `cnpg_*`
+metrics**.
+
+**The trap when writing rules against these:** replicas report
+`cnpg_collector_last_available_backup_timestamp` as `0`, so an unfiltered rule
+reads every cluster as ~56 years stale and fires permanently. Only the primary
+reports a real value. Every rule filters `cnpg_instance_role="primary"`.
+
+`cnpg-backup-alerts.yaml` adds six rules — stale backup (48h against a daily
+schedule), a failure newer than the last success, WAL archive backlog (a PITR gap
+even when the base backup is fine), collector down, an `absent()` meta-rule, and
+`CNPGClusterMissingRestoreVerification`.
+
+**That last one closes the loop.** Restore verification is still one CronJob per
+cluster, so an eleventh cluster could be created unverified — but comparing
+`count(count by (cnpg_cluster)(cnpg_collector_up))` against
+`count(kube_cronjob_info{cronjob=~"cnpg-restore-verify.*"})` now says so. Today
+that reads 10 against 10.
+
+The `absent()` rule exists because this exact failure already happened once: a
+label mismatch made monitoring silently useless for 298 days and nothing reported
+the absence.
 
 #### Separate finding: netbootxyz has no current backup
 
@@ -837,10 +873,6 @@ experimenting on the live engine.
   `HomelabS3BackupProvisioningPolicy`, which grants `s3:CreateBucket` and
   `s3:ListAllMyBuckets` on `*`. 1,128 historical CNPG `Backup` CRs still
   reference the emptied bucket and will mislead anyone reading backup history.
-- **Nothing scrapes CNPG operator metrics.** `cnpg_*` is entirely absent from
-  Prometheus, which is why restore-verification coverage has to be tracked by
-  hand and why a new cluster with no verification job would go unnoticed. Adding
-  that ServiceMonitor would also give backup-age metrics directly.
 - **`netbootxyz` has no ReplicationSource.** Two Bound PVCs, no current backup of
   any kind. Unrelated to this work, found while checking coverage.
 - Does anything besides Terraform rely on `homelab` having admin rights? A
