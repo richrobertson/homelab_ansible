@@ -6,25 +6,34 @@
 # outside the toolbox pod's tmpfs. Only sha256 prefixes and lengths are shown,
 # which is enough to prove Ceph, Vault and Kubernetes all agree.
 #
-#   usage: rotate-ceph-csi-key.sh <ceph-entity> <vault-path-leaf> <k8s-secret>
+#   usage: rotate-ceph-csi-key.sh <ceph-entity> <vault-path-leaf> <k8s-secret> [k8s-namespace]
 #   e.g.   rotate-ceph-csi-key.sh csi-rbd-provisioner rook-csi-rbd-provisioner rook-csi-rbd-provisioner
+#          rotate-ceph-csi-key.sh csi-cephfs-standalone csi-cephfs-secret csi-cephfs-secret ceph-csi
 set -euo pipefail
 
 ENTITY="${1:?ceph entity, e.g. csi-rbd-provisioner}"
 LEAF="${2:?vault path leaf under secret/proxmox/cl0/ceph/}"
-K8S_SECRET="${3:?k8s secret name in rook-ceph-external}"
+K8S_SECRET="${3:?k8s secret name}"
+# The standalone ceph-csi stack keeps its Secret and VaultStaticSecret in
+# ceph-csi, not rook-ceph-external, so the namespace cannot be assumed.
+SECRET_NS="${4:-rook-ceph-external}"
 
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 export VAULT_ADDR="${VAULT_ADDR:-https://vault.myrobertson.net:8200}"
 VPATH="secret/proxmox/cl0/ceph/$LEAF"
-NS=rook-ceph-external
+NS=rook-ceph-external   # where the toolbox pod lives
 TB=$(kubectl --request-timeout=30s -n "$NS" get pod -l app=rook-ceph-tools -o jsonpath='{.items[0].metadata.name}')
 [ -n "$TB" ] || { echo "no toolbox pod" >&2; exit 1; }
 
 h() { printf '%s' "$1" | shasum -a256 | cut -c1-12; }
 
-# client.admin, which is the only entity here with permission to rotate others.
-ADMIN=$(vault kv get -field=userKey secret/proxmox/cl0/ceph/csi-cephfs-secret)
+# client.admin: the only entity here permitted to rotate others.
+#
+# This used to read csi-cephfs-secret's userKey, which WAS client.admin until
+# that path was de-privileged on 2026-08-22. It now holds
+# client.csi-cephfs-standalone, which cannot rotate anything, so the admin key
+# is read from the path it was split out to.
+ADMIN=$(vault kv get -field=key secret/proxmox/cl0/ceph/client-admin)
 
 echo "=== $ENTITY : before ==="
 OLD_VAULT=$(vault kv get -field=userKey "$VPATH")
@@ -49,13 +58,13 @@ BACK=$(vault kv get -field=userKey "$VPATH")
 echo "  vault userKey sha=$(h "$BACK") (matches ceph)"
 
 echo "=== forcing VSO sync ==="
-kubectl --request-timeout=30s -n "$NS" annotate vaultstaticsecret "$LEAF" \
+kubectl --request-timeout=30s -n "$SECRET_NS" annotate vaultstaticsecret "$LEAF" \
   vso.hashicorp.com/force-sync="$(date +%s)" --overwrite >/dev/null 2>&1 || true
 
 for i in $(seq 1 12); do
-  CUR=$(kubectl --request-timeout=20s -n "$NS" get secret "$K8S_SECRET" -o jsonpath='{.data.userKey}' 2>/dev/null | base64 -d || true)
+  CUR=$(kubectl --request-timeout=20s -n "$SECRET_NS" get secret "$K8S_SECRET" -o jsonpath='{.data.userKey}' 2>/dev/null | base64 -d || true)
   if [ "$CUR" = "$NEWKEY" ]; then
-    echo "  k8s secret $K8S_SECRET sha=$(h "$CUR") -- SYNCED after ${i}0s"
+    echo "  k8s secret $SECRET_NS/$K8S_SECRET sha=$(h "$CUR") -- SYNCED after ${i}0s"
     break
   fi
   sleep 10
