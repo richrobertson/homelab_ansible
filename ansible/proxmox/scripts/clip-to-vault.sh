@@ -45,7 +45,13 @@ echo "  wrote $VPATH ($FIELD), readback matches"
 # Stamp rotated_at, or the credential-age alert keeps firing on a credential
 # that was in fact just rotated. metadata patch merges server-side; the admin
 # policy gained the patch capability on 2026-08-22.
-TODAY=$(date -u +%Y-%m-%d)
+#
+# ROTATED_AT overrides the default of today, and exists for ADOPTING an existing
+# credential rather than rotating one. Recording today's date for a credential
+# minted a year ago would reset its age to zero and hide it -- the opposite of
+# why it is being tracked. Pass the earliest date the credential is known to
+# have existed.
+TODAY="${ROTATED_AT:-$(date -u +%Y-%m-%d)}"
 if vault kv metadata patch -mount=secret -custom-metadata=rotated_at="$TODAY" "${VPATH#secret/}" >/dev/null 2>&1; then
   echo "  stamped rotated_at=$TODAY"
 else
