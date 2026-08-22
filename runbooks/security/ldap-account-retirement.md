@@ -371,6 +371,47 @@ The decision belongs with the
 which is being planned separately. This runbook's requirement is only that the
 answer is recorded and the ACEs match it.
 
+#### ROTATED 2026-08-21
+
+`keycloak-ldap` was rotated end to end by
+`ansible/domain/rotate_service_account_passwords.yml` using the new
+`keycloak_component` propagation kind. AD `pwdLastSet` moved 2026-07-05 ->
+2026-08-21, both Vault paths landed on the same new value
+(`secret/windows/domain/service-accounts/keycloak-ldap` v3 and
+`secret/keycloak/prod` v5, the latter keeping all five of its fields because the
+propagation patches rather than puts), Keycloak's own
+`testLDAPConnection action=testAuthentication` passed, 44 federated users stayed
+visible, and the `ADAccountPasswordPastRotationInterval` alert for this account
+cleared.
+
+VSO's `rolloutRestartTargets` on `keycloak-secret` restarted the Deployment when
+the new value synced — 2/3 pods mid-rotation is expected, not a fault. All three
+new pods bind with the new credential.
+
+**Three environment traps had to be cleared first, and none is specific to this
+account — they block every rotation from this controller:**
+
+1. **`~/.bash_profile` shadows the venv.** Line 47 prepends Python 3.13's bin, so
+   sourcing it *after* setting PATH silently swaps `ansible-playbook` from
+   `.venv` to the system install. Source the profile **first**, then prepend
+   `.venv/bin`.
+2. **The two ansible installs are not interchangeable.** System is core 2.16.14
+   and has **no pywinrm**, so it cannot reach a DC at all — it fails with
+   `No module named 'winrm'`, which `no_log` hides behind a censored result.
+   `.venv` is 2.20.5 and has pywinrm.
+3. **2.20 rejects non-boolean conditionals.** The complexity assertions used a
+   bare `regex_search`, which returns a string. Fixed to `is not none`. So the
+   only interpreter able to reach a DC was also the only one that refused the
+   play, until that fix.
+
+Also worth knowing: on macOS the play needs
+`OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES`, or the first forked worker aborts with
+`+[NSNumber initialize] may have been in progress ... Crashing instead`.
+
+Every one of those failures stopped **before** the AD write — verified each time
+by confirming Keycloak still bound with the old credential and both Vault paths
+were unchanged. The play's fail-closed ordering held.
+
 #### ANSWER, recorded 2026-08-21: `WRITABLE` stays
 
 The test above is met — users **do** change their AD password through Keycloak —
