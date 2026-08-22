@@ -1,0 +1,61 @@
+---
+# Enable the Active Directory Recycle Bin, then confirm it took.
+#
+# This is a ONE-WAY forest change: once enabled it cannot be disabled. It is
+# enabled here deliberately, before deleting three retired accounts, because
+# without it a deleted object can only be recovered by an authoritative restore
+# from DC system state - Restore-ADObject does not work on a tombstone that has
+# been stripped of its attributes.
+#
+# Requires Forest Functional Level 2008 R2 or higher; this forest is
+# Windows2016Forest.
+- name: Enable the AD Recycle Bin
+  # Runs on the Domain Naming Master. Enable-ADOptionalFeature must be serviced
+  # by that FSMO role holder; issuing it from another DC fails with "Unable to
+  # contact the server ... or it does not have Active Directory Web Services
+  # running", which is misleading - ADWS was reachable on all three DCs.
+  hosts: rhonda.myrobertson.net
+  gather_facts: false
+  tasks:
+    - name: Enable and verify
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        Import-Module ActiveDirectory
+        $forest = (Get-ADForest).Name
+        $dnm    = (Get-ADForest).DomainNamingMaster
+        $cfg    = (Get-ADRootDSE).configurationNamingContext
+        $feat   = Get-ADOptionalFeature -Filter { Name -like 'Recycle Bin Feature' }
+        Write-Output ('forest=' + $forest + ' domainNamingMaster=' + $dnm)
+
+        if ($feat.EnabledScopes.Count -gt 0) {
+          Write-Output 'ALREADY_ENABLED'
+        } else {
+          Enable-ADOptionalFeature -Identity $feat `
+            -Scope ForestOrConfigurationSet `
+            -Target $forest `
+            -Server $dnm `
+            -Confirm:$false
+          Write-Output 'ENABLE_ISSUED'
+        }
+
+        $after = Get-ADOptionalFeature -Filter { Name -like 'Recycle Bin Feature' }
+        if ($after.EnabledScopes.Count -gt 0) {
+          Write-Output 'VERIFIED_ENABLED'
+        } else {
+          Write-Output 'STILL_DISABLED'
+          exit 1
+        }
+
+        # msDS-deletedObjectLifetime governs how long a deleted object stays
+        # restorable. If it was never set it inherits tombstoneLifetime (180d
+        # by default, but it can be 60 on forests built long ago).
+        $do = Get-ADObject -Identity "CN=Directory Service,CN=Windows NT,CN=Services,$cfg" `
+                -Properties msDS-deletedObjectLifetime,tombstoneLifetime
+        Write-Output ('deletedObjectLifetime: ' + $do.'msDS-deletedObjectLifetime')
+        Write-Output ('tombstoneLifetime    : ' + $do.tombstoneLifetime)
+      register: rb
+      changed_when: "'ENABLE_ISSUED' in rb.stdout"
+
+    - name: Show
+      ansible.builtin.debug:
+        msg: "{{ rb.stdout_lines }}"

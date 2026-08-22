@@ -1,0 +1,73 @@
+---
+# Delete three verified-dead AD accounts, having first enabled the AD Recycle
+# Bin so each deletion is reversible for the 180-day deletedObjectLifetime.
+#
+# Each account is dumped to the log BEFORE deletion (including objectSid and
+# group memberships) so that a restore, or an ACL clean-up for an orphaned SID,
+# does not depend on anyone remembering what was there.
+#
+# Restore with:
+#   Get-ADObject -Filter {sAMAccountName -eq '<name>'} -IncludeDeletedObjects |
+#     Restore-ADObject
+# Group memberships are NOT restored by Restore-ADObject and must be re-added
+# from the record below.
+- name: Delete retired AD accounts
+  hosts: rhonda.myrobertson.net
+  gather_facts: false
+  vars:
+    drad_accounts:
+      - ldap
+      - synbackup
+      - svc-syno-repl
+  tasks:
+    - name: Record then delete
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        Import-Module ActiveDirectory
+        $names = @('ldap','synbackup','svc-syno-repl')
+        foreach ($n in $names) {
+          Write-Output ('===== ' + $n + ' =====')
+          $u = Get-ADUser -Identity $n -Properties * -ErrorAction SilentlyContinue
+          if (-not $u) { Write-Output '  ALREADY ABSENT'; continue }
+
+          if ($u.Enabled) {
+            Write-Output '  REFUSING: account is ENABLED. Not deleting.'
+            continue
+          }
+
+          Write-Output ('  objectSid   : ' + $u.SID.Value)
+          Write-Output ('  objectGUID  : ' + $u.ObjectGUID)
+          Write-Output ('  DN          : ' + $u.DistinguishedName)
+          Write-Output ('  UPN         : ' + $u.UserPrincipalName)
+          Write-Output ('  whenCreated : ' + $u.whenCreated)
+          Write-Output ('  adminCount  : ' + $u.adminCount)
+          $groups = $u.MemberOf | ForEach-Object { $_ }
+          Write-Output ('  MemberOf    : ' + ($groups -join ' | '))
+          Write-Output ('  Description : ' + $u.Description)
+
+          # ProtectedFromAccidentalDeletion sets a Deny ACE that makes Remove
+          # fail with a bare "Access is denied"; clear it explicitly so the
+          # failure mode cannot be mistaken for a permissions problem.
+          if ($u.ProtectedFromAccidentalDeletion) {
+            Set-ADObject -Identity $u.DistinguishedName -ProtectedFromAccidentalDeletion $false
+            Write-Output '  cleared ProtectedFromAccidentalDeletion'
+          }
+
+          Remove-ADUser -Identity $u.DistinguishedName -Confirm:$false
+          Write-Output '  DELETED'
+        }
+
+        Write-Output '===== post-delete verification ====='
+        foreach ($n in $names) {
+          $live = Get-ADUser -Filter { sAMAccountName -eq $n } -ErrorAction SilentlyContinue
+          $dead = Get-ADObject -Filter { sAMAccountName -eq $n } -IncludeDeletedObjects -Properties isDeleted,lastKnownParent -ErrorAction SilentlyContinue
+          $liveTxt = if ($live) { 'STILL PRESENT' } else { 'gone' }
+          $deadTxt = if ($dead) { 'recoverable (isDeleted=' + $dead.isDeleted + ')' } else { 'NOT in recycle bin' }
+          Write-Output ('  ' + $n + ' : live=' + $liveTxt + ' ; ' + $deadTxt)
+        }
+      register: drad
+      changed_when: "'DELETED' in drad.stdout"
+
+    - name: Show
+      ansible.builtin.debug:
+        msg: "{{ drad.stdout_lines }}"
