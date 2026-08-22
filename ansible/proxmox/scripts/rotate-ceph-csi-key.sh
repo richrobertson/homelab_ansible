@@ -57,6 +57,40 @@ BACK=$(vault kv get -field=userKey "$VPATH")
 [ "$BACK" = "$NEWKEY" ] || { echo "vault readback MISMATCH" >&2; exit 1; }
 echo "  vault userKey sha=$(h "$BACK") (matches ceph)"
 
+# Stamp rotated_at, or the rotation does not count.
+#
+# The credential-age collector reads age ONLY from custom_metadata.rotated_at.
+# Writing a new key does not touch it, so on 2026-08-22 four keys rotated by
+# this very script still reported as severely overdue afterwards. A rotation
+# that leaves its own alert firing is not finished.
+#
+# Prefer `metadata patch`, which merges server-side. Fall back to a
+# read-modify-write for tokens whose policy lacks the patch capability, because
+# a bare `metadata put` REPLACES the whole map and would silently drop keys such
+# as rotation_interval_days or the de-privileging notes on csi-cephfs-secret.
+TODAY=$(date -u +%Y-%m-%d)
+if vault kv metadata patch -mount=secret -custom-metadata=rotated_at="$TODAY" \
+     "${VPATH#secret/}" >/dev/null 2>&1; then
+  echo "  stamped rotated_at=$TODAY (metadata patch)"
+else
+  MERGED=$(vault kv metadata get -format=json "$VPATH" 2>/dev/null | python3 -c "
+import sys,json,shlex,os
+cm=(json.load(sys.stdin)['data'].get('custom_metadata') or {})
+cm['rotated_at']=os.environ['TODAY']
+cm.setdefault('rotation_interval_days','90')
+print(' '.join('-custom-metadata=%s' % shlex.quote('%s=%s'%(k,v)) for k,v in sorted(cm.items())))
+")
+  if [ -n "$MERGED" ]; then
+    TODAY="$TODAY" eval vault kv metadata put -mount=secret "$MERGED" "${VPATH#secret/}" >/dev/null
+    echo "  stamped rotated_at=$TODAY (read-modify-write; policy lacks patch)"
+  else
+    echo "  WARNING: could not stamp rotated_at -- the age alert will stay firing" >&2
+  fi
+fi
+STAMPED=$(vault kv metadata get -format=json "$VPATH" 2>/dev/null \
+  | python3 -c "import sys,json;print((json.load(sys.stdin)['data'].get('custom_metadata') or {}).get('rotated_at'))")
+[ "$STAMPED" = "$TODAY" ] || echo "  WARNING: rotated_at reads '$STAMPED', expected '$TODAY'" >&2
+
 echo "=== forcing VSO sync ==="
 kubectl --request-timeout=30s -n "$SECRET_NS" annotate vaultstaticsecret "$LEAF" \
   vso.hashicorp.com/force-sync="$(date +%s)" --overwrite >/dev/null 2>&1 || true
