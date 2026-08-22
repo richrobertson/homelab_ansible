@@ -1,5 +1,26 @@
 # Orphaned CephFS subvolumes: finding them, tracing them, removing them
 
+> **The prod and staging clusters share one CephFS filesystem
+> (`kubernetes-prod-cephfs`) and one subvolume group (`csi`). A subvolume that
+> no PV in *one* cluster references is very often a live volume in the *other*.
+> Union the PV lists of EVERY cluster before calling anything an orphan.**
+>
+> On 2026-08-22 this was got wrong: the orphan set was computed from prod's PVs
+> alone and 16 live, Bound staging volumes were deleted — roughly 76 GiB across
+> bitwarden, code-server, gotify, immich, netbootxyz-assets, nextcloud,
+> overseerr, plex, prowlarr, radarr, tautulli, trilium, both vikunja volumes and
+> two nextcloud html volumes. None had a ReplicationSource. The data is gone.
+>
+> The script that did it recomputed the orphan set from live PVs rather than
+> trusting a written-down list, which felt rigorous and was worthless: it could
+> only see the cluster in the current kubeconfig context. **A check that cannot
+> see the thing which would falsify it is not a check.**
+>
+> `scripts/delete-orphan-cephfs-subvolumes.sh` now requires `--contexts` naming
+> every cluster and refuses to run if any of them fails to answer. Use it rather
+> than ad-hoc commands. The exporter deliberately no longer publishes an orphan
+> count and nothing alerts on one.
+
 `csi-cephfs-sc` uses `reclaimPolicy: Retain`. That means deleting a PVC — **or
 deleting the PV** — never calls `DeleteVolume`, so the CephFS subvolume stays
 behind holding its data. Nothing in the cluster reports this. The subvolume is
@@ -12,7 +33,9 @@ subvolume; with `Retain` there is no code path that reclaims it either way.
 
 ## Detect
 
-Compare subvolume count against CephFS PV count. They should be equal.
+Compare subvolume count against the CephFS PV count **summed over every
+cluster on the filesystem**. Comparing against a single cluster is what caused
+the 2026-08-22 data loss.
 
 ```sh
 # in the rook-ceph-tools pod. NOTE: unset CEPH_ARGS first -- the toolbox sets
@@ -73,13 +96,21 @@ tell two candidates apart.
 
 ## Remove
 
-Permanent; there is no recycle bin for a subvolume. Do not work from a list
-written down earlier — recompute the orphan set immediately before deleting and
-assert every target is still in it.
+Permanent; there is no recycle bin for a subvolume. Use the script, which
+unions every named cluster's PVs and refuses to proceed if one is unreachable:
 
 ```sh
-ceph ... fs subvolume rm kubernetes-prod-cephfs <name> --group_name csi
+# report only
+scripts/delete-orphan-cephfs-subvolumes.sh --contexts admin@prod,admin@staging
+
+# then, with explicit names
+scripts/delete-orphan-cephfs-subvolumes.sh --contexts admin@prod,admin@staging \
+  --apply csi-vol-... csi-vol-...
 ```
+
+"Recompute from live PVs immediately before deleting" is only a safety check if
+the recomputation can see every consumer. It could not, and that is exactly how
+live volumes were destroyed.
 
 Two failure modes seen in practice:
 
@@ -94,6 +125,19 @@ Two failure modes seen in practice:
 
 ## The structural gap
 
-Nothing alerts on this. Subvolume count vs CephFS PV count is a one-line check
-and would have caught 18 orphans holding ~2.94 GiB that accumulated from
-2026-04-28 onward. Worth wiring into the ceph metrics collector.
+There is deliberately no automated orphan alert, and there should not be one
+until a single vantage point can enumerate every consumer of the filesystem.
+Today it cannot: prod pods get connection refused to the staging API, and
+because the class is `Retain`, ceph-csi never calls `DeleteVolume`, so its OMAP
+entry outlives the PV and is not a liveness signal either.
+
+`cephfs-orphan-exporter` therefore publishes `cephfs_subvolumes_total`,
+`cephfs_subvolumes_referenced_here_total`,
+`cephfs_subvolumes_unreferenced_here_total` (explicitly NOT an orphan count) and
+`cephfs_orphan_detection_complete 0`. If cross-cluster enumeration ever becomes
+possible, set `DETECTION_COMPLETE=1` and only then add an alert guarded on it.
+
+The real lesson is narrower than "be careful": a reconciliation is only as
+trustworthy as the completeness of the set it reconciles against. State that set
+explicitly, and make the tooling refuse to run when part of it is missing rather
+than quietly treating absent as empty.
