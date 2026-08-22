@@ -399,12 +399,26 @@ added 2026-08-10 exists **because** `WRITABLE` writes straight to AD as
   **Never used, not once.** Only **5 of 29** federated humans have an email
   address, so 24 of them could not complete it, and there is no SMS channel.
 
-That asymmetry matters: `reset_password_allowed=true` currently exposes an
-unauthenticated forgot-password endpoint that 83% of users cannot complete and
-nobody has ever used. It is attack surface — username-validity oracle plus a
-mail trigger — bought for no capability. **Disabling it costs nothing real and
-does not touch `editMode`.** Worth doing on its own merits, separately from this
-decision.
+That asymmetry mattered: `reset_password_allowed=true` exposed an
+unauthenticated forgot-password endpoint that 83% of users could not complete and
+nobody had ever used — a username-validity oracle plus an attacker-triggerable
+outbound mail path, bought for no capability.
+
+**Disabled 2026-08-21** (`apps/base/keycloak/realm-settings-job.yaml`, with
+`realm-configmap.yaml` updated in step so a fresh import matches rather than
+drifting back). The Job was renamed `v5` -> `v6`, because Jobs are immutable and
+would otherwise silently not re-run — the version suffix is the re-run mechanism
+in this repo, not decoration.
+
+Verified two ways: the realm now reports `reset_password_allowed=false`, and the
+rendered login page (`<title>Sign in to Homelab`) contains **zero**
+`reset-credentials` references. `editMode` was deliberately left `WRITABLE` and
+confirmed unchanged afterwards; all three Keycloak pods stayed Running throughout.
+
+**This removed no capability that was in use.** The account-console password
+change is authenticated and needs no delivery channel; it is untouched. To
+restore the reset flow later, populate `mail` on the federated users first —
+otherwise it is decorative for 24 of 29 of them.
 
 Also note the asymmetry already present: Keycloak's `usersDn` is the domain root
 while its group mapper's `groups.dn` is `cn=Users`. Narrow `usersDn` to match
