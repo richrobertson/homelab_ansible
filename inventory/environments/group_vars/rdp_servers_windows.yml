@@ -13,6 +13,15 @@
 # Inventory group_vars/ files take precedence over [group:vars] in the ini, so
 # this value wins and the ini's ansible_user line is now redundant.
 #
+# CHECK YOUR OWN ini. On 2026-08-21 the production.ini on one control node was
+# still carrying `ansible_user=ldap@myrobertson.net` months after this file took
+# over. It was harmless - this value wins - but it is not harmless to read:
+# anyone opening the inventory to find out who Ansible connects as got the
+# retired Domain Admin as their answer. Because the ini is gitignored, no commit
+# can correct it for anybody else, so each control node has to be checked by
+# hand. `grep ansible_user inventory/environments/*.ini` and delete any entry
+# under [rdp_servers_windows:vars].
+#
 # svc-ansible-win is the Tier-0 automation identity that replaced
 # ldap@myrobertson.net - 2057 days old, never-expiring, Domain Admins - which
 # previously authenticated every WinRM run over NTLM on plain HTTP/5985. It is
