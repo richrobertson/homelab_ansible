@@ -1,0 +1,283 @@
+---
+# Provisions the Proxmox VE notification target and matcher that carry host and
+# guest failures to a human.
+#
+#   export VAULT_ADDR=https://vault.myrobertson.net:8200
+#   export VAULT_TOKEN="$(cat ~/.vault-token)"
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/pve_notification_targets.yml
+#
+# WHY THIS EXISTS
+#
+# This is the PVE half of the bug that ansible/proxmox/pbs_notification_targets.yml
+# fixed for PBS on the backup server, and which was never fixed on the
+# hypervisors. Measured 2026-08-22, every PVE node was in this state:
+#
+#   gotify: scooter        disable 1, server http://192.168.1.215:8180
+#   sendmail: mail-to-root disable 1
+#   matcher: default-matcher  mode all, target [mail-to-root, scooter]
+#
+# Both targets disabled, and the gotify one addressed at the Synology-hosted
+# gotify that was retired when gotify moved into Kubernetes - nothing has
+# listened on 192.168.1.215:8180 for months (curl returns 000, connection
+# refused). So PVE's notification system was configured, reported healthy, and
+# delivered absolutely nothing: no fencing, no replication failure, no backup
+# failure, no ZFS/ceph error reached anyone.
+#
+# The token it held was the real gotify.myrobertson.com "proxmox" application
+# token pointed at the wrong server, which is why the endpoint could never have
+# worked even if enabled.
+#
+# WHY THE proxmox APPLICATION IS REUSED RATHER THAN REPLACED
+#
+# secret/monitoring/gotify/proxmox is that same application, adopted into Vault
+# on 2026-08-22. Repairing the endpoint gives an already-valid token a real
+# consumer again and keeps the application's message history, where minting a
+# new one would discard 1612 messages to fix a URL.
+#
+# Pairs with the Prometheus path in ansible/proxmox/proxmox_host_alerts and
+# homelab_flux/infrastructure/configs/proxmox-host-alerts.yaml. The two are
+# deliberately independent: this one tells you the moment PVE raises something,
+# the Prometheus path still tells you when this one stops working.
+#
+# /etc/pve is a cluster filesystem, so this configures the whole cluster and
+# runs against a single node.
+
+- name: Provision PVE notification delivery
+  hosts: "{{ pve_notification_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+  run_once: true
+
+  vars:
+    pve_notification_vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    pve_notification_vault_token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    pve_notification_vault_mount: secret
+    # The application PVE already owned. See the header for why it is reused.
+    pve_notification_vault_path: monitoring/gotify/proxmox
+    pve_notification_vault_token_field: token
+
+    pve_notification_target: homelab-gotify
+    # The public hostname rather than the gateway address, because only the
+    # hostname has a certificate the Istio gateway will serve.
+    pve_notification_gotify_server: https://gotify.myrobertson.com
+    pve_notification_matcher: homelab-pve-errors
+    # PVE emits `info` for routine successes (backup ok, replication ok). Taking
+    # those would train people to ignore the channel, which is how the previous
+    # setup managed to be broken for months without anyone noticing.
+    pve_notification_match_severities:
+      - warning
+      - error
+    # Targets that no longer accept deliveries. Stripped from every matcher
+    # before the target itself goes, because PVE refuses to delete a target a
+    # matcher still references.
+    pve_notification_retired_targets:
+      - scooter
+
+  tasks:
+    - name: Require Vault environment
+      ansible.builtin.assert:
+        that:
+          - pve_notification_vault_addr | length > 0
+          - pve_notification_vault_token | length > 0
+        fail_msg: Set VAULT_ADDR and VAULT_TOKEN before running this playbook.
+      delegate_to: localhost
+      become: false
+
+    - name: Fetch the Gotify application token from Vault
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ pve_notification_vault_addr }}"
+        token: "{{ pve_notification_vault_token }}"
+        engine_mount_point: "{{ pve_notification_vault_mount }}"
+        path: "{{ pve_notification_vault_path }}"
+      register: pve_notification_vault_secret
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Assert the Gotify token is present
+      ansible.builtin.assert:
+        that:
+          - pve_notification_vault_secret.secret[pve_notification_vault_token_field] | default('') | length > 0
+        fail_msg: >-
+          {{ pve_notification_vault_mount }}/{{ pve_notification_vault_path }} has no
+          {{ pve_notification_vault_token_field }} field. PVE cannot post to Gotify without it.
+
+    - name: Read current gotify endpoints
+      ansible.builtin.command: pvesh get /cluster/notifications/endpoints/gotify --output-format json
+      register: pve_existing_gotify
+      changed_when: false
+
+    - name: Read current matchers
+      ansible.builtin.command: pvesh get /cluster/notifications/matchers --output-format json
+      register: pve_existing_matchers
+      changed_when: false
+
+    # `pvesh create` takes --name; `pvesh set` carries the name in the path and
+    # rejects --name as an unknown option. The two forms are not interchangeable.
+    - name: Reconcile the Gotify notification endpoint
+      ansible.builtin.command:
+        argv: >-
+          {{
+            (
+              ['pvesh', 'set', '/cluster/notifications/endpoints/gotify/' ~ pve_notification_target]
+              if pve_exists else
+              ['pvesh', 'create', '/cluster/notifications/endpoints/gotify', '--name', pve_notification_target]
+            )
+            + [
+                '--server', pve_notification_gotify_server,
+                '--token', pve_notification_vault_secret.secret[pve_notification_vault_token_field],
+                '--comment', 'PVE host and guest failures, managed by ansible/proxmox/pve_notification_targets.yml',
+                '--disable', '0',
+              ]
+          }}
+      vars:
+        pve_current_gotify_names: "{{ (pve_existing_gotify.stdout | from_json) | map(attribute='name') | list }}"
+        pve_exists: "{{ pve_notification_target in pve_current_gotify_names }}"
+      no_log: true
+      changed_when: true
+
+    - name: Reconcile the failure matcher
+      ansible.builtin.command:
+        argv: >-
+          {{
+            (
+              ['pvesh', 'set', '/cluster/notifications/matchers/' ~ pve_notification_matcher]
+              if pve_matcher_exists else
+              ['pvesh', 'create', '/cluster/notifications/matchers', '--name', pve_notification_matcher]
+            )
+            + [
+                '--mode', 'any',
+                '--target', pve_notification_target,
+                '--comment', 'Deliver PVE failures to Gotify',
+                '--disable', '0',
+              ]
+            + (
+                (['--match-severity'] * (pve_notification_match_severities | length))
+                | zip(pve_notification_match_severities) | flatten | list
+              )
+          }}
+      vars:
+        pve_current_matcher_names: "{{ (pve_existing_matchers.stdout | from_json) | map(attribute='name') | list }}"
+        pve_matcher_exists: "{{ pve_notification_matcher in pve_current_matcher_names }}"
+      changed_when: true
+
+    # A matcher left pointing only at a dead target keeps reporting as
+    # configured while delivering nothing -- precisely the state this playbook
+    # exists to end -- so retired targets are rewritten out rather than left
+    # alongside the new one.
+    - name: Drop retired targets from every matcher that still references them
+      ansible.builtin.command:
+        argv: >-
+          {{
+            ['pvesh', 'set', '/cluster/notifications/matchers/' ~ item.name]
+            + (
+                (['--target'] * (pve_surviving_targets | length))
+                | zip(pve_surviving_targets) | flatten | list
+              )
+          }}
+      vars:
+        # Never leave a matcher with an empty target list: falling back to the
+        # managed target keeps whatever that matcher was for still arriving.
+        pve_surviving_targets: >-
+          {{
+            (item.target | difference(pve_notification_retired_targets))
+            or [pve_notification_target]
+          }}
+      loop: "{{ pve_existing_matchers.stdout | from_json }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: (item.target | default([]) | intersect(pve_notification_retired_targets)) | length > 0
+      changed_when: true
+
+    - name: Remove retired gotify endpoints
+      ansible.builtin.command: "pvesh delete /cluster/notifications/endpoints/gotify/{{ item }}"
+      loop: >-
+        {{
+          (pve_existing_gotify.stdout | from_json)
+          | map(attribute='name')
+          | select('in', pve_notification_retired_targets)
+          | list
+        }}
+      loop_control:
+        label: "{{ item }}"
+      changed_when: true
+
+    # A target that exists but silently drops deliveries is the exact failure
+    # this playbook was written to fix, so provisioning is not finished until
+    # PVE has actually pushed a message through it.
+    # A backup job left on notification-mode `auto` routes through the
+    # notification system ONLY while it has no mailto. Add a mailto later and it
+    # silently switches to legacy sendmail -- which is the disabled
+    # mail-to-root target -- and its failures vanish again. Pinning the mode
+    # makes the routing independent of that field.
+    - name: Read backup jobs
+      ansible.builtin.command: pvesh get /cluster/backup --output-format json
+      register: pve_backup_jobs
+      changed_when: false
+
+    - name: Pin backup jobs to the notification system
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - set
+          - "/cluster/backup/{{ item.id }}"
+          - "--notification-mode"
+          - notification-system
+      loop: >-
+        {{
+          (pve_backup_jobs.stdout | from_json)
+          | rejectattr('notification-mode', 'defined')
+          | list
+          + ((pve_backup_jobs.stdout | from_json)
+             | selectattr('notification-mode', 'defined')
+             | rejectattr('notification-mode', 'equalto', 'notification-system')
+             | list)
+        }}
+      loop_control:
+        label: "{{ item.id }}"
+      changed_when: true
+
+    # Note the path: the test endpoint hangs off /targets/<name>/test, NOT off
+    # /endpoints/gotify/<name>/test, which returns "No 'create' handler defined".
+    # /targets is the read-only union of every endpoint type.
+    - name: Send a test notification through the target
+      ansible.builtin.command: "pvesh create /cluster/notifications/targets/{{ pve_notification_target }}/test"
+      changed_when: false
+
+    - name: Re-read endpoints and matchers
+      ansible.builtin.command: "pvesh get /cluster/notifications/{{ item }} --output-format json"
+      loop:
+        - endpoints/gotify
+        - matchers
+      register: pve_reconciled
+      changed_when: false
+
+    - name: Assert the delivery path survived reconciliation
+      ansible.builtin.assert:
+        that:
+          - pve_managed_target | length == 1
+          - (pve_managed_target | map(attribute='disable', default=0) | select | list | length) == 0
+          - pve_notification_matcher in (pve_reconciled_matchers | map(attribute='name') | list)
+          - pve_notification_target in pve_managed_matcher_targets
+          - (pve_reconciled_endpoints | selectattr('name', 'in', pve_notification_retired_targets) | list | length) == 0
+        fail_msg: >-
+          PVE has no enabled {{ pve_notification_target }} endpoint wired to the
+          {{ pve_notification_matcher }} matcher. Host and guest failures would be
+          delivered nowhere, which is the state this playbook exists to end.
+      vars:
+        pve_reconciled_endpoints: "{{ pve_reconciled.results[0].stdout | from_json }}"
+        pve_reconciled_matchers: "{{ pve_reconciled.results[1].stdout | from_json }}"
+        pve_managed_target: "{{ pve_reconciled_endpoints | selectattr('name', 'equalto', pve_notification_target) | list }}"
+        pve_managed_matcher_targets: >-
+          {{
+            pve_reconciled_matchers
+            | selectattr('name', 'equalto', pve_notification_matcher)
+            | map(attribute='target') | flatten | list
+          }}
+
+    - name: Show the reconciled notification configuration
+      ansible.builtin.debug:
+        msg:
+          - "{{ pve_reconciled.results[0].stdout }}"
+          - "{{ pve_reconciled.results[1].stdout }}"
