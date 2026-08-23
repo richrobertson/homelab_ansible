@@ -123,6 +123,52 @@ Two failure modes seen in practice:
   snapshots, then the subvolume.
 - Space does not come back immediately. CephFS purges asynchronously.
 
+## After recreating a PVC empty: the app may refuse to start
+
+Recreating the PVC is not the end of the recovery. An application that keeps
+integrity state in a *database* will notice that its *files* are gone, and a
+well-written one refuses to start rather than carry on against what looks like
+an unmounted volume. Restoring the PVC therefore fixes the storage and leaves
+the app crashlooping, which reads as a new unrelated fault days later.
+
+Seen on 2026-08-22/23 with staging Immich. The media PVC was recreated empty at
+16:15; the pods entered CrashLoopBackOff at 16:48 and reached 278 restarts
+before anyone connected the two:
+
+```
+Failed to read (/data/encoded-video/.immich): ENOENT
+microservices worker exited with code 1
+```
+
+Immich writes a hidden `.immich` marker into each media folder and records
+`mountChecks` in `system_metadata` once verified. The database survived on
+`ceph-block` while the media volume did not, so the flags said "verified" and
+the folders were empty. That check is doing exactly its job — the same symptom
+means "your NFS mount did not come up" the other 99% of the time, so do not
+reflex past it. **Confirm the volume really is the intended one and really is
+meant to be empty before clearing anything.**
+
+The fix is to let the app initialise rather than hand-crafting the markers:
+
+```sql
+-- immich DB; clears the stale flags so Immich recreates folders and markers
+UPDATE system_metadata
+SET value = '{"mountChecks": {"thumbs": false, "upload": false, "backups": false,
+               "library": false, "profile": false, "encoded-video": false}}'::jsonb
+WHERE key = 'system-flags';
+```
+
+then `kubectl rollout restart deploy/immich-server`. Immich recreates the six
+folders, writes fresh `.immich` markers (the content is a millisecond epoch
+stamp) and sets the flags back to true itself. Save the old value first.
+
+Prefer this to creating the marker files by hand: it runs the application's own
+initialisation path, so ownership, permissions and file contents are whatever
+that version expects rather than whatever you guessed.
+
+The general lesson: when a volume is restored empty, **check every consumer of
+it**, not just that the PVC went Bound.
+
 ## The structural gap
 
 There is deliberately no automated orphan alert, and there should not be one
