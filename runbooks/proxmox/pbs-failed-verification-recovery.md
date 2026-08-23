@@ -44,6 +44,36 @@ failed snapshots. It is bounded on purpose:
 - re-verifies at most 3 snapshots per run (object-store egress costs money)
 - refuses to touch a datastore holding `.bad` chunks
 - defers entirely while any verification task is active
+- once a datastore is clean again, re-runs its **daily** verify job so the
+  job-level alert clears too — see below
+
+## Two alerts, two metrics — healing the snapshot only clears one
+
+This catches people out, so check both:
+
+| alert | metric | cleared by |
+|---|---|---|
+| `PBSSnapshotVerifyFailed` | `pbs_snapshots{state="failed"}` | the re-verify itself |
+| `PBSVerifyJobFailed` | `pbs_task_last_status{type="verificationjob"}` | **only another job run** |
+
+The second holds the result of the last *job* run — the run that failed, which
+is why the snapshot was failed at all. Fixing the snapshot does not rewrite it,
+and nothing does until the job next runs on schedule.
+
+On 2026-08-22 the sweep healed `vm/1001` at 21:03 and the job-level critical
+would have stood until the next daily run some 18 hours later, describing a
+fault that no longer existed. The sweep now re-runs the daily job itself once
+the datastore is genuinely clean.
+
+Only a job with `ignore-verified true` is ever eligible for that refresh. By
+then every snapshot carries a fresh verification record, so the job skips all of
+them and finishes in seconds. **Never** trigger the monthly `ignore-verified
+false` job to clear an alert — it re-reads the entire datastore out of the
+object store. To do it by hand:
+
+```bash
+proxmox-backup-manager verify-job run verify-pbs-b2-daily
+```
 
 ```bash
 systemctl start pbs-verify-failed-sweep.service   # safe any time

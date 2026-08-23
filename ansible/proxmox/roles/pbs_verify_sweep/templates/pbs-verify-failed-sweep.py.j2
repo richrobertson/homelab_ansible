@@ -23,6 +23,9 @@ MAX_ATTEMPTS = {{ pbs_verify_sweep_max_attempts }}
 MAX_PER_RUN = {{ pbs_verify_sweep_max_per_run }}
 ABORT_ON_BAD_CHUNKS = {{ pbs_verify_sweep_abort_on_bad_chunks | bool | ternary('True', 'False') }}
 VERIFY_TIMEOUT = {{ pbs_verify_sweep_timeout_seconds }}
+REFRESH_JOB = {{ pbs_verify_sweep_refresh_job | bool | ternary('True', 'False') }}
+REFRESH_JOB_TIMEOUT = {{ pbs_verify_sweep_refresh_job_timeout_seconds }}
+MANAGER_TOOL = "/usr/sbin/proxmox-backup-manager"
 STATE_DIR = "{{ pbs_verify_sweep_state_dir }}"
 STATE_FILE = os.path.join(STATE_DIR, "attempts.json")
 
@@ -158,6 +161,77 @@ def reverify(store, parsed):
     return True
 
 
+def find_refresh_job(store):
+    """The cheap daily verify job for this datastore, or None.
+
+    Only a job with ignore-verified=true is ever eligible. That flag is what
+    makes this affordable: every snapshot already carries a fresh verification
+    record by the time this runs, so the job skips all of them and finishes in
+    seconds. A job with ignore-verified=false is the monthly full pass, which
+    re-reads the entire datastore out of the object store -- triggering that
+    automatically would turn a tidy-up into a large egress bill.
+    """
+    try:
+        proc = subprocess.run(
+            [MANAGER_TOOL, "verify-job", "list", "--output-format", "json"],
+            capture_output=True, timeout=MANIFEST_TIMEOUT)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log("  could not list verify jobs: %s" % exc)
+        return None
+    if proc.returncode != 0:
+        log("  could not list verify jobs: rc=%d" % proc.returncode)
+        return None
+    try:
+        jobs = json.loads(proc.stdout.decode("utf-8", "replace"))
+    except ValueError:
+        log("  could not parse verify job list")
+        return None
+
+    for job in jobs:
+        if job.get("store") != store:
+            continue
+        if job.get("ignore-verified") is not True:
+            continue
+        return job.get("id")
+    return None
+
+
+def refresh_verify_job(store):
+    """Re-run the datastore's daily verify job so its recorded status is current.
+
+    Healing the snapshots is not enough on its own. PBSSnapshotVerifyFailed
+    reads pbs_snapshots{state="failed"} and clears as soon as the manifests are
+    fixed, but PBSVerifyJobFailed reads pbs_task_last_status{type=
+    "verificationjob"}, which keeps the *last job run's* result. That run failed
+    -- that is why the snapshot was failed -- and nothing rewrites it until the
+    job next runs on schedule.
+
+    Observed 2026-08-22: the sweep healed the snapshot at 21:03 and the
+    job-level critical would have stood until the next daily run ~18 hours
+    later, describing a problem that no longer existed. An alert that stays
+    critical after the fault is fixed is how people learn to close the tab.
+    """
+    job_id = find_refresh_job(store)
+    if job_id is None:
+        log("  %s: no ignore-verified daily verify job found; leaving the job "
+            "status alone (PBSVerifyJobFailed may stand until its next run)" % store)
+        return
+    log("  %s: re-running verify job %s so its recorded status is current" % (store, job_id))
+    try:
+        proc = subprocess.run(
+            [MANAGER_TOOL, "verify-job", "run", job_id],
+            capture_output=True, timeout=REFRESH_JOB_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        log("  %s: verify job %s did not finish within %ds" % (store, job_id, REFRESH_JOB_TIMEOUT))
+        return
+    if proc.returncode != 0:
+        log("  %s: verify job %s failed rc=%d: %s"
+            % (store, job_id, proc.returncode,
+               proc.stderr.decode("utf-8", "replace").strip()[:300]))
+        return
+    log("  %s: verify job %s completed OK" % (store, job_id))
+
+
 def main():
     if not os.path.exists(DEBUG_TOOL):
         log("FATAL %s not present" % DEBUG_TOOL)
@@ -191,6 +265,8 @@ def main():
             log("%s: no snapshots recorded as failed" % name)
             continue
         log("%s: %d snapshot(s) recorded as failed" % (name, len(failed)))
+        healed_here = 0
+        unresolved_here = False
 
         for rel, parsed in failed:
             key = "%s/%s" % (name, rel)
@@ -198,10 +274,12 @@ def main():
             if attempts >= MAX_ATTEMPTS:
                 log("  %s: %d attempts already spent, leaving failed for a human" % (rel, attempts))
                 unresolved = True
+                unresolved_here = True
                 continue
             if budget <= 0:
                 log("  %s: per-run budget exhausted, deferring to the next run" % rel)
                 unresolved = True
+                unresolved_here = True
                 continue
 
             budget -= 1
@@ -221,9 +299,17 @@ def main():
                 log("  %s: now verifies OK -- clearing attempt history" % rel)
                 state.pop(key, None)
                 save_state(state)
+                healed_here += 1
             else:
                 log("  %s: still '%s' after re-verification" % (rel, now_state))
                 unresolved = True
+                unresolved_here = True
+
+        # Only once the datastore is genuinely clean. Re-running the job while a
+        # snapshot is still failed would just record another failure, and
+        # re-running it when nothing was healed would be pointless work.
+        if REFRESH_JOB and healed_here and not unresolved_here:
+            refresh_verify_job(name)
 
     return 1 if unresolved else 0
 

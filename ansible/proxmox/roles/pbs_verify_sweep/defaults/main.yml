@@ -49,6 +49,33 @@ pbs_verify_sweep_abort_on_bad_chunks: true
 # minutes against B2, so this leaves generous headroom.
 pbs_verify_sweep_timeout_seconds: 14400
 
+# --- Clearing the job-level alert --------------------------------------------
+# Healing the snapshots does not clear every alert on its own, because two
+# different alerts read two different metrics:
+#
+#   PBSSnapshotVerifyFailed  pbs_snapshots{state="failed"}                -> fixed by the re-verify
+#   PBSVerifyJobFailed       pbs_task_last_status{type="verificationjob"} -> NOT fixed by it
+#
+# The second one keeps the result of the last *job* run. That run is the one
+# that failed -- it is why the snapshot was failed in the first place -- and
+# nothing rewrites it until the job next runs on schedule.
+#
+# Seen on 2026-08-22: the sweep healed vm/1001 at 21:03 and the job-level
+# critical would have stood until the next daily run some 18 hours later,
+# describing a fault that had already been fixed. A critical that outlives its
+# cause is how an alert stops being read.
+#
+# So once a datastore is genuinely clean, re-run its daily verify job to refresh
+# that recorded status. Only a job with ignore-verified=true is ever eligible:
+# every snapshot already holds a fresh verification record by then, so the job
+# skips all of them and costs seconds. The monthly ignore-verified=false pass is
+# never triggered this way -- that one re-reads the whole datastore.
+pbs_verify_sweep_refresh_job: true
+
+# The refresh should be near-instant because it skips everything. If it is not,
+# something is wrong with that assumption; fail out rather than block the unit.
+pbs_verify_sweep_refresh_job_timeout_seconds: 900
+
 # --- Schedule ----------------------------------------------------------------
 # Run well clear of the daily verify jobs (pbs-s3 07:00, pbs-b2 08:15), which on
 # this host can run for several hours. The sweep also refuses to start while any
