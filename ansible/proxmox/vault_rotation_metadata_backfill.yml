@@ -44,7 +44,17 @@
     vault_mount: secret
     default_rotation_interval_days: 90
     # Per top-level-prefix overrides, e.g. {'proxmox': 180, 'aws': 30}
-    rotation_interval_overrides: {}
+    #
+    # `windows` is every AD account secret, and those are governed by the domain
+    # MaxPasswordAge of 42 days (harden_default_domain_password_policy.yml). A
+    # declared interval of 90 would promise they are good for more than twice as
+    # long as the directory will actually let the password live, so the overdue
+    # alert could not fire until ~48 days after the account had already stopped
+    # working. 30 matches sac_rotation_interval_days in
+    # ansible/domain/rotate_service_account_passwords.yml, which asserts the same
+    # invariant; keep the two in step.
+    rotation_interval_overrides:
+      windows: 30
     # Report-only by DEFAULT: print the plan and change nothing. Applying is a
     # mass metadata write across the secret/ mount, so it is opt-in and needs
     # sign-off. Set false (-e backfill_report_only=false) to actually stamp.
