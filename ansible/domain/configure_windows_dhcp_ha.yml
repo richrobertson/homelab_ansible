@@ -4,7 +4,23 @@
   gather_facts: false
 
   vars:
-    dhcp_failover_name: dhcp-ha
+    # The Windows DHCP console names a relationship it creates
+    # "<primary>-<partner>", and that is what the live one is called:
+    # rhonda.myrobertson.net-dns01.myrobertson.net, created through the GUI.
+    #
+    # This default was `dhcp-ha` until 2026-09-15, a name that has never existed
+    # on either server. The consequences were worse than cosmetic. The failover
+    # task below is create-only - it exits 'Present' when it finds a relationship
+    # by this name - so with the wrong name it never matched, concluded nothing
+    # was there, and would have tried to CREATE a second relationship across
+    # scopes already owned by the real one. Windows rejects that, so the playbook
+    # was not silently managing the failover: it could not run against it at all.
+    #
+    # Computed from the inventory groups rather than hardcoded, so it follows the
+    # console convention for whatever pair the groups name. Override explicitly
+    # if a relationship was created with a hand-picked name.
+    dhcp_failover_name: >-
+      {{ groups['dhcp_primary_windows'][0] }}-{{ groups['dhcp_partner_windows'][0] }}
     dhcp_failover_mode: loadbalance
     dhcp_failover_load_balance_percent: 50
     dhcp_failover_max_client_lead_time: 01:00:00
@@ -220,6 +236,36 @@
             Set-DhcpServerv4OptionValue @optionParams
           }
       changed_when: false
+
+    # A scope can belong to only one failover relationship. So if one exists
+    # under a name this playbook is not looking for, the create below does not
+    # no-op - it attempts a second relationship over the same scopes and Windows
+    # rejects it. Fail here instead, naming what was found, because "adopt the
+    # existing relationship or correct dhcp_failover_name" is a decision for an
+    # operator and not something to guess at.
+    - name: Refuse to create a duplicate failover relationship
+      when: inventory_hostname == dhcp_primary_server
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          $name = {{ dhcp_failover_name | to_json }}
+          $others = @(Get-DhcpServerv4Failover -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $name })
+          @{ conflicting = @($others | ForEach-Object { $_.Name }) } | ConvertTo-Json -Compress
+      register: dhcp_failover_conflicts
+      changed_when: false
+
+    - name: Fail if another relationship already owns these scopes
+      when: inventory_hostname == dhcp_primary_server
+      ansible.builtin.assert:
+        that:
+          - (dhcp_failover_conflicts.output[0] | from_json).conflicting | length == 0
+        fail_msg: >-
+          {{ dhcp_primary_server }} already has failover relationship(s)
+          {{ (dhcp_failover_conflicts.output[0] | from_json).conflicting }},
+          which is not the {{ dhcp_failover_name }} this playbook manages. A
+          scope can only belong to one relationship, so creating another would
+          be rejected by Windows. Either set dhcp_failover_name to the existing
+          one, or remove it deliberately first.
 
     - name: Create DHCP failover relationship on primary
       when: inventory_hostname == dhcp_primary_server
