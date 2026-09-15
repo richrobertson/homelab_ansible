@@ -12,8 +12,12 @@ roles as declared in `inventory/environments/production.ini`:
 
 Synology ABB on Kermit provides machine recovery points. The enrollment
 playbook is `ansible/synology/configure_windows_activebackup_agent.yml`.
-Credentials come from `secret/windows/domain/ldap`; never place passwords in
-this document or an incident record.
+Credentials come from `secret/windows/domain/service-accounts/svc-ansible-win`,
+the WinRM identity (`sai_winrm_account`). This was `secret/windows/domain/ldap`
+until that Domain Admin was deleted in the retirement described in
+`runbooks/security/ldap-account-retirement.md` — the secret outlived the
+account, so a bind with it returns `data 52e`, indistinguishable from a wrong
+password. Never place passwords in this document or an incident record.
 
 DSRM credentials must be escrowed separately from normal domain credentials at
 `secret/windows/domain/dsrm/dc1` and `secret/windows/domain/dsrm/rhonda` (or an

@@ -118,7 +118,10 @@ SHA-256 checksum. It targets `dc1.myrobertson.net` and
 Prerequisites:
 
 - Run `vault login` locally.
-- The Vault token must read `secret/windows/domain/ldap` and
+- The Vault token must read
+  `secret/windows/domain/service-accounts/svc-ansible-win` (the WinRM identity;
+  the old `secret/windows/domain/ldap` names a Domain Admin that no longer
+  exists in AD - see runbooks/security/ldap-account-retirement.md) and
   `secret/synology/dsm-admin/ad-service-account`.
 - The Windows hosts must reach `kermit.myrobertson.net:5510`.
 - Kermit's default template for the target device type must have a valid
@@ -132,8 +135,8 @@ files:
 
 ```bash
 export VAULT_ADDR=https://vault.myrobertson.net:8200
-export SYN_ABB_WINDOWS_USERNAME="$(vault read -format=json secret/data/windows/domain/ldap | jq -r '.data.data.username')"
-export SYN_ABB_WINDOWS_PASSWORD="$(vault read -format=json secret/data/windows/domain/ldap | jq -r '.data.data.password')"
+export SYN_ABB_WINDOWS_USERNAME="$(vault read -format=json secret/data/windows/domain/service-accounts/svc-ansible-win | jq -r '.data.data.username')"
+export SYN_ABB_WINDOWS_PASSWORD="$(vault read -format=json secret/data/windows/domain/service-accounts/svc-ansible-win | jq -r '.data.data.password')"
 export SYN_ABB_ENROLLMENT_USERNAME="$(vault read -format=json secret/data/synology/dsm-admin/ad-service-account | jq -r '.data.data.username')"
 export SYN_ABB_ENROLLMENT_PASSWORD="$(vault read -format=json secret/data/synology/dsm-admin/ad-service-account | jq -r '.data.data.password')"
 ```

@@ -23,7 +23,11 @@ Credentials are read from Vault only:
 
 - NAS break-glass SSH: `secret/synology/dsm-admin/local-ssh-account`
 - ABB enrollment account: `secret/synology/dsm-admin/ad-service-account`
-- Windows automation account: `secret/windows/domain/ldap`
+- Windows automation account (WinRM):
+  `secret/windows/domain/service-accounts/svc-ansible-win` — was
+  `secret/windows/domain/ldap` until that Domain Admin was deleted in the
+  `ldap-account-retirement` work; the secret outlived the account, so binding
+  with it returns `data 52e` and reads as a wrong password
 - Hyper Backup/B2 credentials remain on DSM and in their approved Vault path.
 
 ## Recovery objectives and authority

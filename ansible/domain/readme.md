@@ -126,8 +126,8 @@ DC1 with:
 
 ```sh
 export VAULT_ADDR=https://vault.myrobertson.net:8200
-export SYN_ABB_WINDOWS_USERNAME="$(vault read -format=json secret/data/windows/domain/ldap | jq -r '.data.data.username')"
-export SYN_ABB_WINDOWS_PASSWORD="$(vault read -format=json secret/data/windows/domain/ldap | jq -r '.data.data.password')"
+export SYN_ABB_WINDOWS_USERNAME="$(vault read -format=json secret/data/windows/domain/service-accounts/svc-ansible-win | jq -r '.data.data.username')"
+export SYN_ABB_WINDOWS_PASSWORD="$(vault read -format=json secret/data/windows/domain/service-accounts/svc-ansible-win | jq -r '.data.data.password')"
 
 OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES ANSIBLE_FORKS=1 \
   .venv/bin/ansible-playbook \
@@ -192,10 +192,20 @@ The playbook requires a temporary password when creating a brand-new account. St
 
 Keep AD `change_password_at_logon` disabled for Keycloak-backed accounts. If a first-login password change is required, set Keycloak's `UPDATE_PASSWORD` required action instead; AD's `pwdLastSet=0` simple-bind response is surfaced to Keycloak as invalid credentials before the browser flow can complete.
 
+WinRM authenticates as `svc-ansible-win`, the Tier-0 host-automation identity
+named by `sai_winrm_account` in `vars/service_account_identities.yml`. It is
+**not** the `ldap` Domain Admin: that account was deleted in the retirement
+described in `runbooks/security/ldap-account-retirement.md`, so
+`secret/windows/domain/ldap` — which this block used to read — now holds the
+credential of an account that no longer exists in AD. Binding with it returns
+`data 52e`, which looks exactly like a wrong password, and passing it to a
+playbook fails with `ntlm: the specified credentials were rejected by the
+server`.
+
 ```sh
 bash -lc '
   source ~/.bash_profile
-  domain_secret="$(vault kv get -format=json secret/windows/domain/ldap)"
+  winrm_secret="$(vault kv get -format=json secret/windows/domain/service-accounts/svc-ansible-win)"
   stella_secret="$(vault kv get -format=json secret/windows/domain/users/stella)"
   keycloak_ldap_secret="$(vault kv get -format=json secret/windows/domain/service-accounts/keycloak-ldap)"
 
@@ -204,8 +214,8 @@ bash -lc '
   trap "rm -f ${tmp_vars}" EXIT
 
   jq -n \
-    --arg ansible_user "$(jq -r ".data.data.username" <<<"${domain_secret}")" \
-    --arg ansible_password "$(jq -r ".data.data.password" <<<"${domain_secret}")" \
+    --arg ansible_user "$(jq -r ".data.data.username" <<<"${winrm_secret}")" \
+    --arg ansible_password "$(jq -r ".data.data.password" <<<"${winrm_secret}")" \
     --arg domain_account_initial_password "$(jq -r ".data.data.password" <<<"${stella_secret}")" \
     --arg domain_account_keycloak_ldap_password "$(jq -r ".data.data.password" <<<"${keycloak_ldap_secret}")" \
     "{ansible_user: \$ansible_user, ansible_password: \$ansible_password, domain_account_initial_password: \$domain_account_initial_password, domain_account_keycloak_ldap_password: \$domain_account_keycloak_ldap_password}" \
@@ -347,8 +357,8 @@ Load the existing Windows management credentials from Vault, then perform a
 one-server canary before the serial full rollout:
 
 ```sh
-export SYN_ABB_WINDOWS_USERNAME="$(vault read -format=json secret/data/windows/domain/ldap | jq -r '.data.data.username')"
-export SYN_ABB_WINDOWS_PASSWORD="$(vault read -format=json secret/data/windows/domain/ldap | jq -r '.data.data.password')"
+export SYN_ABB_WINDOWS_USERNAME="$(vault read -format=json secret/data/windows/domain/service-accounts/svc-ansible-win | jq -r '.data.data.username')"
+export SYN_ABB_WINDOWS_PASSWORD="$(vault read -format=json secret/data/windows/domain/service-accounts/svc-ansible-win | jq -r '.data.data.password')"
 
 OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES .venv/bin/ansible-playbook -f 1 \
   -i inventory/environments/production.ini \
