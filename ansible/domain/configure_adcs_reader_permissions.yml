@@ -1,0 +1,216 @@
+---
+# Grant the Terraform ADCS service account permission to READ certificate
+# requests it did not submit.
+#
+# WHY THIS EXISTS. The homelab_bootstrap root module manages two
+# microsoftadcs_certificate resources - the Vault PKI intermediate CA and the
+# Talos etcd CA, request IDs 143 and 144 on myrobertson-DC1-CA-1. Both were
+# requested in October 2025 by MYROBERTSON\ldap, an account deleted on
+# 2026-08-22 (it is in the AD Recycle Bin until 2027-02-18). Terraform now
+# authenticates as svc-tf-adcs.
+#
+# In AD CS you may retrieve an issued request if you are its requester OR you
+# hold a CA role. svc-tf-adcs was neither: it had only the implicit Enroll right
+# that Authenticated Users grants, which is enough to REQUEST a certificate and
+# not to READ one. Every terraform plan therefore failed with the provider's
+# singularly unhelpful message:
+#
+#   Error: Error Reading Certificate
+#   Could not read Certificate ID 143: an unkown error occured
+#
+# That is an authorization denial, not a credential fault. svc-tf-adcs binds
+# correctly; rotating it on 2026-09-15 could not have helped, and the wording
+# sent the investigation toward the certificates, which were healthy and valid
+# to 2037 the whole time.
+#
+# Those two errors were not cosmetic. While they stood, terraform could not plan
+# the certificates OR anything downstream of them, and the plan silently omitted
+# NINE changes - among them a machine-configuration apply to all six Talos
+# nodes. Granting this right took the plan from "2 errors, 22 changes" to
+# "0 errors, 30 changes" with nothing newly requested.
+#
+# SCOPE. This grants Read (CA_ACCESS_READ, 0x100) and nothing else.
+# Certificate Manager (0x2) would also work and is what most guides reach for,
+# but it permits issuing, revoking and denying ANY request on an Enterprise Root
+# CA - far more than a Terraform refresh needs. Read was tested first and proved
+# sufficient. Do not widen this without a reason.
+#
+# The playbook appends one ACE and never rewrites the descriptor, so the
+# existing Domain Admins / Enterprise Admins / BUILTIN\Administrators entries
+# cannot be lost. It is idempotent: a second run reports the existing mask and
+# changes nothing.
+#
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/domain/configure_adcs_reader_permissions.yml
+#
+# Requires VAULT_ADDR and VAULT_TOKEN for the WinRM credential lookup, and on
+# macOS OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES or the forked worker dies.
+- name: Grant the Terraform ADCS service account read access to the CA
+  hosts: "{{ adcs_ca_host | default('dc1.myrobertson.net') }}"
+  gather_facts: false
+
+  vars:
+    adcs_ca_name: myrobertson-DC1-CA-1
+    adcs_reader_account: svc-tf-adcs
+    # CA_ACCESS_READ. Deliberately not CA_ACCESS_OFFICER (0x2, "Certificate
+    # Manager"), which would allow issuing and revoking any request.
+    adcs_reader_access_mask: 256
+    adcs_backup_dir: C:\
+    # A CA security change only takes effect once CertSvc restarts, which briefly
+    # interrupts certificate issuance. Set false to stage the ACE and restart in
+    # a window of your choosing.
+    adcs_restart_certsvc: true
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - adcs_ca_name | length > 0
+          - adcs_reader_account | length > 0
+          - adcs_reader_access_mask | int > 0
+          # Guard against someone widening this to Certificate Manager without
+          # meaning to. 0x1 is CA_ACCESS_ADMIN and 0x2 is CA_ACCESS_OFFICER, so
+          # both live in the low two bits: a mask that clears them is a multiple
+          # of 4. Done with modulo rather than bitwise_and, which is not
+          # available in every ansible-core version this repo runs against.
+          - (adcs_reader_access_mask | int) % 4 == 0
+        fail_msg: >-
+          Refusing to run. adcs_reader_access_mask must not include
+          CA_ACCESS_ADMIN (0x1) or CA_ACCESS_OFFICER (0x2); this playbook grants
+          read-only access by design. Override deliberately if that is really
+          what you want.
+      tags: [always, preflight]
+
+    - name: Confirm the CA exists and is answering
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          $info = & certutil -cainfo 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "certutil -cainfo failed: $info" }
+          $Ansible.Result = @{ cainfo = $info }
+      register: adcs_cainfo
+      changed_when: false
+      tags: [preflight]
+
+    - name: Back up the CA security descriptor
+      ansible.windows.win_powershell:
+        parameters:
+          CaName: "{{ adcs_ca_name }}"
+          BackupDir: "{{ adcs_backup_dir }}"
+        script: |
+          param($CaName, $BackupDir)
+          $ErrorActionPreference = 'Stop'
+          $path  = "HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$CaName"
+          $bytes = (Get-ItemProperty -Path $path -Name Security).Security
+          $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+          $file  = Join-Path $BackupDir "ca-security-backup-$stamp.bin"
+          [IO.File]::WriteAllBytes($file, $bytes)
+          $sd = New-Object System.Security.AccessControl.RawSecurityDescriptor($bytes, 0)
+          # The base64 is emitted so the descriptor is recoverable from the run
+          # log alone, even if the DC's filesystem is gone. It is an ACL, not a
+          # secret.
+          $Ansible.Result = @{
+            backup_file = $file
+            backup_b64  = [Convert]::ToBase64String($bytes)
+            sddl        = $sd.GetSddlForm('All')
+            ace_count   = $sd.DiscretionaryAcl.Count
+          }
+      register: adcs_backup
+      changed_when: false
+      tags: [backup]
+
+    - name: Report the backup location
+      ansible.builtin.debug:
+        msg: >-
+          Backed up {{ adcs_backup.result.ace_count }} ACEs to
+          {{ adcs_backup.result.backup_file }}
+      tags: [backup]
+
+    - name: Append a read ACE for the service account
+      ansible.windows.win_powershell:
+        parameters:
+          CaName: "{{ adcs_ca_name }}"
+          Account: "{{ adcs_reader_account }}"
+          AccessMask: "{{ adcs_reader_access_mask | int }}"
+        script: |
+          param($CaName, $Account, $AccessMask)
+          $ErrorActionPreference = 'Stop'
+          $path = "HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$CaName"
+
+          $sid   = (Get-ADUser -Identity $Account -ErrorAction Stop).SID
+          $bytes = (Get-ItemProperty -Path $path -Name Security).Security
+          $sd    = New-Object System.Security.AccessControl.RawSecurityDescriptor($bytes, 0)
+
+          $existing = $sd.DiscretionaryAcl | Where-Object { $_.SecurityIdentifier -eq $sid }
+          if ($existing) {
+            $Ansible.Changed = $false
+            $Ansible.Result  = @{
+              action = 'already-present'
+              mask   = ('0x{0:X}' -f $existing.AccessMask)
+              sid    = $sid.Value
+            }
+          } else {
+            $ace = New-Object System.Security.AccessControl.CommonAce(
+              [System.Security.AccessControl.AceFlags]::None,
+              [System.Security.AccessControl.AceQualifier]::AccessAllowed,
+              [int]$AccessMask, $sid, $false, $null)
+            # Append at the end. Never rebuild the DACL: the Domain Admins,
+            # Enterprise Admins and BUILTIN\Administrators entries must survive.
+            $sd.DiscretionaryAcl.InsertAce($sd.DiscretionaryAcl.Count, $ace)
+            $new = New-Object byte[] $sd.BinaryLength
+            $sd.GetBinaryForm($new, 0)
+            Set-ItemProperty -Path $path -Name Security -Value $new -Type Binary
+            $Ansible.Changed = $true
+            $Ansible.Result  = @{
+              action = 'ace-added'
+              mask   = ('0x{0:X}' -f [int]$AccessMask)
+              sid    = $sid.Value
+            }
+          }
+      register: adcs_grant
+      tags: [grant]
+
+    - name: Restart CertSvc so the change takes effect
+      ansible.windows.win_service:
+        name: CertSvc
+        state: restarted
+      when:
+        - adcs_restart_certsvc | bool
+        - adcs_grant.changed
+      tags: [grant]
+
+    - name: Verify the ACE is present and the CA still answers
+      ansible.windows.win_powershell:
+        parameters:
+          CaName: "{{ adcs_ca_name }}"
+          Account: "{{ adcs_reader_account }}"
+        script: |
+          param($CaName, $Account)
+          $ErrorActionPreference = 'Stop'
+          $sec = & certutil -getreg "CA\Security" 2>&1 | Out-String
+          $svc = (Get-Service -Name CertSvc).Status
+          $Ansible.Result = @{
+            security = $sec
+            granted  = ($sec -match [regex]::Escape($Account))
+            certsvc  = "$svc"
+          }
+      register: adcs_verify
+      changed_when: false
+      tags: [verify]
+
+    - name: Assert the grant is in place and the service is running
+      ansible.builtin.assert:
+        that:
+          - adcs_verify.result.granted
+          - adcs_verify.result.certsvc == 'Running'
+        fail_msg: >-
+          The ACE for {{ adcs_reader_account }} is not visible in the CA security
+          descriptor, or CertSvc is not running. Restore from
+          {{ adcs_backup.result.backup_file }} on
+          {{ inventory_hostname }} if the descriptor looks wrong.
+        success_msg: >-
+          {{ adcs_reader_account }} can read CA requests and CertSvc is running.
+          Confirm end to end with `terraform plan` in homelab_bootstrap: the two
+          "Error Reading Certificate" failures for request IDs 143 and 144 should
+          be gone.
+      tags: [verify]
