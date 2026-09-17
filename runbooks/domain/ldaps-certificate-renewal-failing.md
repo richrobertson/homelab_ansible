@@ -1,11 +1,21 @@
-# LDAPS certificate renewal is failing on all three domain controllers
+# LDAPS certificate renewal failed on all three domain controllers (resolved)
 
-**Found 2026-09-17. Deadline 2026-10-08.** Nothing has been changed. This
-records the diagnosis and what a fix has to do.
+**Found and FIXED 2026-09-17.** All three DCs now serve 365-day certificates
+from the current CA. Kept because the failure was silent for three weeks, the
+cause is non-obvious, and two steps in the fix are easy to get wrong.
 
-## The deadline
+**The fix was one command on the CA:**
 
-All three DCs present a `DomainController`-template certificate expiring on the
+```
+certutil -SetCATemplates +DomainController
+```
+
+Everything else below is why that was the command, and what verifying it
+properly required.
+
+## The deadline that was
+
+All three DCs presented a `DomainController`-template certificate expiring on the
 **same day**:
 
 | DC | expires | days left at discovery |
@@ -18,9 +28,9 @@ When they lapse, every LDAPS bind in the estate fails at once - Vault's LDAP
 auth method, Nextcloud's directory bind, Keycloak, Synology DSM on scooter and
 kermit, and the Proxmox VE realm. There is no staggering to soften it.
 
-## It is already failing, not merely pending
+## It was already failing, not merely pending
 
-The DCs are attempting renewal and being refused, every eight hours:
+The DCs were attempting renewal and being refused, every eight hours:
 
 ```
 Event 64, Microsoft-Windows-CertificateServicesClient-AutoEnrollment, dc1
@@ -36,7 +46,7 @@ The `DomainController` template has `validity=365d` and
 **2026-08-27** and has been failing ever since. Roughly three weeks of retries
 have already been logged and discarded.
 
-## Why it fails
+## Why it failed
 
 `myrobertson-DC1-CA-1` publishes four templates, and no DC template is among
 them:
@@ -54,7 +64,7 @@ Confirmed against AD directly - the `certificateTemplates` attribute on
 lists exactly `Machine`, `SubCA`, `SubordinateCertificationAuthority-Vault`,
 `WebServer`.
 
-The DCs are asking for renewal of a template their CA does not offer.
+The DCs were asking for renewal of a template their CA did not offer.
 
 **The CA was reinstalled.** Compare the issuer on the live certificates with the
 CA that is running now:
@@ -85,9 +95,12 @@ right - its thresholds are deliberately set *below* the measured renewal point
 so that firing means renewal genuinely did not happen. The AD CS tier has no
 equivalent.
 
-**Worth adding alongside the fix:** an alert on autoenrollment Event 64, or on
-`certificate age > (validity - renewal_overlap)`, which would have caught this on
-2026-08-27 instead of 2026-09-17.
+**Added alongside the fix:** `ProbeLDAPSCertificateRenewalFailing` in homelab_flux
+`infrastructure/configs/certificate-expiry-alerts.yaml`, firing at T-35d at
+`severity: critical`. Derived from `probe_ssl_earliest_cert_expiry` rather than
+from Event 64, because there is no windows_exporter or event-log exporter in
+this estate and that would have meant a new agent on three DCs. It would have
+caught this on 2026-08-27 rather than 2026-09-17.
 
 ## Other findings from the same investigation
 
@@ -105,10 +118,69 @@ equivalent.
   they are cruft and they make `Get-ChildItem Cert:\LocalMachine\My` harder to
   read during exactly this kind of incident.
 
-## What a fix has to do
+## What the fix was
 
-Not yet done - this is a change to the enterprise root CA and wants a deliberate
-window.
+Done 2026-09-17. The template ACL needed no changes - `Domain Controllers` and
+`NT AUTHORITY\ENTERPRISE DOMAIN CONTROLLERS` already held **Enroll**, and the
+template carries `msPKI-Enrollment-Flag = 41`, which includes `0x20
+AUTO_ENROLLMENT`. `DomainController` is a V1 template, where Enroll plus that
+flag is how DC autoenrollment works; there is no separate AutoEnroll ACE to
+grant and none was needed.
+
+The only thing missing was publication. Result:
+
+```
+dc1.myrobertson.net:636      365.0 days
+dns01.myrobertson.net:636    365.0 days
+rhonda.myrobertson.net:636   365.0 days
+```
+
+### Two things that cost time and will again
+
+**1. Autoenrollment is slower than you will be patient for.** After publishing,
+`certutil -pulse` plus a 45-second wait renewed *nothing* on rhonda or dns01,
+while dc1 - the CA host itself - renewed immediately. That asymmetry reads like
+an AD replication problem and is not: both DCs were confirmed seeing the
+template published (`certificateTemplates` contains `DomainController`) while
+still not enrolling. Forcing it works and reports the real outcome:
+
+```
+certreq -enroll -machine -q DomainController
+  -> RequestId = 173
+     The requested certificate has been issued.
+```
+
+Use that rather than waiting on the 8-hour autoenrollment cycle, and rather than
+concluding something is still broken.
+
+**2. The certificate store having it is NOT port 636 serving it.** All three DCs
+held the new leaf in `LocalMachine\My` while dns01 was still presenting the old
+one on 636 for a further two minutes. Checking the store alone would have
+declared success while a third of the estate was still on the old certificate.
+dns01 picked it up on its own - Schannel caches, no NTDS restart was needed -
+but it must be confirmed from outside:
+
+```bash
+openssl s_client -connect <dc>:636 -showcerts   # or the blackbox-tls-ldaps probe
+```
+
+### Still open, deliberately not done
+
+- **Template family.** This republished the legacy `DomainController` template,
+  which is the minimal change: it renews exactly what the DCs already held.
+  `KerberosAuthentication` supersedes both `DomainController` and
+  `DomainControllerAuthentication` and is the modern choice, but moving family
+  on live DCs is a migration rather than a renewal and was not appropriate as
+  part of an alert triage. All three templates exist in AD at `validity=365d`,
+  `renewal_overlap=42d`.
+- **dc1 still has no autoenrollment GPO** (see below). It renewed here because
+  the enrollment was forced. Whether it renews unattended in September 2027 is
+  untested.
+- **The expired certificates in `LocalMachine\My`** were not cleaned up.
+
+## What a fix had to do
+
+Recorded as written before the work, for the reasoning.
 
 1. **Decide the template family.** `KerberosAuthentication` supersedes both
    `DomainController` and `DomainControllerAuthentication` and is the modern
@@ -131,6 +203,24 @@ window.
    Restart of the DC is normally not required; Schannel picks up the new cert,
    but confirm rather than assume.
 6. **Re-check all three.** They fail together and must be confirmed together.
+
+## Whether this recurs in 2027
+
+The template is published and the ACL is correct, so ordinary autoenrollment
+should now renew these at T-42d without intervention. That is untested here -
+every one of the three renewals on 2026-09-17 was forced with `certreq`. The
+alert added alongside this fix
+(`ProbeLDAPSCertificateRenewalFailing`, homelab_flux
+`infrastructure/configs/certificate-expiry-alerts.yaml`) fires at T-35d, which
+is the check: if renewal happens on its own it never fires, and if it does not,
+it pages at `severity: critical` with a month of runway rather than the 21-day
+warning that goes to a null receiver.
+
+## Note on this file's name
+
+The filename says "failing" and is kept that way deliberately: the alert
+annotation in homelab_flux points at this path, and renaming it would break that
+link at exactly the moment someone is following it.
 
 ## Related
 
