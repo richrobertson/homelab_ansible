@@ -23,6 +23,7 @@ flag.
 |---------|------|
 | Audit (read-only, fails on finding) | `ansible/synology/audit_share_access_exposure.yml` |
 | Remediation for the two codifiable findings | `ansible/synology/remediate_share_access_exposure.yml` |
+| **DSM click-by-click execution list** | [synology-exposure-remediation-checklist.md](synology-exposure-remediation-checklist.md) |
 
 Related: [Synology disaster recovery](synology-disaster-recovery.md) for the
 protection topology, and
