@@ -229,3 +229,91 @@ terraform - see `ansible/domain/configure_adcs_reader_permissions.yml`. That was
 a permissions gap on a CA whose published-template set is also minimal. Both are
 consistent with a CA that was rebuilt and configured only as far as the thing
 being worked on at the time required.
+
+## The republish changed the trust anchor, and that broke clients (2026-09-17 → 09-22)
+
+Publishing `DomainController` on `myrobertson-DC1-CA-1` was treated as a
+like-for-like renewal. **It was not.** The DCs had been serving certificates
+issued by `myrobertson-DC1-CA`; they now serve certificates issued by
+`myrobertson-DC1-CA-1`. Those are two different self-signed roots:
+
+| CA | notAfter |
+|---|---|
+| `CN=myrobertson-DC1-CA` | 2030-10-08 |
+| `CN=myrobertson-DC1-CA-1` | 2040-10-20 |
+
+Every client that pinned the **old** root kept validating happily right up to
+the moment the DCs started presenting the new leaf, and then failed closed:
+
+```
+tls: failed to verify certificate: x509: certificate signed by unknown authority
+```
+
+Last good collector run 11:42:03; first new certificate issued 11:43:07.
+
+**Verifying that port 636 serves a new certificate does not verify that anyone
+still trusts it.** The success criteria in the section above — `openssl
+s_client` showing 365 days — were all met while the estate was breaking. The
+missing check is validating the served chain *against each client's own trust
+store*, not against the Mac's.
+
+### Clients found pinning the old root
+
+| client | trust store | state |
+|---|---|---|
+| pve3 collector | `/etc/vault-agent.d/ad-root-ca.pem` | fixed 2026-09-17 |
+| pve4 collector | `/etc/vault-agent.d/ad-root-ca.pem` | fixed 2026-09-17 |
+| pve5 collector | `/etc/vault-agent.d/ad-root-ca.pem` | fixed 2026-09-22 |
+| Vault `auth/ldap` | `certificate` field on the mount | fixed 2026-09-22, broken 5 days |
+
+pve5 is easy to overlook: it is not the collector leader, so it exits 0 without
+writing a `.prom` and looks healthy. Leadership is the **lowest Corosync id
+among online nodes** (`/etc/pve/.members`), which here is pve3=1, pve5=5,
+pve4=6 — so pve5 is *next in line*, and would have inherited collection with a
+trust store that could not bind.
+
+### Fixing the Vault mount
+
+The bundle carries **both** roots, so old and new leaves both validate and the
+retired root can be dropped once nothing presents it.
+
+Two traps, both of which cost time here:
+
+1. **`vault patch auth/ldap/config` fails with `unsupported operation`.** This
+   mount does not accept merge-patch. It must be a whole `vault write`.
+2. **A whole write needs the `bindpass`, which `vault read` never returns.** It
+   comes from `secret/windows/domain/service-accounts/svc-vault-ldap`. Verify
+   that stored password actually binds *before* writing it back — writing a
+   stale bindpass locks every human out of Vault. Carry all ten preserved
+   fields across (see `rotate_service_account_passwords.yml`); a partial write
+   defaults the unspecified ones, dropping the `ldaps://` URL and the CA and
+   silently returning logins to cleartext.
+
+```bash
+# build the bundle, then CONFIRM it validates before writing anything
+openssl s_client -connect rhonda.myrobertson.net:636 -CAfile bundle.pem  # Verify return code: 0
+
+vault write auth/ldap/config url=... binddn=... bindpass=... userdn=... \
+  groupdn=... userattr=... starttls=false insecure_tls=false \
+  deny_null_bind=true certificate=@bundle.pem \
+  tls_min_version=tls12 tls_max_version=tls12
+```
+
+A malformed bundle is silent: concatenating two PEMs without a newline between
+them yields `-----END CERTIFICATE----------BEGIN CERTIFICATE-----`, and openssl
+reports `PEM routines:get_header_and_data:bad end line` to *stderr* and then
+verifies nothing. An empty verification result is not a pass — grep for
+`Verify return code` and require it to be there.
+
+### Confirming the fix
+
+`auth/ldap/login` distinguishes the two failures cleanly:
+
+```
+before: Code 500 ... tls: failed to verify certificate: x509: certificate signed by unknown authority
+after:  Code 400 ... invalid credentials
+```
+
+A 400 means TLS succeeded and the bind reached AD. Diff the whole config
+before and after and require **zero** unintended field changes (40 fields on
+this mount).
