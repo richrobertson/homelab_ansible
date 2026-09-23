@@ -821,6 +821,33 @@ VPN into the LAN — and do not treat the sentence above as still-valid evidence
 Both units being stopped simultaneously looks deliberate, so find out why before
 starting them.
 
+### 0. Finding 0 is CLOSED (2026-09-23) — gated, not removed
+
+`kermit.myrobertson.com` no longer serves an unauthenticated DSM login page:
+
+```
+before:  HTTP 200   (DSM login page)
+after:   HTTP 302 -> sso.myrobertson.com/realms/homelab/...  (Keycloak)
+relay:   HTTP 200   (/webman/ssoclient/token_relay.html, deliberately excluded)
+```
+
+Closed by `auth-policy-kermit` in homelab_flux
+`infrastructure/gateway/externalServices/kermit.yaml` (commit `bc66189`) — an
+Istio `AuthorizationPolicy`, `action: CUSTOM`, provider `keycloak-authproxy`,
+excluding the relay callback path. This is the "minimum acceptable alternative"
+named below, chosen over removing the route because removal requires the origin
+swap described in the next section, which is three coupled changes against a
+client that has already caused an SSO outage. **Revert is deleting that one
+resource.**
+
+The route still exists and Synology Drive on `drive.myrobertson.com` is
+untouched. The relay path remains publicly reachable by design; it is a static
+page that hands an authorization code to its opener, and gating it produces a
+redirect loop rather than a readable failure.
+
+The section below is kept because removing the route is still the stronger fix,
+and because its two stale instructions would mislead anyone attempting it.
+
 ### 2. Finding 0's fix is stale: Authelia is gone, and "add a second URI" caused an outage
 
 The instruction to "add an internal redirect URI for the `synology_kermit_prod`
@@ -866,7 +893,41 @@ host* on different ports (`scooter.myrobertson.net:5011` and `:5001`). That is
 not a counter-example to the one-origin rule — the 2026-08-04 failure was two
 different hostnames.
 
-### 3. Auto Block is still gated on a UI step that cannot be scripted
+### 3. The "UI only" classification is now empirically confirmed, not assumed
+
+The Remediation section splits findings into codified and "no API that is both
+present on this DSM build and safe to drive unattended". Only the rsync half of
+that had actually been tested. On 2026-09-23 the iSCSI and SMB halves were
+tested too, as root via `synowebapi`, and **both refuse mutation**:
+
+| Attempt | Result |
+|---|---|
+| `SYNO.Core.ISCSI.Target method=delete version=1 target_id=2` | `error 18990710` |
+| same with `tid=2` | `error 18990710` |
+| `SYNO.Core.ISCSI.Target method=set version=1 target_id=2 is_enabled=false` | error; `is_enabled` stayed `true` |
+| `SYNO.Core.FileServ.SMB method=set version=3 enable_server_signing=1` | `error 2001`; value stayed `0` |
+| `SYNO.Core.FileServ.Rsync` (2026-07-29) | `error 102` — endpoint absent |
+| `SYNO.Core.Security.AutoBlock.Rules method=list` | `error 5100` |
+
+`SYNO.Core.ISCSI.Target` **is** present (`SYNO.API.Info` lists it alongside
+`.Host`, `.LUN`, `.Node`, `.Replication`, `.VMware`) and `method=list` works —
+so this is the API refusing writes, not a missing endpoint. The SMB `2001` is
+the classic "partial object" refusal: `set` wants the whole config back, and
+writing a whole `FileServ.SMB` object to make one field change is exactly the
+shape that silently resets unspecified fields. Not worth it for a LOW finding.
+
+**Do not spend time re-deriving this.** SAN Manager and Control Panel are the
+paths for the iSCSI target and SMB signing. Nothing was left half-applied by
+the attempts above: both units still read `enable_server_signing: 0`,
+`auth_type: 0`, `is_enabled: true`.
+
+One live-state note for whoever does the SMB signing change: **kermit had an
+active SMB session** during this check (`MYROBERTSON\rich` from `192.168.16.6`,
+SMB3_11), while scooter had none. Changing signing restarts the SMB service and
+drops sessions, so check `smbstatus -b` (at `/usr/local/bin/smbstatus`, not on
+`PATH`) before applying, rather than assuming a NAS is idle.
+
+### 4. Auto Block is still gated on a UI step that cannot be scripted
 
 Unchanged, and repeated because it is the one that can lock the estate out of
 both units at once: `SYNO.Core.Security.AutoBlock.Rules` returns error 5100 on
