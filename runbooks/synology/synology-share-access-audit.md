@@ -796,6 +796,84 @@ single port, it has no per-port toggle). Sequence it safely: confirm the audit
 playbook completes against Scooter over 5022, keep an open session on 5022, and
 only then remove the extra `Port 22` line.
 
+## Re-audit 2026-09-23: nothing remediated, and two instructions above are now wrong
+
+Re-ran the audit authenticated against both units. **The counts are unchanged
+from the 2026-07-29 baseline — Kermit 6, Scooter 23.** Nothing on this page has
+been remediated. Before working from the Remediation section, note three
+corrections found by checking the live estate rather than re-reading the page.
+
+### 1. Tailscale is STOPPED on both units
+
+The Remediation section justifies disabling QuickConnect with "both units run
+Tailscale (`synopkg status Tailscale` reports `running` on Kermit and Scooter),
+so remote access has a supported replacement on each." That is no longer true:
+
+```
+scooter  Tailscale-1.58.2-700058002    status: stop    no tailscale0 interface
+kermit   Tailscale-1.102.4-700102004   status: stop    no tailscale0 interface
+```
+
+Installed but stopped on both, with no interface up. **Disabling QuickConnect
+today removes remote access rather than replacing it.** Establish a working
+remote path first — restart Tailscale and confirm it reconnects, or confirm a
+VPN into the LAN — and do not treat the sentence above as still-valid evidence.
+Both units being stopped simultaneously looks deliberate, so find out why before
+starting them.
+
+### 2. Finding 0's fix is stale: Authelia is gone, and "add a second URI" caused an outage
+
+The instruction to "add an internal redirect URI for the `synology_kermit_prod`
+OIDC client in `apps/prod/authelia/authelia-values.yaml`, alongside the existing
+one" cannot be followed as written, for two independent reasons.
+
+**Authelia has been migrated to Keycloak.** That path does not exist; the client
+is now defined in `homelab_flux`
+`apps/base/keycloak/grafana-clients-job.yaml`.
+
+**More importantly, "alongside" is the thing that broke DSM SSO on 2026-08-04.**
+The client carries a long comment recording it. Registering both
+`kermit.myrobertson.com` and `drive.myrobertson.com` made DSM serve
+`/webman/ssoclient/token_relay.html` from one origin while sign-in happened on
+the other; the relay page must hand the authorization code back to its opener,
+which fails across origins. DSM aborted with a bare "not privilege" dialog and
+never called Keycloak's token endpoint — Keycloak logged `LOGIN` with no
+`CODE_TO_TOKEN`. The client is now deliberately:
+
+```python
+"redirectUris": ["https://kermit.myrobertson.com/webman/ssoclient/token_relay.html"],
+"webOrigins":   ["https://kermit.myrobertson.com"],
+```
+
+So closing finding 0 is a **swap, not an add**, and it is a three-part change
+that must land together:
+
+1. Repoint the `synology_kermit_prod` client to the internal origin
+   (`https://kermit.myrobertson.net:5001`), replacing the public one rather than
+   joining it.
+2. Narrow DSM's own `/usr/syno/etc/ssoclient/oidc.conf` on Kermit to match — the
+   comment is explicit that **both sides must agree**.
+3. Only then remove the route
+   (`infrastructure/gateway/externalServices/kermit.yaml`, the `kermit` listener,
+   and line 8 of `infrastructure/gateway/kustomization.yaml`).
+
+Getting this wrong locks every SSO user out of Kermit's DSM, so it wants a
+window and a local admin session held open, not an unattended run.
+`https://kermit.myrobertson.com/` still returns **HTTP 200** as of 2026-09-23.
+
+Note the scooter client registers two redirect URIs, but both are the *same
+host* on different ports (`scooter.myrobertson.net:5011` and `:5001`). That is
+not a counter-example to the one-origin rule — the 2026-08-04 failure was two
+different hostnames.
+
+### 3. Auto Block is still gated on a UI step that cannot be scripted
+
+Unchanged, and repeated because it is the one that can lock the estate out of
+both units at once: `SYNO.Core.Security.AutoBlock.Rules` returns error 5100 on
+this DSM build, so the allow list is UI-only, and the playbook's defaults never
+release a blocked address (`expire_day: 0`). Populate the allow list on **both**
+units before applying to either.
+
 ## Re-audit cadence
 
 Run the audit playbook after any DSM update, after any share is created, and
