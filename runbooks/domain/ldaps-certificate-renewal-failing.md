@@ -266,6 +266,13 @@ store*, not against the Mac's.
 | pve5 collector | `/etc/vault-agent.d/ad-root-ca.pem` | fixed 2026-09-22 |
 | Vault `auth/ldap` | `certificate` field on the mount | fixed 2026-09-22, broken 5 days |
 
+Checked and **not** affected — do not re-investigate these:
+
+| client | why it survived |
+|---|---|
+| Keycloak | no PKIX or LDAP errors across all 3 replicas in the 6 days after the change |
+| scooter, kermit | **domain-joined, not LDAP clients** — Kerberos/SMB plus plain LDAP on 389, nothing pins the AD CS root. `/usr/syno/etc/ldapclient/` is empty on both. See [synology-ad-domain-join.md](../synology/synology-ad-domain-join.md) |
+
 pve5 is easy to overlook: it is not the collector leader, so it exits 0 without
 writing a `.prom` and looks healthy. Leadership is the **lowest Corosync id
 among online nodes** (`/etc/pve/.members`), which here is pve3=1, pve5=5,
