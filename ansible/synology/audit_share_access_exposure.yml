@@ -41,12 +41,29 @@
     # the SYNO.Core.Share.Permission API instead.
     synology_audit_smb_conf_path: /etc/samba/smb.conf
 
+    # The Kerberos client config, for the domain-controller pinning check. DSM
+    # rewrites both this and smb.conf wholesale on some DSM upgrades - it did on
+    # 2026-07-07 on both units - which is why this is a recurring check and not a
+    # one-off fix. See runbooks/synology/synology-ad-domain-join.md.
+    synology_audit_krb5_conf_path: /etc/krb5.conf
+
     synology_audit_fail_on_finding: true
+
+    # Separate gate from the exposure findings above. A pinned DC is an
+    # availability problem, not an unauthenticated access path, so it must not
+    # make the exposure control check fail for the wrong reason.
+    synology_audit_fail_on_directory_finding: true
 
     # Exports that are knowingly wide open and accepted by the owner. Add the
     # export path here with a dated justification in the runbook rather than
     # disabling the whole assertion.
     synology_audit_allowed_unrestricted_exports: []
+
+    # Exact directive lines (as they appear in the file, whitespace trimmed)
+    # that are knowingly pinned to a DC IP and accepted by the owner. Add one
+    # here with a dated justification in the runbook rather than disabling the
+    # whole assertion.
+    synology_audit_allowed_pinned_dc_directives: []
 
   tasks:
     - name: Enumerate shared folders
@@ -87,6 +104,12 @@
         cat {{ synology_audit_smb_conf_path }} 2>/dev/null || true
       changed_when: false
       register: synology_audit_smb_conf
+
+    - name: Read Kerberos client configuration
+      ansible.builtin.raw: >-
+        cat {{ synology_audit_krb5_conf_path }} 2>/dev/null || true
+      changed_when: false
+      register: synology_audit_krb5_conf
 
     - name: Read DSM guest account state
       # DSM ships a built-in `guest` account that cannot be deleted. It is
@@ -514,6 +537,62 @@
       ansible.builtin.debug:
         msg: "{{ synology_audit_findings }}"
 
+    - name: Build directory service resilience findings
+      # smb.conf and krb5.conf each name a domain controller. A DSM domain join
+      # that recorded an IP literal binds the NAS to ONE DC: AD DNS advertises
+      # every DC under _ldap._tcp.dc._msdcs, so the realm name fails over and an
+      # IP address does not.
+      #
+      # Found on scooter 2026-09-22, pinned in three places, while kermit used
+      # the realm name for all three. `kpasswd_server` is the one that hides -
+      # it is the machine-account password change endpoint, which runs every 30
+      # days, so it keeps the NAS tied to one DC long after `password server`
+      # and `kdc` look fixed.
+      #
+      # Any IPv4 literal is matched rather than a specific address, so repinning
+      # to a different DC is caught too. Only meaningful when the unit is
+      # actually domain-joined, hence the security=ads gate.
+      ansible.builtin.set_fact:
+        synology_audit_domain_joined: >-
+          {{
+            synology_audit_smb_conf.stdout_lines | default([])
+            | map('trim')
+            | select('match', '^security[ \t]*=[ \t]*ads')
+            | list | length > 0
+          }}
+        synology_audit_pinned_dc_directives: >-
+          {{
+            (
+              (
+                synology_audit_smb_conf.stdout_lines | default([]) | map('trim')
+                | select('match', '^password server[ \t]*=') | list
+              )
+              + (
+                synology_audit_krb5_conf.stdout_lines | default([]) | map('trim')
+                | select('match', '^(kdc|kpasswd_server)[ \t]*=') | list
+              )
+            )
+            | select('search', '=[^=]*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
+            | reject('in', synology_audit_allowed_pinned_dc_directives)
+            | list
+          }}
+
+    - name: Collect directory service findings
+      ansible.builtin.set_fact:
+        synology_audit_directory_findings: >-
+          {{
+            [] if not (synology_audit_domain_joined | bool) else (
+              synology_audit_pinned_dc_directives
+              | map('regex_replace', '^(.*)$',
+                    'MEDIUM: `\1` names a domain controller by IP address, so this NAS depends on that single DC. Use the realm name instead, so Samba and Kerberos discover every DC via _ldap._tcp.dc._msdcs. See runbooks/synology/synology-ad-domain-join.md.')
+              | list
+            )
+          }}
+
+    - name: Report directory service findings
+      ansible.builtin.debug:
+        msg: "{{ synology_audit_directory_findings }}"
+
     - name: Assert no unauthenticated or guest access path exists
       ansible.builtin.assert:
         that:
@@ -525,3 +604,24 @@
         success_msg: >-
           No unauthenticated or guest access path found on {{ inventory_hostname }}.
       when: synology_audit_fail_on_finding | bool
+
+    # Deliberately after the exposure assert and on its own toggle. Both finding
+    # lists are reported above before either gate runs, so a failure here never
+    # hides an exposure finding and a failure there never hides this one.
+    - name: Assert no domain controller is pinned by IP address
+      ansible.builtin.assert:
+        that:
+          - (synology_audit_directory_findings | length) == 0
+        fail_msg: >-
+          {{ synology_audit_directory_findings | length }} directory service
+          finding(s) on {{ inventory_hostname }}. See the reported list above and
+          runbooks/synology/synology-ad-domain-join.md. Note DSM rewrites
+          smb.conf and krb5.conf on some upgrades, so this can reappear without
+          anyone changing the domain configuration.
+        success_msg: >-
+          {{
+            'No domain controller pinned by IP on ' ~ inventory_hostname ~ '.'
+            if (synology_audit_domain_joined | bool)
+            else inventory_hostname ~ ' is not domain-joined; DC pinning check not applicable.'
+          }}
+      when: synology_audit_fail_on_directory_finding | bool

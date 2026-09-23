@@ -92,7 +92,32 @@ kermit's `adsinfo` changed on 2026-08-12 and its `smb.conf` was *not*
 regenerated, so `smb.conf` is not derived from `adsinfo`. The source DSM
 regenerates from was not identified.
 
-**So re-check after every DSM upgrade:**
+**This is now checked automatically.** `ansible/synology/audit_share_access_exposure.yml`
+reads both files on every run and fails on any directive naming a DC by IP
+literal:
+
+```
+TASK [Assert no domain controller is pinned by IP address]
+  ok: No domain controller pinned by IP on scooter.myrobertson.net.
+```
+
+It matches *any* IPv4 literal rather than `192.168.1.245` specifically, so
+repinning to a different DC is caught too, and it only applies when the unit is
+domain-joined (`security=ads`). It is a **separate** finding list and a separate
+gate (`synology_audit_fail_on_directory_finding`) from the exposure findings —
+a pinned DC is an availability problem, not an unauthenticated access path, and
+must not fail the exposure control check for the wrong reason.
+
+Both finding lists are reported before either gate runs, so neither hides the
+other's findings. Note that if the exposure assert fails, Ansible aborts the
+host and the directory *assert* does not run — but its findings have already
+been printed.
+
+To accept a pin deliberately, add the exact directive line to
+`synology_audit_allowed_pinned_dc_directives` with a dated justification here,
+rather than disabling the assertion.
+
+The manual equivalent:
 
 ```bash
 grep "password server" /etc/samba/smb.conf     # expect MYROBERTSON.NET
