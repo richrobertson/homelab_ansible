@@ -9,18 +9,69 @@ finding 0 already closed by gating the route. Every rule quoted below was read
 off Scooter's live `/etc/exports` that day — re-read it before you start, because
 if it has changed, so has this list.
 
-## Why nothing here is scripted
+## What is scriptable and what is not
 
-All of it was tested against the DSM API as root and refused:
+Tested against the DSM API as root on 2026-09-23. **The NFS export phases turned
+out to be scriptable after all** — the rest are genuinely UI tasks.
 
 | API | Result |
 |---|---|
+| `SYNO.Core.FileServ.NFS.SharePrivilege` `load` / `save` | **works** — see below |
 | `SYNO.Core.ISCSI.Target` `delete` / `set` | `18990710` (API present, `list` works, writes refused) |
 | `SYNO.Core.FileServ.SMB` `set` | `2001` (wants the whole config object) |
 | `SYNO.Core.FileServ.Rsync` | `102` (endpoint absent on this build) |
 | `SYNO.Core.Security.AutoBlock.Rules` | `5100` |
 
-Don't re-derive that. These are UI tasks.
+Don't re-derive that. Phases 5–10 are UI tasks; phases 1–4 need not be.
+
+### Driving NFS exports from the CLI
+
+The method names are not the obvious ones: it is **`load`** and **`save`**, not
+`get`/`set` (both return `103`, "method does not exist"). `SYNO.Core.Share`
+`get` with `additional=["nfs_priv"]` silently returns the share without the
+privileges — it is the wrong API, not a wrong parameter.
+
+```sh
+W=/usr/syno/bin/synowebapi
+# read
+$W --exec api=SYNO.Core.FileServ.NFS.SharePrivilege method=load version=1 \
+   share_name='"plex"'
+# write - REPLACES the whole rule list for that share
+$W --exec api=SYNO.Core.FileServ.NFS.SharePrivilege method=save version=1 \
+   share_name='"plex"' rule='[ ...full desired array... ]'
+```
+
+A rule object looks like this; `root_squash: "root"` is what `/etc/exports`
+writes as `no_root_squash`:
+
+```json
+{"async":true,"client":"10.31.0.2","crossmnt":false,"insecure":true,
+ "privilege":"rw","root_squash":"root",
+ "security_flavor":{"kerberos":false,"kerberos_integrity":false,
+                    "kerberos_privacy":false,"sys":true}}
+```
+
+Three things that make this safe to use, and are how phase 1 was done:
+
+1. **`save` replaces the entire list**, exactly as the audit runbook warned. So
+   never hand-write the rules you are keeping — `load` them, filter the ones you
+   want gone programmatically, and `save` the result. The kept rules then come
+   back byte-identical, which was verified by diffing against
+   `/etc/exports.bak-2026-09-23` per rule.
+2. **Prove the call shape idempotently first.** Writing a share's *current*
+   rules back unchanged is a no-op that confirms the method name and JSON shape
+   without risking anything. `/etc/exports` should be byte-identical afterwards.
+3. **`rule='[]'` removes the export** entirely. That is how `docker` and the
+   legacy `nextcloud-data` were retired.
+
+Back up the table first: `cp -a /etc/exports /etc/exports.bak-<date>`. It is not
+what DSM reads from, so it is a reference for diffing and not a rollback you can
+restore — roll back by `save`-ing the original rule list.
+
+**A `sudo -S` gotcha that will eat your output:** the `Password: ` prompt is
+written without a trailing newline, so the first line of your script's output is
+appended to it. A filter like `grep -v '^Password:'` then silently deletes that
+first line. Use `sed 's/^Password: //'` instead.
 
 ## Before you start
 
@@ -77,7 +128,30 @@ might cause repeated failed logins is done.
 
 ---
 
-## Phase 1 — Free wins (no client can be affected)
+## Phase 1 — Free wins (no client can be affected) — **DONE 2026-09-23**
+
+Applied via the `SharePrivilege` API above, not the UI. Scooter went from
+**23 findings to 19**, and 10 exports to 8:
+
+| Share | Before | After |
+|---|---|---|
+| `/volume1/docker` | 1 rule (`animal`) | **export removed** |
+| `/volume1/nextcloud-data` (legacy) | 6 rules | **export removed** |
+| `/volume1/NetBackup` | 8 rules | 7 (`animal` gone; the 7 `all_squash` rules untouched) |
+| `/volume1/downloads` | 4 rules | 3 |
+| `/volume1/unraid` | 2 rules | 1 (`kermit` only) |
+
+`animal` occurrences in `/etc/exports`: **0**. Every kept rule diffed
+byte-identical against the backup, `nextcloud-data-prod` stayed `Bound`,
+Nextcloud pods stayed healthy, and 2049 kept serving. The four findings that
+cleared were `docker` + `NetBackup` + `nextcloud-data` `no_root_squash`, and
+`nextcloud-data` `insecure`.
+
+Backup of the pre-change table: `/etc/exports.bak-2026-09-23` on scooter.
+
+The original instructions are kept below for the record.
+
+### Original UI steps
 
 ### 1.1 Delete the legacy `/volume1/nextcloud-data` export — Scooter
 
