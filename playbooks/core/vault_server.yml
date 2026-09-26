@@ -476,9 +476,39 @@
           install -o {{ vault_user }} -g {{ vault_group }} -m 0640 "$cert_tmp" "$CERT_FILE"
           install -o {{ vault_user }} -g {{ vault_group }} -m 0640 "$key_tmp" "$KEY_FILE"
 
-          if pgrep -x vault >/dev/null; then
-            pkill -HUP -x vault
+          # nginx FIRST, deliberately. This script is a child of the Vault Agent
+          # that renders the template, and signalling the agent tears the child
+          # down - so anything after the signal is not guaranteed to run. Doing
+          # the consumer reloads before the signal makes that ordering safe
+          # rather than relying on it.
+          if systemctl is-active --quiet nginx; then
+            systemctl reload nginx
           fi
+
+          # `systemctl reload vault`, NOT `pkill -HUP -x vault`.
+          #
+          # The agent runs as `/usr/bin/vault agent`, so its process name is
+          # also exactly "vault". `pkill -x vault` therefore matched TWO
+          # processes - the server AND this script's own parent agent - and
+          # SIGHUP'd the agent, which restarted its runner and killed this
+          # script mid-flight. Measured 2026-09-26: `pgrep -x vault` returns
+          # pid 243191 (server) and 161755 (agent).
+          #
+          # The visible damage was four months of nginx serving an expired
+          # certificate. The cert was renewed on 2026-07-12 and the files on
+          # disk were correct, but nginx was never reloaded (master and workers
+          # both still dated 2026-04-22), so :443 presented the Apr 19 cert,
+          # which expired 2026-05-19. Vault's own :8200 looked fine throughout
+          # because the server got the same SIGHUP and restarted in August,
+          # which is exactly why this hid for so long.
+          #
+          # NOT `systemctl reload vault` either: that unit's ExecReload is
+          # malformed - `/bin/kill --signal HUP` with no $MAINPID argument - so
+          # it fails every time ("Job for vault.service failed"). Verified
+          # 2026-09-26. `systemctl kill` does not use ExecReload at all, so it
+          # sidesteps that bug; --kill-whom=main confines the signal to
+          # vault.service's own main pid and can never reach the agent.
+          systemctl kill -s HUP --kill-whom=main vault
       when: vault_manage_ui_cert_agent
 
     - name: Write Vault UI cert agent config
