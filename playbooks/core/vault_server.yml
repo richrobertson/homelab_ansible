@@ -283,6 +283,49 @@
           exit 1
       when: vault_manage_unseal_service
 
+    # The packaged unit ships ExecReload=/bin/kill --signal HUP with NO
+    # $MAINPID, so `systemctl reload vault` fails every time with "Job for
+    # vault.service failed" and leaves Vault running the old config. Upstream
+    # HashiCorp includes $MAINPID; it is absent here, and `rpm -V vault`
+    # reports S.5....T. against /usr/lib/systemd/system/vault.service, so the
+    # unit was edited locally at some point rather than shipped broken.
+    #
+    # Fixed with a drop-in rather than by editing the file: the unit is
+    # RPM-owned, so an in-place edit is lost or conflicted on the next package
+    # upgrade. The empty ExecReload= clears the inherited value first -
+    # systemd appends otherwise and would run both the broken and the fixed
+    # command.
+    #
+    # This does NOT change the cert apply script, which deliberately uses
+    # `systemctl kill -s HUP --kill-whom=main vault`. That works whether or not
+    # this drop-in is present, and not depending on it is the point. What this
+    # fixes is the manual path - an operator following a runbook that says
+    # "reload vault" should not silently get a failure.
+    - name: Ensure the Vault unit drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system/vault.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Fix the malformed ExecReload in the packaged Vault unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/vault.service.d/10-execreload.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Service]
+          ExecReload=
+          ExecReload=/bin/kill --signal HUP $MAINPID
+      register: vault_execreload_dropin
+
+    - name: Reload systemd after fixing ExecReload
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: vault_execreload_dropin is changed
+
     - name: Write Vault unseal systemd unit
       ansible.builtin.copy:
         dest: "{{ vault_unseal_service_file }}"
