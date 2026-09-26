@@ -9,7 +9,15 @@
     vault_group: vault
     vault_config_dir: /etc/vault.d
     vault_data_dir: /opt/vault/data
-    vault_storage_backend: file   # Change to 'raft' only after running vault operator migrate
+    # raft since the 2026-08-04 migration. This playbook still said `file` as
+    # late as 2026-09-26, which meant a run would have uncommented the file
+    # stanza, deleted the raft stanza and restarted Vault onto a backend last
+    # written 2026-08-03 - every secret since then invisible. Caught by
+    # --check --diff before it was ever applied. `vault operator migrate` is
+    # what moves the data; this variable only describes what already happened.
+    vault_storage_backend: raft
+    vault_raft_dir: /opt/vault/raft
+    vault_raft_node_id: vault-1
     vault_config_file: /etc/vault.d/vault.hcl
     vault_tls_dir: /etc/vault.d/tls
     vault_tls_cert_file: /etc/vault.d/tls/vault-ui.pem
@@ -17,7 +25,10 @@
     vault_tls_days_valid: 825
     vault_listener_address: 0.0.0.0:8200
     vault_cluster_address: 0.0.0.0:8201
-    vault_api_addr: "https://{{ ansible_default_ipv4.address }}:8200"
+    # Hostname, not ansible_default_ipv4.address. The listener's certificate is
+    # issued for CN=vault.myrobertson.net, so an IP api_addr makes Vault
+    # advertise an address its own cert does not cover.
+    vault_api_addr: "https://vault.myrobertson.net:8200"
     vault_cluster_addr: "https://{{ ansible_default_ipv4.address }}:8201"
     vault_tls_disable: false
     vault_ui: true
@@ -98,6 +109,10 @@
         group: root
         mode: "0755"
 
+    # Both directories, deliberately. vault_data_dir is the file backend, which
+    # is no longer in use but is kept intact as the documented rollback for the
+    # 2026-08-04 raft migration - do not remove it. vault_raft_dir is the live
+    # backend and is only created when raft is actually selected.
     - name: Ensure Vault data directory exists
       ansible.builtin.file:
         path: "{{ vault_data_dir }}"
@@ -105,6 +120,15 @@
         owner: "{{ vault_user }}"
         group: "{{ vault_group }}"
         mode: "0750"
+
+    - name: Ensure Vault raft directory exists
+      ansible.builtin.file:
+        path: "{{ vault_raft_dir }}"
+        state: directory
+        owner: "{{ vault_user }}"
+        group: "{{ vault_group }}"
+        mode: "0750"
+      when: vault_storage_backend == 'raft'
 
     - name: Ensure Vault TLS directory exists
       ansible.builtin.file:
@@ -182,9 +206,15 @@
           {% endif %}
           log_level = "{{ vault_log_level }}"
 
+          {% if vault_storage_backend == 'raft' %}
+          # storage "file" {
+          #   path = "{{ vault_data_dir }}"
+          # }
+          {% else %}
           storage "{{ vault_storage_backend }}" {
             path = "{{ vault_data_dir }}"
           }
+          {% endif %}
 
           listener "tcp" {
             address = "{{ vault_listener_address }}"
@@ -214,6 +244,16 @@
             prometheus_retention_time = "24h"
             disable_hostname = true
           }
+          {% if vault_storage_backend == 'raft' %}
+
+          # Migrated from the file backend to raft on 2026-08-04. The file stanza above is
+          # commented rather than deleted: {{ vault_data_dir }} remains a complete, valid file
+          # backend, and uncommenting it is the entire rollback.
+          storage "raft" {
+            path    = "{{ vault_raft_dir }}"
+            node_id = "{{ vault_raft_node_id }}"
+          }
+          {% endif %}
       notify: Restart Vault
 
     - name: Write Vault unseal script
