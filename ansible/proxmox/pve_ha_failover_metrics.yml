@@ -1,0 +1,118 @@
+---
+# Installs a node_exporter textfile collector that publishes Proxmox HA
+# failover-capacity metrics, which neither Proxmox nor node_exporter exports.
+#
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/proxmox/pve_ha_failover_metrics.yml
+#
+# Pairs with the alert rules in
+# homelab_flux/infrastructure/configs/ha-failover-alerts.yaml.
+#
+# Proxmox HA scores restart targets on how many services a node already runs and
+# ignores memory entirely, so a node loss can strand HA guests on a cluster that
+# looks completely healthy. See the header of
+# templates/pve-ha-failover-metrics.py.j2 for why only hastate guests are
+# counted.
+
+- name: Export Proxmox HA failover capacity metrics
+  hosts: "{{ pve_ha_failover_metrics_target_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    # Matches ansible/proxmox/ceph_fragmentation_metrics.yml and
+    # proxmox_transport_metrics.yml so every collector lands in the one
+    # directory node_exporter is already reading.
+    pve_ha_failover_metrics_textfile_dir: /var/lib/prometheus/node-exporter
+    pve_ha_failover_metrics_script: /usr/local/sbin/pve-ha-failover-metrics.py
+    # No lock file: unlike the sibling collectors this one publishes from every
+    # node on purpose, so that failover capacity stays visible when a node dies.
+    # See the template header.
+    # Memory commitment changes when a guest starts, stops, migrates or is
+    # resized - minutes, not seconds. 5min keeps the alert responsive without
+    # polling the cluster API pointlessly.
+    pve_ha_failover_metrics_interval: 5min
+    pve_ha_node_exporter_args: "--collector.textfile.directory={{ pve_ha_failover_metrics_textfile_dir }}"
+
+  handlers:
+    - name: Restart prometheus-node-exporter
+      ansible.builtin.systemd_service:
+        name: prometheus-node-exporter
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    - name: Ensure node exporter textfile directory exists
+      ansible.builtin.file:
+        path: "{{ pve_ha_failover_metrics_textfile_dir }}"
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: "0755"
+
+    - name: Enable node exporter textfile collector
+      ansible.builtin.lineinfile:
+        path: /etc/default/prometheus-node-exporter
+        regexp: '^ARGS='
+        line: 'ARGS="{{ pve_ha_node_exporter_args }}"'
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart prometheus-node-exporter
+
+    - name: Install the HA failover metrics collector
+      ansible.builtin.template:
+        src: pve-ha-failover-metrics.py.j2
+        dest: "{{ pve_ha_failover_metrics_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the HA failover metrics service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pve-ha-failover-metrics.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Collect Proxmox HA failover capacity metrics
+          Wants=network-online.target
+          After=network-online.target pve-cluster.service
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ pve_ha_failover_metrics_script }}
+      notify: Restart prometheus-node-exporter
+
+    - name: Install the HA failover metrics timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pve-ha-failover-metrics.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run the Proxmox HA failover metrics collector every {{ pve_ha_failover_metrics_interval }}
+
+          [Timer]
+          OnBootSec=5min
+          OnUnitActiveSec={{ pve_ha_failover_metrics_interval }}
+          RandomizedDelaySec=30
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: Enable the HA failover metrics timer
+      ansible.builtin.systemd_service:
+        name: pve-ha-failover-metrics.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Run the collector once so metrics exist immediately
+      ansible.builtin.command:
+        argv: ["{{ pve_ha_failover_metrics_script }}"]
+      changed_when: true

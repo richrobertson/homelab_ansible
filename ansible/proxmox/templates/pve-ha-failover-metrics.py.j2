@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+# {{ ansible_managed }}
+#
+# Exports Proxmox HA failover-capacity metrics as node_exporter textfile
+# metrics.
+#
+# WHY THIS EXISTS. Proxmox HA decides where to restart a service using a
+# score based on how many services each node is already running. It does not
+# look at memory at all. So a cluster can be quorate, HA can be armed, every
+# service can show "started", and a node loss can still strand guests because
+# the surviving nodes had no RAM for them. Nothing in Proxmox, node_exporter or
+# the Ceph mgr exporter reports that condition, so until this collector it was
+# invisible - the first sign would have been an actual failed failover.
+#
+# WHAT COUNTS AS "MUST RELOCATE". Only guests with an hastate are restarted
+# elsewhere when their node dies. In this estate the Kubernetes VMs are
+# deliberately NOT HA-managed, because Talos already tolerates losing one
+# control-plane node and one worker per cluster; they are expected to stay down
+# until the node returns. Counting them - which a naive
+# "MemTotal - MemAvailable" comparison in node_exporter would do - overstates
+# the requirement by roughly 3x and makes the alert fire permanently. Hence the
+# hastate filter.
+#
+# THE TWO PLACEMENTS. Aggregate headroom is the sum of free memory across the
+# surviving nodes minus what has to move; it answers "does the cluster have the
+# capacity at all". Worst-case headroom assumes every relocated service lands on
+# whichever surviving node has the least free memory; it answers "can a bad
+# placement still hurt us". Aggregate positive with worst-case negative - the
+# normal state here - means capacity exists but depends on HA spreading the
+# services, which it does not guarantee. Both are exported so the alert can
+# treat them differently.
+#
+# EVERY NODE PUBLISHES, DELIBERATELY. These are cluster-wide numbers, so all
+# three nodes emit identical series and the alert rules collapse them with
+# `max by(failed_node, placement)`.
+#
+# The obvious alternative - a flock so only one node collects - is what the
+# sibling collectors do, but it is wrong here for two reasons. First, /run/lock
+# is node-local, not shared through pmxcfs, so each node takes its own lock and
+# publishes anyway; the lock buys nothing and the duplicate series silently
+# multiply every alert by three. Second, and worse, a genuine single-collector
+# design would put the metrics on one node - and if that is the node that fails,
+# failover capacity goes blind at the exact moment it matters.
+#
+# Three reads of /cluster/resources per interval is negligible (unlike the
+# cluster-wide `ceph tell` sweep the fragmentation collector guards), so the
+# redundancy is free.
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+TEXTFILE_DIR = "{{ pve_ha_failover_metrics_textfile_dir }}"
+OUT = os.path.join(TEXTFILE_DIR, "pve_ha_failover.prom")
+
+
+def pvesh(path, rtype):
+    """Read a /cluster/resources view. Returns None on any failure."""
+    try:
+        p = subprocess.run(
+            ["pvesh", "get", path, "--type", rtype, "--output-format", "json"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if p.returncode != 0:
+            return None
+        return json.loads(p.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def main():
+    nodes = pvesh("/cluster/resources", "node")
+    guests = pvesh("/cluster/resources", "vm")
+
+    # A node that cannot read the cluster leaves the previous scrape in place.
+    # Publishing zeros here would read as "no HA load and no free memory",
+    # which would both clear a real alert and raise a false one.
+    if nodes is None or guests is None:
+        return 0
+
+    online = [n for n in nodes if n.get("status") == "online"]
+    if not online:
+        return 0
+
+    # Free memory per node. maxmem/mem come from the same cluster snapshot as
+    # the guest list, so the two sides of the subtraction are consistent.
+    free = {}
+    for n in online:
+        free[n["node"]] = max(0, int(n.get("maxmem", 0)) - int(n.get("mem", 0)))
+
+    # Configured memory of running HA-managed guests, by node. maxmem is the
+    # right figure rather than current usage: on relocation the guest is started
+    # fresh and its balloon target is its configured size.
+    ha_mem = dict.fromkeys(free, 0)
+    ha_count = dict.fromkeys(free, 0)
+    for g in guests:
+        if g.get("status") != "running":
+            continue
+        if not g.get("hastate") or g.get("hastate") == "-":
+            continue
+        node = g.get("node")
+        if node not in ha_mem:
+            continue
+        ha_mem[node] += int(g.get("maxmem", 0))
+        ha_count[node] += 1
+
+    lines = [
+        "# HELP proxmox_ha_service_memory_bytes Configured memory of running HA-managed guests on this node, which must relocate if it fails.",
+        "# TYPE proxmox_ha_service_memory_bytes gauge",
+        "# HELP proxmox_ha_service_count Number of running HA-managed guests on this node.",
+        "# TYPE proxmox_ha_service_count gauge",
+        "# HELP proxmox_node_memory_free_bytes Free memory on this node from the Proxmox cluster snapshot.",
+        "# TYPE proxmox_node_memory_free_bytes gauge",
+        "# HELP proxmox_ha_failover_headroom_bytes Spare memory after absorbing failed_node's HA guests. Negative means the failover cannot fit. placement=aggregate sums the survivors; placement=worst_case assumes all guests land on the emptiest survivor.",
+        "# TYPE proxmox_ha_failover_headroom_bytes gauge",
+        "# HELP proxmox_ha_failover_collector_success Whether the last collection completed.",
+        "# TYPE proxmox_ha_failover_collector_success gauge",
+        "# HELP proxmox_ha_nodes_online Number of online nodes in the cluster.",
+        "# TYPE proxmox_ha_nodes_online gauge",
+    ]
+
+    for node in sorted(free):
+        lines.append('proxmox_ha_service_memory_bytes{node="%s"} %d' % (node, ha_mem[node]))
+        lines.append('proxmox_ha_service_count{node="%s"} %d' % (node, ha_count[node]))
+        lines.append('proxmox_node_memory_free_bytes{node="%s"} %d' % (node, free[node]))
+
+    for failed in sorted(free):
+        survivors = [n for n in free if n != failed]
+        if not survivors:
+            continue
+        need = ha_mem[failed]
+        agg = sum(free[n] for n in survivors) - need
+        worst = min(free[n] for n in survivors) - need
+        lines.append(
+            'proxmox_ha_failover_headroom_bytes{failed_node="%s",placement="aggregate"} %d'
+            % (failed, agg))
+        lines.append(
+            'proxmox_ha_failover_headroom_bytes{failed_node="%s",placement="worst_case"} %d'
+            % (failed, worst))
+
+    lines.append("proxmox_ha_nodes_online %d" % len(online))
+    lines.append("proxmox_ha_failover_collector_success 1")
+
+    # Atomic publish: node_exporter reads this directory continuously and a
+    # partially written file is a parse error that drops every metric in it.
+    fd, tmp = tempfile.mkstemp(dir=TEXTFILE_DIR, prefix="pve_ha_failover.prom.")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, OUT)
+    except OSError:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
