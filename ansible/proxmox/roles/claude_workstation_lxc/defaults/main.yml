@@ -37,7 +37,12 @@ claude_workstation_lxc_gateway: 192.168.1.1
 claude_workstation_lxc_vlan_tag: ""
 # Domain members must resolve the AD DNS zone (_ldap._tcp SRV records) or the
 # realm join fails, so the nameserver is a domain controller, not a forwarder.
-claude_workstation_lxc_nameserver: 192.168.1.3
+# rhonda, the only still-licensed domain controller. Was 192.168.1.3 (dc1)
+# until 2026-09-29: dc1 runs an expired Windows Server evaluation with no
+# rearms left, so it shuts down every 60 minutes and HA restarts it. A
+# container pinned to a single resolver on that cycle loses DNS outright
+# for ~2 minutes every hour, with no second entry to fall back to.
+claude_workstation_lxc_nameserver: 192.168.1.245
 claude_workstation_lxc_searchdomain: myrobertson.net
 
 # Runtime behaviour.

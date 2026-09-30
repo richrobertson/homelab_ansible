@@ -34,9 +34,25 @@
     - resolvers
   vars:
     proxmox_dns_search: myrobertson.net
+    # ORDER MATTERS, and rhonda (.245) must stay first.
+    #
+    # This listed .101 (dns01) first until 2026-09-29. dns01 and dc1 (.3) both
+    # run an EXPIRED Windows Server evaluation with 0 rearms left, so Windows
+    # shuts them down every 60 minutes and HA restarts them - about two minutes
+    # of downtime per hour, each, indefinitely. Having a host on that cycle as
+    # the PRIMARY resolver for every hypervisor and PBS server meant resolution
+    # stalled on a dead first entry once an hour, every hour.
+    #
+    # rhonda is the only still-licensed DC (rearmed 2026-09-29, good to
+    # 2027-03-28) and holds all five FSMO roles, so it is the right primary. The
+    # two evaluation DCs stay as fallbacks - they serve correctly for ~58 minutes
+    # of each hour, so they are useful redundancy, just not a safe first choice.
+    #
+    # Revisit when dns01 and dc1 are licensed or retired.
     proxmox_dns_nameservers:
-      - 192.168.1.101
       - 192.168.1.245
+      - 192.168.1.101
+      - 192.168.1.3
     proxmox_dns_probe_name: vault.myrobertson.net
   tasks:
     - name: Stat /etc/resolv.conf
