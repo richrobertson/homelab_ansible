@@ -4,13 +4,18 @@
 # done by Ansible over WinRM so they stay in code, not in this script.
 $ErrorActionPreference = 'Stop'
 
-# 1. QEMU guest agent, from whichever drive holds the virtio-win ISO. Proxmox
-#    needs it for qm guest exec, fstrim and clean shutdowns (agent: 1 is set).
-$msi = Get-PSDrive -PSProvider FileSystem |
-    ForEach-Object { Join-Path $_.Root 'guest-agent\qemu-ga-x86_64.msi' } |
-    Where-Object { Test-Path $_ } | Select-Object -First 1
-if ($msi) {
-    Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart' -Wait
+# 1. VirtIO drivers, then the QEMU guest agent, from whichever drive holds the
+#    virtio-win ISO. Proxmox needs the agent for qm guest exec, fstrim and clean
+#    shutdowns (agent: 1 is set). The agent talks over virtio-serial, so the
+#    driver bundle (vioserial among others) must go in FIRST - the agent alone
+#    installs fine and then reports "QEMU guest agent is not running" forever,
+#    which is what the first dns01 rebuild did on 2026-10-06.
+$root = Get-PSDrive -PSProvider FileSystem |
+    Where-Object { Test-Path (Join-Path $_.Root 'guest-agent\qemu-ga-x86_64.msi') } |
+    Select-Object -First 1 -ExpandProperty Root
+if ($root) {
+    Start-Process msiexec.exe -Wait -ArgumentList '/i', "`"$(Join-Path $root 'virtio-win-gt-x64.msi')`"", '/qn', '/norestart'
+    Start-Process msiexec.exe -Wait -ArgumentList '/i', "`"$(Join-Path $root 'guest-agent\qemu-ga-x86_64.msi')`"", '/qn', '/norestart'
 }
 
 # 2. A fresh workgroup server puts every adapter on the Public profile, where

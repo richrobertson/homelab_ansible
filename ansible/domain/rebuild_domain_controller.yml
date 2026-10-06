@@ -58,6 +58,10 @@
     dc_rebuild_target: ""
     dc_rebuild_confirm: false
     dc_rebuild_skip_demote: false
+    # Resume a run that stopped after the reimage (laptop closed, promotion
+    # failed): reuse the passwords already escrowed in Vault - the fresh install
+    # was built with them - and skip every step up to and including the reimage.
+    dc_rebuild_resume: false
   tasks:
     - name: Require exactly one target that has a build spec
       ansible.builtin.assert:
@@ -75,6 +79,7 @@
       ansible.builtin.set_fact:
         dc_spec: "{{ domain_controller_specs[dc_rebuild_target] }}"
         dc_rebuild_go: "{{ dc_rebuild_confirm | bool }}"
+        dc_rebuild_resume_mode: "{{ dc_rebuild_resume | bool }}"
 
     - name: Refuse specs that were never checked against the live guest
       ansible.builtin.assert:
@@ -125,7 +130,18 @@
         dc_dsrm_password: "{{ lookup('ansible.builtin.password', '/dev/null', chars=['ascii_letters', 'digits', '-_.%+'], length=28) ~ 'aA1-' }}"
         dc_bootstrap_admin_password: "{{ lookup('ansible.builtin.password', '/dev/null', chars=['ascii_letters', 'digits', '-_.%+'], length=28) ~ 'aA1-' }}"
       no_log: true
-      when: dc_rebuild_go | bool
+      when: dc_rebuild_go | bool and not dc_rebuild_resume_mode | bool
+
+    - name: Resume - read back the passwords the install was built with
+      ansible.builtin.set_fact:
+        dc_dsrm_password: >-
+          {{ lookup('community.hashi_vault.vault_kv2_get', 'windows/domain/dsrm/' ~ dc_rebuild_target.split('.')[0],
+                    engine_mount_point='secret').secret.password }}
+        dc_bootstrap_admin_password: >-
+          {{ lookup('community.hashi_vault.vault_kv2_get', 'windows/domain/bootstrap-admin/' ~ dc_rebuild_target.split('.')[0],
+                    engine_mount_point='secret').secret.password }}
+      no_log: true
+      when: dc_rebuild_go | bool and dc_rebuild_resume_mode | bool
 
     - name: Escrow the DSRM password in Vault before it is used
       community.hashi_vault.vault_kv2_write:
@@ -136,7 +152,7 @@
           set_at: "{{ now(utc=true).isoformat() }}"
           set_by: rebuild_domain_controller.yml
       no_log: true
-      when: dc_rebuild_go | bool
+      when: dc_rebuild_go | bool and not dc_rebuild_resume_mode | bool
 
     - name: Escrow the bootstrap Administrator password in Vault
       community.hashi_vault.vault_kv2_write:
@@ -147,7 +163,7 @@
           set_at: "{{ now(utc=true).isoformat() }}"
           note: Local Administrator of the fresh install; discarded on promotion.
       no_log: true
-      when: dc_rebuild_go | bool
+      when: dc_rebuild_go | bool and not dc_rebuild_resume_mode | bool
 
     - name: Register the fresh install as a temporary bootstrap host
       ansible.builtin.add_host:
@@ -229,7 +245,8 @@
           - dc_spec.nics | map(attribute='mac') | map('upper')
             | difference(dc_rebuild_qm_config.stdout | upper | regex_findall('[0-9A-F]{2}(?::[0-9A-F]{2}){5}'))
             | length == 0
-          - dc_rebuild_qm_config.stdout is not search('(?m)^unused[0-9]+:')
+          - hostvars['localhost'].dc_rebuild_resume_mode | bool
+            or dc_rebuild_qm_config.stdout is not search('(?m)^unused[0-9]+:')
         fail_msg: >-
           VM {{ dc_spec.vmid }} does not carry the spec's MAC addresses, or already
           has unusedN disks. Refusing to touch its disks.
@@ -249,6 +266,10 @@
     dc_rebuild_target: "{{ hostvars['localhost'].dc_rebuild_target }}"
     dc_spec: "{{ hostvars['localhost'].dc_spec }}"
   tasks:
+    - name: Skip in resume mode (done by the run being resumed)
+      ansible.builtin.meta: end_play
+      when: hostvars['localhost'].dc_rebuild_resume_mode | bool
+
     - name: Skip unless confirmed and the target is the DHCP partner
       ansible.builtin.meta: end_play
       when: >-
@@ -277,6 +298,10 @@
   vars:
     dc_rebuild_skip_demote: false
   tasks:
+    - name: Skip in resume mode (done by the run being resumed)
+      ansible.builtin.meta: end_play
+      when: hostvars['localhost'].dc_rebuild_resume_mode | bool
+
     - name: Skip unless confirmed (or the DC is dead and skip_demote is set)
       ansible.builtin.meta: end_play
       when: >-
@@ -336,6 +361,10 @@
     dc_spec: "{{ hostvars['localhost'].dc_spec }}"
     dc_rebuild_skip_demote: false
   tasks:
+    - name: Skip in resume mode (done by the run being resumed)
+      ansible.builtin.meta: end_play
+      when: hostvars['localhost'].dc_rebuild_resume_mode | bool
+
     - name: Skip unless confirmed and the demotion path ran
       ansible.builtin.meta: end_play
       when: >-
@@ -362,6 +391,10 @@
     dc_spec: "{{ hostvars['localhost'].dc_spec }}"
     dc_rebuild_skip_demote: false
   tasks:
+    - name: Skip in resume mode (done by the run being resumed)
+      ansible.builtin.meta: end_play
+      when: hostvars['localhost'].dc_rebuild_resume_mode | bool
+
     - name: Skip unless confirmed
       ansible.builtin.meta: end_play
       when: not hostvars['localhost'].dc_rebuild_go | bool
@@ -415,6 +448,10 @@
   vars_files:
     - vars/domain_controller_specs.yml
   tasks:
+    - name: Skip in resume mode (done by the run being resumed)
+      ansible.builtin.meta: end_play
+      when: hostvars['localhost'].dc_rebuild_resume_mode | bool
+
     - name: Skip unless confirmed
       ansible.builtin.meta: end_play
       when: not hostvars['localhost'].dc_rebuild_go | bool
@@ -507,6 +544,33 @@
         path: /var/lib/vz/template/iso/{{ dc_unattend_iso }}
         state: absent
 
+- name: Check whether the fresh install is already a DC
+  hosts: dc_rebuild_source
+  gather_facts: false
+  vars:
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+  tasks:
+    - name: Skip unless confirmed
+      ansible.builtin.meta: end_play
+      when: not hostvars['localhost'].dc_rebuild_go | bool
+
+    # On a resume the promotion may already have happened. A promoted DC has no
+    # local accounts, so the bootstrap Administrator can no longer log on and
+    # the promote play must not even try.
+    - name: Look the target up as a domain controller
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $Ansible.Result = [bool](Get-ADDomainController -Filter "Name -eq '{{ dc_spec.computer_name }}'")
+      changed_when: false
+      register: dc_rebuild_already
+
+    - name: Record it for the promote play
+      ansible.builtin.set_fact:
+        dc_rebuild_already_dc: "{{ dc_rebuild_already.result | bool }}"
+      delegate_to: localhost
+      delegate_facts: true
+
 - name: Promote the fresh install
   hosts: dc_rebuild_bootstrap
   gather_facts: false
@@ -516,6 +580,10 @@
   vars_files:
     - vars/domain_controller_specs.yml
   tasks:
+    - name: Skip if the domain already lists it as a DC
+      ansible.builtin.meta: end_play
+      when: hostvars['localhost'].dc_rebuild_already_dc | default(false) | bool
+
     - name: Wait for the first-logon bootstrap to finish
       ansible.windows.win_stat:
         path: C:\Windows\Temp\dc-bootstrap.done
@@ -541,8 +609,17 @@
         read_only: "{{ dc_spec.read_only | bool }}"
         site_name: "{{ dc_spec.site }}"
         install_dns: true
-        reboot: true
+        # NOT reboot: true. This play is connected as the LOCAL Administrator,
+        # and promotion deletes local accounts, so the module's reconnect after
+        # its own reboot can never authenticate - it failed exactly that way on
+        # 2026-10-06 although the promotion had succeeded. Restart without
+        # waiting; the verify play reconnects as the domain identity.
+        reboot: false
       no_log: true
+
+    - name: Restart to complete the promotion
+      ansible.windows.win_command: shutdown.exe /r /t 15 /c "rebuild_domain_controller.yml - complete promotion"
+
 
 - name: Verify the new DC and finish
   hosts: dc_rebuild_old
@@ -557,6 +634,21 @@
     - name: Wait for the domain identity to be able to log on
       ansible.builtin.wait_for_connection:
         timeout: 1800
+
+    # A promotion whose restart never happened (a resumed run, or the restart
+    # above lost) leaves AD DS installed but NTDS stopped. Finish it here, as
+    # the domain identity, which can log on to the joined machine either way.
+    - name: Check AD DS is actually running
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Result = "$((Get-Service NTDS -ErrorAction SilentlyContinue).Status)"
+      changed_when: false
+      register: dc_rebuild_ntds
+
+    - name: Restart to complete a pending promotion
+      ansible.windows.win_reboot:
+        reboot_timeout: 1800
+      when: dc_rebuild_ntds.result != 'Running'
 
     # SYSVOL and NETLOGON appear only once the initial SYSVOL replication from a
     # partner completes, so retry rather than fail on the first look.
