@@ -26,8 +26,10 @@
 #     (base64), the registry export, the template list. Small, and these are the
 #     parts that cannot be recreated. The password is written FIRST.
 #   - adcs_backup_local_dir on the controller: the full archive including the
-#     database (~19 MB on 2026-10-06; too big for a Vault entry). The nightly
-#     PBS backup of VM 1002 is a second copy of the database.
+#     database (~19 MB on 2026-10-06; too big for a Vault entry).
+#   - The same archive on kermit at adcs_backup_nas_dir (owner-only, inherited
+#     share ACL stripped, last 30 kept). kermit replicates to scooter. The
+#     nightly PBS backup of VM 1002 is a further copy of the database.
 #
 # A fresh CRL is published first, so the published CRL has its full validity
 # (1 week) ahead of any rebuild window.
@@ -208,6 +210,12 @@
         mode: "0600"
       delegate_to: localhost
 
+    - name: Record the archive path for the NAS copy
+      ansible.builtin.set_fact:
+        adcs_backup_archive: "{{ adcs_backup_local_dir }}/{{ adcs_backup_inventory.result.active }}-{{ adcs_backup_stamp }}.zip"
+      delegate_to: localhost
+      delegate_facts: true
+
     - name: Remove the staging copy from the CA host
       ansible.windows.win_file:
         path: "{{ item }}"
@@ -223,3 +231,52 @@
           {{ adcs_backup_inventory.result.others | length }} old CA key(s). Vault:
           {{ adcs_backup_vault_mount }}/windows/domain/adcs/{{ adcs_backup_inventory.result.active }}/backup.
           Archive: {{ adcs_backup_local_dir }}/{{ adcs_backup_inventory.result.active }}-{{ adcs_backup_stamp }}.zip
+
+# A copy off the controller laptop. NetBackup is broadly exported and carries a
+# permissive inherited ACL, so the directory gets its ACL stripped and mode 0700:
+# the PFXs inside are password-protected, but the database is not.
+- name: Copy the archive to the Synology
+  hosts: "{{ adcs_backup_nas | default('kermit.myrobertson.net') }}"
+  gather_facts: false
+  vars:
+    adcs_backup_nas_dir: /volume1/NetBackup/adcs-ca
+    adcs_backup_nas_keep: 30
+    adcs_backup_archive: "{{ hostvars['localhost'].adcs_backup_archive }}"
+    ansible_user: >-
+      {{ lookup('community.hashi_vault.vault_kv2_get', 'synology/dsm-admin/local-ssh-account',
+                engine_mount_point='secret').secret.username }}
+    ansible_password: >-
+      {{ lookup('community.hashi_vault.vault_kv2_get', 'synology/dsm-admin/local-ssh-account',
+                engine_mount_point='secret').secret.password }}
+  tasks:
+    - name: Make the backup directory
+      ansible.builtin.file:
+        path: "{{ adcs_backup_nas_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Strip the inherited share ACL so mode 0700 actually applies
+      ansible.builtin.command: /usr/syno/bin/synoacltool -del {{ adcs_backup_nas_dir }}
+      register: adcs_backup_acl
+      changed_when: false
+      failed_when: false
+
+    - name: Copy the archive (checksummed)
+      ansible.builtin.copy:
+        src: "{{ adcs_backup_archive }}"
+        dest: "{{ adcs_backup_nas_dir }}/{{ adcs_backup_archive | basename }}"
+        mode: "0600"
+
+    - name: Keep only the newest archives
+      ansible.builtin.shell: >-
+        ls -1t {{ adcs_backup_nas_dir }}/*.zip | tail -n +{{ adcs_backup_nas_keep | int + 1 }} | xargs -r rm -f --
+      changed_when: false
+
+    - name: Show what is on the NAS
+      ansible.builtin.command: ls -la {{ adcs_backup_nas_dir }}
+      changed_when: false
+      register: adcs_backup_nas_ls
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ adcs_backup_nas_ls.stdout_lines }}"
