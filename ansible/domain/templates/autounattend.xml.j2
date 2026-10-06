@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Rendered by rebuild_domain_controller.yml for {{ dc_spec.computer_name }}.
+  Unattended Windows Server install onto a blank UEFI/GPT virtio-scsi disk. Ends
+  with WinRM reachable on 5985 so Ansible can take over and promote the DC.
+
+  NICs are addressed by MAC (Identifier="BC-24-11-..."), never by name, because
+  Windows numbers adapters ("Ethernet 3") differently on every install.
+
+  Passwords are plaintext here by necessity. The ISO carrying this file is
+  deleted from Proxmox storage by the playbook once WinRM answers, and Setup
+  scrubs them from its cached copy in C:\Windows\Panther.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <settings pass="windowsPE">
+    <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <SetupUILanguage><UILanguage>en-US</UILanguage></SetupUILanguage>
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-PnpCustomizationsWinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <!-- The virtio-win ISO's drive letter is not fixed; list the likely ones.
+           Missing paths are skipped. vioscsi is required to see the disk. -->
+      <DriverPaths>
+{% for letter in ['D', 'E', 'F', 'G'] %}
+        <PathAndCredentials wcm:action="add" wcm:keyValue="{{ loop.index }}">
+          <Path>{{ letter }}:\vioscsi\{{ domain_controller_virtio_os_dir }}\amd64</Path>
+        </PathAndCredentials>
+{% endfor %}
+      </DriverPaths>
+    </component>
+    <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <DiskConfiguration>
+        <Disk wcm:action="add">
+          <DiskID>0</DiskID>
+          <WillWipeDisk>true</WillWipeDisk>
+          <CreatePartitions>
+            <CreatePartition wcm:action="add"><Order>1</Order><Type>EFI</Type><Size>260</Size></CreatePartition>
+            <CreatePartition wcm:action="add"><Order>2</Order><Type>MSR</Type><Size>16</Size></CreatePartition>
+            <CreatePartition wcm:action="add"><Order>3</Order><Type>Primary</Type><Extend>true</Extend></CreatePartition>
+          </CreatePartitions>
+          <ModifyPartitions>
+            <ModifyPartition wcm:action="add"><Order>1</Order><PartitionID>1</PartitionID><Format>FAT32</Format><Label>System</Label></ModifyPartition>
+            <ModifyPartition wcm:action="add"><Order>2</Order><PartitionID>3</PartitionID><Format>NTFS</Format><Label>Windows</Label><Letter>C</Letter></ModifyPartition>
+          </ModifyPartitions>
+        </Disk>
+      </DiskConfiguration>
+      <ImageInstall>
+        <OSImage>
+          <InstallFrom>
+            <MetaData wcm:action="add">
+              <Key>/IMAGE/INDEX</Key>
+              <Value>{{ dc_spec.image_index }}</Value>
+            </MetaData>
+          </InstallFrom>
+          <InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>
+        </OSImage>
+      </ImageInstall>
+      <UserData>
+        <AcceptEula>true</AcceptEula>
+        <FullName>{{ domain_controller_netbios_domain }}</FullName>
+        <Organization>{{ domain_controller_netbios_domain }}</Organization>
+      </UserData>
+    </component>
+  </settings>
+
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <ComputerName>{{ dc_spec.computer_name }}</ComputerName>
+      <TimeZone>{{ domain_controller_timezone }}</TimeZone>
+    </component>
+    <component name="Microsoft-Windows-TCPIP" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <Interfaces>
+{% for nic in dc_spec.nics %}
+        <Interface wcm:action="add">
+          <Identifier>{{ nic.mac | upper | replace(':', '-') }}</Identifier>
+          <Ipv4Settings><DhcpEnabled>false</DhcpEnabled></Ipv4Settings>
+          <Ipv6Settings><DhcpEnabled>false</DhcpEnabled></Ipv6Settings>
+          <UnicastIpAddresses>
+            <IpAddress wcm:action="add" wcm:keyValue="1">{{ nic.ip }}/{{ nic.prefix }}</IpAddress>
+          </UnicastIpAddresses>
+{% if nic.gateway %}
+          <Routes>
+            <Route wcm:action="add">
+              <Identifier>0</Identifier>
+              <Prefix>0.0.0.0/0</Prefix>
+              <NextHopAddress>{{ nic.gateway }}</NextHopAddress>
+            </Route>
+          </Routes>
+{% endif %}
+        </Interface>
+{% endfor %}
+      </Interfaces>
+    </component>
+    <component name="Microsoft-Windows-DNS-Client" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <Interfaces>
+{% for nic in dc_spec.nics %}
+        <Interface wcm:action="add">
+          <Identifier>{{ nic.mac | upper | replace(':', '-') }}</Identifier>
+{% if nic.dns %}
+          <DNSServerSearchOrder>
+{% for server in nic.dns %}
+            <IpAddress wcm:action="add" wcm:keyValue="{{ loop.index }}">{{ server }}</IpAddress>
+{% endfor %}
+          </DNSServerSearchOrder>
+{% endif %}
+          <DisableDynamicUpdate>{{ 'false' if nic.register_dns else 'true' }}</DisableDynamicUpdate>
+          <EnableAdapterDomainNameRegistration>false</EnableAdapterDomainNameRegistration>
+        </Interface>
+{% endfor %}
+      </Interfaces>
+    </component>
+  </settings>
+
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <UserAccounts>
+        <AdministratorPassword>
+          <Value>{{ dc_bootstrap_admin_password }}</Value>
+          <PlainText>true</PlainText>
+        </AdministratorPassword>
+      </UserAccounts>
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+      <AutoLogon>
+        <Enabled>true</Enabled>
+        <LogonCount>1</LogonCount>
+        <Username>Administrator</Username>
+        <Password>
+          <Value>{{ dc_bootstrap_admin_password }}</Value>
+          <PlainText>true</PlainText>
+        </Password>
+      </AutoLogon>
+      <FirstLogonCommands>
+        <!-- bootstrap.ps1 sits beside this file on the unattend ISO. Find it by
+             walking the drives rather than assuming a letter. -->
+        <SynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "foreach ($d in Get-PSDrive -PSProvider FileSystem) { $p = Join-Path $d.Root 'bootstrap.ps1'; if (Test-Path $p) { &amp; $p *&gt; C:\Windows\Temp\dc-bootstrap.log; break } }"</CommandLine>
+          <Description>Install guest agent and open WinRM for Ansible</Description>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+    </component>
+  </settings>
+</unattend>

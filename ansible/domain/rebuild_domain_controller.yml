@@ -1,0 +1,564 @@
+---
+# Rebuild ONE Windows domain controller from scratch on fresh evaluation media,
+# in place on its existing Proxmox VM, and promote it back into the domain.
+#
+# WHY. There are no Windows Server licences: every DC runs evaluation media. An
+# expired evaluation shuts Windows down every 60 minutes, and once its rearms are
+# spent the only way back is a reinstall. So the DCs are treated as cattle: the
+# build is declared in vars/domain_controller_specs.yml, rearms are taken by
+# rearm_domain_controller_eval.yml while they last, and this playbook replaces a
+# DC whose evaluation is exhausted. AD replication repopulates the new DC from
+# the survivors, so nothing on the old disk needs to be kept.
+#
+# WHAT IT DOES, in order (plays below match):
+#   1. preflight (always)    - spec, inventory, ISOs, FSMO roles, survivors.
+#   2. DHCP unlink           - drop the failover relationship if the target is
+#                              the DHCP partner. Scopes stay on the primary.
+#   3. demote                - graceful Uninstall-ADDSDomainController.
+#   4. AD cleanup            - delete the leftover computer object (and, with
+#                              dc_rebuild_skip_demote for a dead DC, the server
+#                              object and RODC krbtgt account) from a survivor.
+#   5. reimage               - HA-stop the VM, DETACH its disks (kept as unusedN
+#                              for rollback), create blank ones, boot the
+#                              evaluation ISO with a rendered autounattend.
+#   6. promote               - install roles and promote, over WinRM as the
+#                              bootstrap Administrator.
+#   7. verify + finish       - check the DC as the normal Ansible identity,
+#                              report the new evaluation expiry, then DESTROY the
+#                              detached old disks.
+#
+# SAFETY.
+#   - Inert without -e dc_rebuild_confirm=true: only the preflight runs.
+#   - One DC per run. Refuses the last writable DC, an FSMO holder, the DHCP
+#     primary, a spec not marked spec_verified, and (for now) the CA host - see
+#     runbooks/domain/rebuild-evaluation-domain-controller.md for dc1.
+#   - The VM's MAC addresses must match the spec before any disk is touched, so
+#     a wrong VMID in the spec cannot wipe the wrong guest.
+#   - Old disks are destroyed only after the new DC verifies. Until then a
+#     failed run can be rolled back by reattaching unusedN (see the runbook).
+#
+# Credentials: svc-ansible-win (Domain Admins) from Vault, as for every Windows
+# play. The new DSRM and bootstrap Administrator passwords are generated here
+# and written to secret/windows/domain/dsrm/<host> and
+# secret/windows/domain/bootstrap-admin/<host> BEFORE they are used, so a run
+# that dies halfway never leaves a credential that exists only on the VM.
+#
+# Run (preflight only, then for real):
+#   export VAULT_ADDR=... VAULT_TOKEN=... OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/domain/rebuild_domain_controller.yml -e dc_rebuild_target=dns01.myrobertson.net
+#   ansible-playbook ... -e dc_rebuild_target=dns01.myrobertson.net -e dc_rebuild_confirm=true
+
+- name: Preflight - spec, inventory and credentials
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - vars/domain_controller_specs.yml
+  vars:
+    dc_rebuild_target: ""
+    dc_rebuild_confirm: false
+    dc_rebuild_skip_demote: false
+  tasks:
+    - name: Require exactly one target that has a build spec
+      ansible.builtin.assert:
+        that:
+          - dc_rebuild_target | length > 0
+          - dc_rebuild_target in domain_controller_specs
+          - dc_rebuild_target in groups['domain_controllers_all_windows']
+        fail_msg: >-
+          Pass -e dc_rebuild_target=<inventory hostname>. It must be in
+          domain_controllers_all_windows AND have an entry in
+          vars/domain_controller_specs.yml. Known specs:
+          {{ domain_controller_specs.keys() | list }}
+
+    - name: Load the target's spec
+      ansible.builtin.set_fact:
+        dc_spec: "{{ domain_controller_specs[dc_rebuild_target] }}"
+        dc_rebuild_go: "{{ dc_rebuild_confirm | bool }}"
+
+    - name: Refuse specs that were never checked against the live guest
+      ansible.builtin.assert:
+        that: dc_spec.spec_verified | default(false) | bool
+        fail_msg: >-
+          {{ dc_rebuild_target }}'s spec is not marked spec_verified. Compare its
+          nics against the live guest (Get-NetIPConfiguration) and qm config,
+          then set spec_verified: true.
+
+    - name: Refuse the CA host until the CA backup/restore path is codified
+      ansible.builtin.assert:
+        that: not (dc_spec.hosts_ca | default(false) | bool)
+        fail_msg: >-
+          {{ dc_rebuild_target }} hosts the Enterprise CA. Rebuilding it needs a
+          CA backup (database + key + registry) and a restore onto the new build
+          under the same hostname, which this playbook does not do yet. See
+          runbooks/domain/rebuild-evaluation-domain-controller.md.
+
+    - name: Refuse the DHCP primary
+      ansible.builtin.assert:
+        that: dc_rebuild_target not in groups['dhcp_primary_windows'] | default([])
+        fail_msg: >-
+          {{ dc_rebuild_target }} is the DHCP failover PRIMARY, which owns the
+          scope definitions. Move the primary role to the partner (inventory +
+          configure_windows_dhcp_ha.yml) before rebuilding it.
+
+    - name: Pick a surviving writable DC to work from
+      ansible.builtin.set_fact:
+        dc_rebuild_source_dc: >-
+          {{ dc_rebuild_source_dc
+             | default((groups['dhcp_primary_windows'] + groups['domain_controllers_windows'])
+                       | difference([dc_rebuild_target]) | first) }}
+
+    # Later plays target these groups rather than templating `hosts:`, which
+    # cannot see hostvars. add_host on an inventory host keeps all its vars.
+    - name: Group the hosts the later plays act on
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        groups: "{{ item.group }}"
+      loop:
+        - { name: "{{ dc_rebuild_source_dc }}", group: dc_rebuild_source }
+        - { name: "{{ dc_spec.proxmox_node }}", group: dc_rebuild_node }
+        - { name: "{{ dc_rebuild_target }}", group: dc_rebuild_old }
+      changed_when: false
+
+    - name: Generate the new DSRM and bootstrap Administrator passwords
+      ansible.builtin.set_fact:
+        dc_dsrm_password: "{{ lookup('ansible.builtin.password', '/dev/null', chars=['ascii_letters', 'digits', '-_.%+'], length=28) ~ 'aA1-' }}"
+        dc_bootstrap_admin_password: "{{ lookup('ansible.builtin.password', '/dev/null', chars=['ascii_letters', 'digits', '-_.%+'], length=28) ~ 'aA1-' }}"
+      no_log: true
+      when: dc_rebuild_go | bool
+
+    - name: Escrow the DSRM password in Vault before it is used
+      community.hashi_vault.vault_kv2_write:
+        engine_mount_point: secret
+        path: "windows/domain/dsrm/{{ dc_rebuild_target.split('.')[0] }}"
+        data:
+          password: "{{ dc_dsrm_password }}"
+          set_at: "{{ now(utc=true).isoformat() }}"
+          set_by: rebuild_domain_controller.yml
+      no_log: true
+      when: dc_rebuild_go | bool
+
+    - name: Escrow the bootstrap Administrator password in Vault
+      community.hashi_vault.vault_kv2_write:
+        engine_mount_point: secret
+        path: "windows/domain/bootstrap-admin/{{ dc_rebuild_target.split('.')[0] }}"
+        data:
+          password: "{{ dc_bootstrap_admin_password }}"
+          set_at: "{{ now(utc=true).isoformat() }}"
+          note: Local Administrator of the fresh install; discarded on promotion.
+      no_log: true
+      when: dc_rebuild_go | bool
+
+    - name: Register the fresh install as a temporary bootstrap host
+      ansible.builtin.add_host:
+        name: dc_rebuild_bootstrap
+        ansible_host: "{{ dc_spec.nics[0].ip }}"
+        ansible_user: Administrator
+        ansible_password: "{{ dc_bootstrap_admin_password }}"
+        ansible_connection: winrm
+        ansible_port: 5985
+        ansible_winrm_scheme: http
+        ansible_winrm_transport: ntlm
+      no_log: true
+      when: dc_rebuild_go | bool
+
+- name: Preflight - domain state, from a surviving DC
+  hosts: dc_rebuild_source
+  gather_facts: false
+  vars:
+    dc_rebuild_target: "{{ hostvars['localhost'].dc_rebuild_target }}"
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+  tasks:
+    - name: Read the domain controller list and FSMO holders
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $target = '{{ dc_spec.computer_name }}'
+          $dcs = @(Get-ADDomainController -Filter * |
+              Select-Object Name, HostName, IsReadOnly,
+                  @{ n = 'Roles'; e = { @($_.OperationMasterRoles | ForEach-Object { "$_" }) } })
+          $Ansible.Result = @{
+              dcs = $dcs
+              target = @($dcs | Where-Object Name -eq $target)
+              writable_survivors = @($dcs | Where-Object { $_.Name -ne $target -and -not $_.IsReadOnly }).Count
+          }
+      changed_when: false
+      register: dc_rebuild_domain
+
+    - name: Show the domain controllers
+      ansible.builtin.debug:
+        msg: "{{ dc_rebuild_domain.result.dcs }}"
+
+    - name: Check the target can be removed safely
+      ansible.builtin.assert:
+        that:
+          - dc_rebuild_domain.result.writable_survivors | int >= 1
+          - (dc_rebuild_domain.result.target | length == 0)
+            or (dc_rebuild_domain.result.target[0].Roles | default('', true) | length == 0)
+          - (dc_rebuild_domain.result.target | length == 0)
+            or (dc_rebuild_domain.result.target[0].IsReadOnly | bool) == (dc_spec.read_only | bool)
+        fail_msg: >-
+          Refusing: the target must not hold FSMO roles, at least one OTHER
+          writable DC must remain, and the spec's read_only must match what the
+          DC is today. Target as seen: {{ dc_rebuild_domain.result.target }}
+
+    - name: Stop here unless dc_rebuild_confirm=true
+      ansible.builtin.debug:
+        msg: >-
+          Preflight passed for {{ dc_rebuild_target }} (VM {{ dc_spec.vmid }} on
+          {{ dc_spec.proxmox_node }}). Nothing has been changed. Re-run with
+          -e dc_rebuild_confirm=true to rebuild it.
+      when: not hostvars['localhost'].dc_rebuild_go | bool
+
+- name: Preflight - VM identity and install media on the Proxmox node
+  hosts: dc_rebuild_node
+  gather_facts: false
+  vars:
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+  vars_files:
+    - vars/domain_controller_specs.yml
+  tasks:
+    - name: Read the VM config
+      ansible.builtin.command: qm config {{ dc_spec.vmid }}
+      changed_when: false
+      register: dc_rebuild_qm_config
+
+    - name: Check every spec MAC is on this VM and there are no stray unused disks
+      ansible.builtin.assert:
+        that:
+          - dc_spec.nics | map(attribute='mac') | map('upper')
+            | difference(dc_rebuild_qm_config.stdout | upper | regex_findall('[0-9A-F]{2}(?::[0-9A-F]{2}){5}'))
+            | length == 0
+          - dc_rebuild_qm_config.stdout is not search('(?m)^unused[0-9]+:')
+        fail_msg: >-
+          VM {{ dc_spec.vmid }} does not carry the spec's MAC addresses, or already
+          has unusedN disks. Refusing to touch its disks.
+          {{ dc_rebuild_qm_config.stdout }}
+
+    - name: Check the install ISOs exist
+      ansible.builtin.command: pvesm path {{ item }}
+      changed_when: false
+      loop:
+        - "{{ domain_controller_iso }}"
+        - "{{ domain_controller_virtio_iso }}"
+
+- name: DHCP - drop the failover relationship with the target
+  hosts: dhcp_primary_windows
+  gather_facts: false
+  vars:
+    dc_rebuild_target: "{{ hostvars['localhost'].dc_rebuild_target }}"
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+  tasks:
+    - name: Skip unless confirmed and the target is the DHCP partner
+      ansible.builtin.meta: end_play
+      when: >-
+        not hostvars['localhost'].dc_rebuild_go | bool
+        or dc_rebuild_target not in groups['dhcp_partner_windows'] | default([])
+
+    # Removing the relationship leaves every scope on the primary, which keeps
+    # serving the whole pool alone. configure_windows_dhcp_ha.yml re-creates the
+    # relationship against the new partner afterwards.
+    - name: Remove any failover relationship that names the target
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          # PartnerServer holds whatever the relationship was created with - FQDN
+          # or IP - so match either.
+          $partner = @('{{ dc_rebuild_target }}', '{{ dc_spec.nics[0].ip }}')
+          $rel = @(Get-DhcpServerv4Failover -ErrorAction SilentlyContinue |
+              Where-Object { $_.PartnerServer -in $partner })
+          foreach ($r in $rel) { Remove-DhcpServerv4Failover -Name $r.Name -Force }
+          $Ansible.Changed = $rel.Count -gt 0
+          $Ansible.Result = @($rel | ForEach-Object Name)
+
+- name: Demote the target gracefully
+  hosts: dc_rebuild_old
+  gather_facts: false
+  vars:
+    dc_rebuild_skip_demote: false
+  tasks:
+    - name: Skip unless confirmed (or the DC is dead and skip_demote is set)
+      ansible.builtin.meta: end_play
+      when: >-
+        not hostvars['localhost'].dc_rebuild_go | bool
+        or dc_rebuild_skip_demote | bool
+
+    # An expired evaluation is up ~58 minutes of every 60, so waiting long
+    # enough always finds it. Demotion itself takes a few minutes.
+    - name: Wait for the target to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 3900
+
+    - name: Demote to member server
+      microsoft.ad.domain_controller:
+        state: member_server
+        domain_admin_user: "{{ ansible_user }}"
+        domain_admin_password: "{{ ansible_password }}"
+        local_admin_password: "{{ hostvars['localhost'].dc_bootstrap_admin_password }}"
+        reboot: true
+      no_log: true
+
+- name: AD cleanup of the old identity, from a surviving DC
+  hosts: dc_rebuild_source
+  gather_facts: false
+  vars:
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+    dc_rebuild_skip_demote: false
+  tasks:
+    - name: Skip unless confirmed
+      ansible.builtin.meta: end_play
+      when: not hostvars['localhost'].dc_rebuild_go | bool
+
+    # After a graceful demotion only the (member) computer object is left.
+    # After skip_demote (dead DC) the server object under Sites and, for an
+    # RODC, its krbtgt_NNNNN account are left too - that is metadata cleanup.
+    - name: Remove the old computer object and any DC metadata
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $name = '{{ dc_spec.computer_name }}'
+          $removed = @()
+          $config = (Get-ADRootDSE).configurationNamingContext
+          $server = Get-ADObject -SearchBase "CN=Sites,$config" `
+              -Filter "objectClass -eq 'server' -and name -eq '$name'"
+          if ($server) {
+              Remove-ADObject -Identity $server -Recursive -Confirm:$false
+              $removed += "server:$($server.DistinguishedName)"
+          }
+          $computer = Get-ADComputer -Filter "Name -eq '$name'" -Properties 'msDS-KrbTgtLink'
+          if ($computer) {
+              $krbtgt = $computer.'msDS-KrbTgtLink'
+              Set-ADObject -Identity $computer -ProtectedFromAccidentalDeletion $false
+              Remove-ADObject -Identity $computer -Recursive -Confirm:$false
+              $removed += "computer:$($computer.DistinguishedName)"
+              if ($krbtgt) {
+                  Remove-ADObject -Identity $krbtgt -Confirm:$false
+                  $removed += "krbtgt:$krbtgt"
+              }
+          }
+          $Ansible.Changed = $removed.Count -gt 0
+          $Ansible.Result = $removed
+      register: dc_rebuild_cleanup
+
+    - name: Show what was removed
+      ansible.builtin.debug:
+        msg: "{{ dc_rebuild_cleanup.result }}"
+
+- name: Reimage the VM on fresh evaluation media
+  hosts: dc_rebuild_node
+  gather_facts: false
+  vars:
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+    dc_bootstrap_admin_password: "{{ hostvars['localhost'].dc_bootstrap_admin_password }}"
+    dc_short: "{{ hostvars['localhost'].dc_rebuild_target.split('.')[0] }}"
+    dc_unattend_iso: "autounattend-{{ dc_short }}.iso"
+    dc_winrm_allowed_remote_addresses:
+      - 192.168.1.0/24
+      - 192.168.16.0/24
+  vars_files:
+    - vars/domain_controller_specs.yml
+  tasks:
+    - name: Skip unless confirmed
+      ansible.builtin.meta: end_play
+      when: not hostvars['localhost'].dc_rebuild_go | bool
+
+    # On an HA resource a plain `qm stop` is turned into an HA request anyway;
+    # say so explicitly so HA does not restart the guest underneath us.
+    - name: Stop the VM through HA
+      ansible.builtin.command: ha-manager set vm:{{ dc_spec.vmid }} --state stopped
+
+    - name: Wait for the VM to stop
+      ansible.builtin.command: qm status {{ dc_spec.vmid }}
+      register: dc_rebuild_status
+      until: "'stopped' in dc_rebuild_status.stdout"
+      retries: 60
+      delay: 5
+      changed_when: false
+
+    - name: Detach the old disks (kept as unusedN until the new DC verifies)
+      ansible.builtin.command: qm set {{ dc_spec.vmid }} --delete scsi0,efidisk0,tpmstate0
+
+    - name: Create blank disks
+      ansible.builtin.command: >-
+        qm set {{ dc_spec.vmid }}
+        --scsi0 {{ dc_spec.storage }}:{{ dc_spec.disk_gb }},discard=on,iothread=1
+        --efidisk0 {{ dc_spec.storage }}:1,efitype=4m,ms-cert=2023w,pre-enrolled-keys=1
+        --tpmstate0 {{ dc_spec.storage }}:1,version=v2.0
+
+    - name: Make a staging directory for the unattend media
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: -unattend
+      register: dc_rebuild_stage
+
+    - name: Render autounattend.xml and bootstrap.ps1
+      ansible.builtin.template:
+        src: "templates/{{ item.src }}"
+        dest: "{{ dc_rebuild_stage.path }}/{{ item.dest }}"
+        mode: "0600"
+      loop:
+        - { src: autounattend.xml.j2, dest: autounattend.xml }
+        - { src: dc-bootstrap.ps1.j2, dest: bootstrap.ps1 }
+      no_log: true
+
+    - name: Build the unattend ISO
+      ansible.builtin.command: >-
+        genisoimage -quiet -J -r -V UNATTEND
+        -o /var/lib/vz/template/iso/{{ dc_unattend_iso }} {{ dc_rebuild_stage.path }}
+
+    - name: Remove the staging directory
+      ansible.builtin.file:
+        path: "{{ dc_rebuild_stage.path }}"
+        state: absent
+
+    - name: Attach the install, driver and unattend media and boot disk-first
+      ansible.builtin.command: >-
+        qm set {{ dc_spec.vmid }}
+        --ide0 {{ domain_controller_iso }},media=cdrom
+        --ide2 {{ domain_controller_virtio_iso }},media=cdrom
+        --ide3 local:iso/{{ dc_unattend_iso }},media=cdrom
+        --boot order=scsi0;ide0
+
+    # The blank scsi0 falls through to ide0, whose UEFI loader waits ~5 s for
+    # "Press any key to boot from CD". Nobody presses it unattended, so send
+    # Enter for 40 s once the VM is running. After Setup's first reboot scsi0 is
+    # bootable and the prompt never appears again.
+    - name: Start the VM through HA and press a key at the CD prompt
+      ansible.builtin.shell: |
+        set -e
+        ha-manager set vm:{{ dc_spec.vmid }} --state started
+        for i in $(seq 1 60); do
+          qm status {{ dc_spec.vmid }} | grep -q running && break
+          sleep 2
+        done
+        for i in $(seq 1 80); do qm sendkey {{ dc_spec.vmid }} ret || true; sleep 0.5; done
+
+    - name: Wait for WinRM on the fresh install (Setup takes 15-40 minutes)
+      ansible.builtin.wait_for:
+        host: "{{ dc_spec.nics[0].ip }}"
+        port: 5985
+        timeout: 5400
+        sleep: 15
+      delegate_to: localhost
+
+    - name: Eject all media and boot from disk only
+      ansible.builtin.command: >-
+        qm set {{ dc_spec.vmid }} --ide0 none,media=cdrom --delete ide2,ide3 --boot order=scsi0
+
+    - name: Delete the unattend ISO (it carries a plaintext password)
+      ansible.builtin.file:
+        path: /var/lib/vz/template/iso/{{ dc_unattend_iso }}
+        state: absent
+
+- name: Promote the fresh install
+  hosts: dc_rebuild_bootstrap
+  gather_facts: false
+  vars:
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+    dc_rebuild_target: "{{ hostvars['localhost'].dc_rebuild_target }}"
+  vars_files:
+    - vars/domain_controller_specs.yml
+  tasks:
+    - name: Wait for the first-logon bootstrap to finish
+      ansible.windows.win_stat:
+        path: C:\Windows\Temp\dc-bootstrap.done
+      register: dc_rebuild_marker
+      until: dc_rebuild_marker.stat.exists
+      retries: 60
+      delay: 10
+
+    - name: Install AD DS and DNS (and DHCP for a DHCP server)
+      ansible.windows.win_feature:
+        name: >-
+          {{ ['AD-Domain-Services', 'DNS']
+             + (['DHCP'] if dc_rebuild_target in groups['dhcp_servers_windows'] | default([]) else []) }}
+        include_management_tools: true
+
+    - name: Join and promote
+      microsoft.ad.domain_controller:
+        state: domain_controller
+        dns_domain_name: "{{ domain_controller_dns_domain }}"
+        domain_admin_user: "{{ hostvars[dc_rebuild_target].ansible_user }}"
+        domain_admin_password: "{{ hostvars[dc_rebuild_target].ansible_password }}"
+        safe_mode_password: "{{ hostvars['localhost'].dc_dsrm_password }}"
+        read_only: "{{ dc_spec.read_only | bool }}"
+        site_name: "{{ dc_spec.site }}"
+        install_dns: true
+        reboot: true
+      no_log: true
+
+- name: Verify the new DC and finish
+  hosts: dc_rebuild_old
+  gather_facts: false
+  vars:
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+  tasks:
+    - name: Skip unless confirmed
+      ansible.builtin.meta: end_play
+      when: not hostvars['localhost'].dc_rebuild_go | bool
+
+    - name: Wait for the domain identity to be able to log on
+      ansible.builtin.wait_for_connection:
+        timeout: 1800
+
+    # SYSVOL and NETLOGON appear only once the initial SYSVOL replication from a
+    # partner completes, so retry rather than fail on the first look.
+    - name: Check the DC is advertising and sharing SYSVOL
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $dc = Get-ADDomainController -Identity $env:COMPUTERNAME
+          $shares = @(Get-SmbShare | Where-Object Name -in 'SYSVOL', 'NETLOGON').Count
+          $lic = Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND Name LIKE 'Windows%'"
+          $Ansible.Result = @{
+              is_read_only = $dc.IsReadOnly
+              site = $dc.Site
+              shares = $shares
+              license_status = $lic.LicenseStatus
+              grace_minutes_left = $lic.GracePeriodRemaining
+              rearms_left = $lic.RemainingSkuReArmCount
+          }
+          if ($shares -lt 2) { throw "SYSVOL/NETLOGON not shared yet ($shares/2)" }
+      changed_when: false
+      register: dc_rebuild_verify
+      retries: 30
+      delay: 30
+      until: dc_rebuild_verify is succeeded
+
+    - name: Check role and site match the spec
+      ansible.builtin.assert:
+        that:
+          - dc_rebuild_verify.result.is_read_only | bool == dc_spec.read_only | bool
+          - dc_rebuild_verify.result.site == dc_spec.site
+
+    - name: Report the new evaluation window
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} rebuilt. Evaluation has
+          {{ (dc_rebuild_verify.result.grace_minutes_left | int / 1440) | round(0) | int }}
+          days left and {{ dc_rebuild_verify.result.rearms_left }} rearm(s).
+          Next: configure_windows_dhcp_ha.yml (if a DHCP partner),
+          fix_dc_time_drift_windows.yml, configure_windows_winrm.yml,
+          ansible/proxmox/guest_fstrim.yml, ansible/synology/configure_windows_activebackup_agent.yml.
+
+- name: Destroy the detached old disks
+  hosts: dc_rebuild_node
+  gather_facts: false
+  vars:
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+  tasks:
+    - name: Skip unless confirmed
+      ansible.builtin.meta: end_play
+      when: not hostvars['localhost'].dc_rebuild_go | bool
+
+    - name: Read the VM config
+      ansible.builtin.command: qm config {{ dc_spec.vmid }}
+      changed_when: false
+      register: dc_rebuild_final_config
+
+    # Only volumes named for THIS vmid; anything else in an unusedN slot is left
+    # alone and reported.
+    - name: Destroy the old unusedN volumes
+      ansible.builtin.command: >-
+        qm disk unlink {{ dc_spec.vmid }} --idlist {{ item.split(':')[0] }} --force 1
+      loop: "{{ dc_rebuild_final_config.stdout_lines | select('match', '^unused[0-9]+: \\S+:vm-' ~ dc_spec.vmid ~ '-disk-') | list }}"

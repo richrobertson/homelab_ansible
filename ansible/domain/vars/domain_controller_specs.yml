@@ -1,0 +1,97 @@
+---
+# Declarative build spec for every Windows domain controller, consumed by
+# rebuild_domain_controller.yml. A DC here is cattle: everything needed to
+# destroy it and build an identical replacement lives in this file, Vault and the
+# playbook - nothing lives only on the VM.
+#
+# WHY THIS EXISTS. Every DC in the domain runs Windows Server EVALUATION media
+# and there are no licences. An expired evaluation shuts Windows down every 60
+# minutes (dc1 and dns01 have done so since 2026-09-29, 0 rearms left), so the
+# operating model is: rearm while rearms remain (rearm_domain_controller_eval.yml),
+# then rebuild on fresh evaluation media with this spec. Rebuilding one DC at a
+# time is safe because AD replication repopulates it from the survivors.
+#
+# Keep this in step with inventory/environments/production.ini: the key is the
+# inventory hostname, and the inventory groups (domain_controllers_windows,
+# domain_controllers_readonly_windows, dhcp_*_windows) still decide which plays
+# a host takes part in. The ini is gitignored, so this file is the tracked record
+# of what each DC is.
+#
+# Fields:
+#   vmid / proxmox_node      - the VM is REUSED in place (same VMID, MACs, HA
+#                              resource), only its disks are recreated.
+#   storage / disk_gb        - target for the new scsi0, efidisk0 and tpmstate0.
+#   image_index              - index inside sources/install.wim on the ISO;
+#                              verify with the preflight, it differs per ISO.
+#   read_only                - promote as an RODC. dns01 has always been one.
+#   nics                     - matched to Proxmox netN by MAC, which is how
+#                              autounattend addresses them (Identifier = MAC).
+#                              register_dns: false keeps a management-network
+#                              address out of the AD zone - dns01's 192.168.88.x
+#                              leg is not registered today and must not start.
+#   hosts_ca                 - the Enterprise CA lives here. The rebuild refuses
+#                              such a host unless the CA backup/restore path is
+#                              explicitly enabled (see the runbook).
+domain_controller_dns_domain: myrobertson.net
+domain_controller_netbios_domain: MYROBERTSON
+domain_controller_timezone: Pacific Standard Time
+domain_controller_iso: local:iso/WinServer2025-Eval-26100.32230.iso
+domain_controller_virtio_iso: local:iso/virtio-win-stable.iso
+# Driver folder inside the virtio-win ISO for this Windows build.
+domain_controller_virtio_os_dir: 2k25
+
+domain_controller_specs:
+  dns01.myrobertson.net:
+    computer_name: DNS01
+    # Read from the live guest 2026-10-06 (Get-NetIPConfiguration, qm config).
+    spec_verified: true
+    vmid: 1001
+    proxmox_node: pve4.myrobertson.net
+    storage: p0
+    disk_gb: 42
+    image_index: 4
+    site: Home
+    read_only: true
+    hosts_ca: false
+    nics:
+      - mac: BC:24:11:07:64:F2
+        ip: 192.168.1.101
+        prefix: 24
+        gateway: 192.168.1.1
+        dns: [192.168.1.245, 192.168.7.202]
+        register_dns: true
+      - mac: BC:24:11:92:72:8F
+        ip: 192.168.88.19
+        prefix: 24
+        # Deliberately no gateway. The old build had a second default gateway
+        # here (192.168.88.1); two default routes on a DC make reply paths
+        # depend on route metrics. 192.168.88.0/24 is on-link without one.
+        gateway: null
+        dns: []
+        register_dns: false
+
+  dc1.myrobertson.net:
+    computer_name: DC1
+    # NIC/DNS values below are from qm config only, not read from the guest.
+    # The rebuild refuses a spec until this is true - check against the live
+    # Get-NetIPConfiguration before the first dc1 rebuild.
+    spec_verified: false
+    vmid: 1002
+    proxmox_node: pve4.myrobertson.net
+    storage: p0
+    disk_gb: 42
+    image_index: 4
+    site: Home
+    read_only: false
+    # myrobertson-DC1-CA-1 + its IIS enrolment services. The CA config string is
+    # dc1.myrobertson.net\myrobertson-DC1-CA-1, so rebuilding under the SAME
+    # hostname and restoring the CA keeps every consumer (Terraform AD CS
+    # provider included) working unchanged.
+    hosts_ca: true
+    nics:
+      - mac: BC:24:11:B2:81:26
+        ip: 192.168.1.3
+        prefix: 24
+        gateway: 192.168.1.1
+        dns: [192.168.1.245, 192.168.7.202]
+        register_dns: true

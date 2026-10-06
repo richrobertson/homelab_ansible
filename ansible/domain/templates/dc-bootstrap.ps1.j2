@@ -1,0 +1,32 @@
+# Rendered by rebuild_domain_controller.yml for {{ dc_spec.computer_name }}.
+# First-logon bootstrap on a freshly installed DC: everything the playbook needs
+# before it can connect, and nothing else. Domain join, promotion and roles are
+# done by Ansible over WinRM so they stay in code, not in this script.
+$ErrorActionPreference = 'Stop'
+
+# 1. QEMU guest agent, from whichever drive holds the virtio-win ISO. Proxmox
+#    needs it for qm guest exec, fstrim and clean shutdowns (agent: 1 is set).
+$msi = Get-PSDrive -PSProvider FileSystem |
+    ForEach-Object { Join-Path $_.Root 'guest-agent\qemu-ga-x86_64.msi' } |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($msi) {
+    Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart' -Wait
+}
+
+# 2. A fresh workgroup server puts every adapter on the Public profile, where
+#    the built-in WinRM rule only admits the local subnet. Ansible connects from
+#    the management networks below, so make the profile Private and add a scoped
+#    rule (same name and scope as configure_windows_winrm.yml, which owns it
+#    once the host is in the domain).
+Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private
+Enable-PSRemoting -Force -SkipNetworkProfileCheck
+Set-Service WinRM -StartupType Automatic
+$rule = 'Homelab-WinRM-HTTP-In'
+if (-not (Get-NetFirewallRule -Name $rule -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -Name $rule -DisplayName $rule -Direction Inbound `
+        -Protocol TCP -LocalPort 5985 -Action Allow -Profile Any `
+        -RemoteAddress {{ dc_winrm_allowed_remote_addresses | join(',') }} | Out-Null
+}
+
+# 3. Marker the playbook checks, so "WinRM answers" also means "bootstrap ran".
+Set-Content -Path C:\Windows\Temp\dc-bootstrap.done -Value (Get-Date -Format o)
