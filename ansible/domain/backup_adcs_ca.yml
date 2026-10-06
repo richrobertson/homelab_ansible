@@ -73,7 +73,10 @@
                   @{ serial = $serial; name = $cn; container = $container; not_after = $notAfter }
               }
           }
-          $Ansible.Result = @{ active = $active; others = @($others) }
+          $activeThumb = (Get-ChildItem Cert:\LocalMachine\My | Where-Object {
+              $_.HasPrivateKey -and $_.GetNameInfo('SimpleName', $false) -eq $active } |
+              Sort-Object NotAfter | Select-Object -Last 1).Thumbprint
+          $Ansible.Result = @{ active = $active; active_thumbprint = $activeThumb; others = @($others) }
       changed_when: false
       register: adcs_backup_inventory
 
@@ -185,7 +188,8 @@
         path: "windows/domain/adcs/{{ adcs_backup_inventory.result.active }}/backup"
         data: >-
           {{ {'password': adcs_backup_password, 'stamp': adcs_backup_stamp, 'status': 'complete',
-              'host': inventory_hostname, 'old_ca': adcs_backup_inventory.result.others | to_json}
+              'host': inventory_hostname, 'old_ca': adcs_backup_inventory.result.others | to_json,
+              'active_ca_thumbprint': adcs_backup_inventory.result.active_thumbprint}
              | combine(dict(adcs_backup_slurp.results | map(attribute='item.key')
                             | zip(adcs_backup_slurp.results | map(attribute='content')))) }}
       delegate_to: localhost

@@ -1,0 +1,213 @@
+---
+# Restore the Enterprise Root CA onto a rebuilt DC with the SAME hostname, from
+# the backup_adcs_ca.yml archive checked in preflight. Included by
+# rebuild_domain_controller.yml after the new DC verifies.
+#
+# Same hostname + same CA name + same key means every existing reference keeps
+# working: the CA config string (<fqdn>\<CA>) used by the Terraform AD CS
+# provider, the CDP/AIA URLs inside every issued certificate (including Vault's
+# three intermediates), and the AD objects the old install left behind.
+#
+# Every step checks state first, so a resumed run (-e dc_rebuild_resume=true)
+# can re-run this file safely.
+#
+# Runs the AD CS steps as an Enterprise Admin via runas (see adcs_ca_remove.yml).
+
+- name: Stage the backup archive on the new DC
+  ansible.windows.win_copy:
+    src: "{{ dc_ca_archive }}"
+    dest: C:\Windows\Temp\adcs-restore\archive.zip
+
+- name: Unpack it
+  ansible.windows.win_powershell:
+    error_action: stop
+    script: |
+      $x = 'C:\Windows\Temp\adcs-restore\x'
+      if (Test-Path "$x\ca") { $Ansible.Changed = $false; return }
+      Expand-Archive -Path C:\Windows\Temp\adcs-restore\archive.zip -DestinationPath $x -Force
+
+- name: Install the AD CS role services
+  ansible.windows.win_feature:
+    name:
+      - ADCS-Cert-Authority
+      - ADCS-Web-Enrollment
+      - ADCS-Enroll-Web-Svc
+      - ADCS-Enroll-Web-Pol
+    include_management_tools: true
+  register: dc_ca_features
+
+- name: Restart if the role install needs it
+  ansible.windows.win_reboot:
+    reboot_timeout: 1800
+  when: dc_ca_features.reboot_required | default(false) | bool
+
+- name: Re-import the old CA's keys
+  become: true
+  become_method: ansible.builtin.runas
+  become_user: "{{ dc_ca_admin_user }}"
+  vars:
+    ansible_become_password: "{{ dc_ca_admin_password }}"
+  ansible.windows.win_powershell:
+    error_action: stop
+    script: |
+      param([string]$Password)
+      $x = 'C:\Windows\Temp\adcs-restore\x'
+      $imported = @()
+      $have = (certutil -store my) -join "`n"
+      foreach ($f in Get-ChildItem $x -Filter 'old-*.pfx') {
+          $serial = $f.BaseName.Substring(4)
+          if ($have -match "(?m)^Serial Number: $serial") { continue }
+          certutil -f -p $Password -importPFX my $f.FullName | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "importPFX failed for $($f.Name)" }
+          $imported += $serial
+      }
+      $Ansible.Changed = $imported.Count -gt 0
+      $Ansible.Result = $imported
+    parameters:
+      Password: "{{ dc_ca_backup_password }}"
+  no_log: true
+
+# -OverwriteExistingCAinDS: the old install's objects are still in AD by
+# design; without it setup refuses because "a CA with this name exists".
+- name: Install the Enterprise Root CA from the backed-up key
+  become: true
+  become_method: ansible.builtin.runas
+  become_user: "{{ dc_ca_admin_user }}"
+  vars:
+    ansible_become_password: "{{ dc_ca_admin_password }}"
+  ansible.windows.win_powershell:
+    error_action: stop
+    script: |
+      param([string]$Password, [string]$CAName)
+      $cfg = 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration'
+      if ((Get-ItemProperty $cfg -ErrorAction SilentlyContinue).Active -eq $CAName) { $Ansible.Changed = $false; return }
+      $sec = ConvertTo-SecureString $Password -AsPlainText -Force
+      Install-AdcsCertificationAuthority -CAType EnterpriseRootCA `
+          -CertFile "C:\Windows\Temp\adcs-restore\x\ca\$CAName.p12" -CertFilePassword $sec `
+          -OverwriteExistingCAinDS -Force | Out-Null
+    parameters:
+      Password: "{{ dc_ca_backup_password }}"
+      CAName: "{{ dc_spec.ca_name }}"
+  no_log: true
+
+# Once only (marker file): restoring the database again later would roll back
+# anything issued since. reg import brings back the CRL/AIA URLs, validity and
+# CRL periods - the values certificates already in the wild point at.
+- name: Restore the CA database and registry configuration
+  become: true
+  become_method: ansible.builtin.runas
+  become_user: "{{ dc_ca_admin_user }}"
+  vars:
+    ansible_become_password: "{{ dc_ca_admin_password }}"
+  ansible.windows.win_powershell:
+    error_action: stop
+    script: |
+      $marker = "$env:windir\System32\CertLog\restored-from-backup.txt"
+      if (Test-Path $marker) { $Ansible.Changed = $false; return }
+      $x = 'C:\Windows\Temp\adcs-restore\x'
+      Stop-Service CertSvc
+      Restore-CARoleService -Path "$x\ca" -DatabaseOnly -Force
+      reg import "$x\ca-config.reg" 2>&1 | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw 'reg import of the CA configuration failed' }
+      Start-Service CertSvc
+      Set-Content -Path $marker -Value "Restored $(Get-Date -Format o) from {{ dc_ca_archive | basename }}"
+
+- name: Publish templates, CertEnroll files and a fresh CRL
+  become: true
+  become_method: ansible.builtin.runas
+  become_user: "{{ dc_ca_admin_user }}"
+  vars:
+    ansible_become_password: "{{ dc_ca_admin_password }}"
+  ansible.windows.win_powershell:
+    error_action: stop
+    script: |
+      $x = 'C:\Windows\Temp\adcs-restore\x'
+      # Exactly the backed-up list: setup publishes its own defaults (User,
+      # EFS, Administrator...) that were not offered before.
+      $want = @(Get-Content "$x\templates.txt" | Where-Object { $_ })
+      certutil -SetCATemplates ($want -join ',') | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw 'SetCATemplates failed' }
+      Expand-Archive -Path "$x\certenroll.zip" -DestinationPath C:\Windows\System32\CertSrv\CertEnroll -Force
+      certutil -crl | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw 'CRL publication failed' }
+
+# Same shape as before: Web Enrollment, CES and CEP with Kerberos auth on
+# ApplicationPoolIdentity, and the :443 binding on the CA's own certificate
+# (that is what the old dc1 used).
+- name: Reinstall Web Enrollment, CES and CEP
+  become: true
+  become_method: ansible.builtin.runas
+  become_user: "{{ dc_ca_admin_user }}"
+  vars:
+    ansible_become_password: "{{ dc_ca_admin_password }}"
+  ansible.windows.win_powershell:
+    error_action: stop
+    script: |
+      param([string]$CAName, [string]$Fqdn)
+      Import-Module WebAdministration
+      $thumb = (Get-ChildItem Cert:\LocalMachine\My | Where-Object {
+          $_.HasPrivateKey -and $_.GetNameInfo('SimpleName', $false) -eq $CAName } |
+          Sort-Object NotAfter | Select-Object -Last 1).Thumbprint
+      if (-not $thumb) { throw "no certificate with a key for $CAName in LocalMachine\My" }
+      $done = @()
+      if (-not (Get-WebApplication -Name CertSrv)) { Install-AdcsWebEnrollment -Force | Out-Null; $done += 'WebEnrollment' }
+      if (-not (Get-WebApplication -Name "$($CAName)_CES_Kerberos")) {
+          Install-AdcsEnrollmentWebService -ApplicationPoolIdentity -AuthenticationType Kerberos `
+              -CAConfig "$Fqdn\$CAName" -SSLCertThumbprint $thumb -Force | Out-Null
+          $done += 'CES'
+      }
+      if (-not (Get-WebApplication -Name 'ADPolicyProvider_CEP_Kerberos')) {
+          Install-AdcsEnrollmentPolicyWebService -AuthenticationType Kerberos -SSLCertThumbprint $thumb -Force | Out-Null
+          $done += 'CEP'
+      }
+      $Ansible.Changed = $done.Count -gt 0
+      $Ansible.Result = $done
+    parameters:
+      CAName: "{{ dc_spec.ca_name }}"
+      Fqdn: "{{ inventory_hostname }}"
+
+- name: Verify the CA is the same CA and is serving
+  ansible.windows.win_powershell:
+    error_action: stop
+    script: |
+      param([string]$CAName, [string]$Fqdn, [string]$Thumbprint)
+      $x = 'C:\Windows\Temp\adcs-restore\x'
+      $r = [ordered]@{}
+      $cfg = 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration'
+      $r.active = (Get-ItemProperty $cfg).Active
+      if ($r.active -ne $CAName) { throw "active CA is '$($r.active)', expected '$CAName'" }
+      certutil -config "$Fqdn\$CAName" -ping | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw 'certutil -ping: the CA is not answering' }
+      $r.ping = 'ok'
+      # The installed CA certificate must be the backed-up one: same thumbprint
+      # as recorded in Vault when the backup was taken.
+      $live = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.GetNameInfo('SimpleName', $false) -eq $CAName -and $_.HasPrivateKey }
+      $r.thumbprint = ($live | Sort-Object NotAfter | Select-Object -Last 1).Thumbprint
+      if ($r.thumbprint -ne $Thumbprint) { throw "CA certificate $($r.thumbprint) is not the backed-up $Thumbprint" }
+      $want = @(Get-Content "$x\templates.txt" | Where-Object { $_ } | Sort-Object)
+      $have = @(certutil -CATemplates | Where-Object { $_ -match ':' } | ForEach-Object { ($_ -split ':')[0].Trim() } | Sort-Object)
+      if (Compare-Object $want $have) { throw "templates differ: want [$($want -join ',')] have [$($have -join ',')]" }
+      $r.templates = $have -join ','
+      $r.issued_rows = (certutil -view -restrict 'Disposition=20' -out RequestID csv | Measure-Object).Count - 1
+      if ($r.issued_rows -lt 1) { throw 'restored database has no issued certificates' }
+      $crl = Invoke-WebRequest -UseBasicParsing "http://$Fqdn/CertEnroll/$CAName.crl"
+      if ($crl.StatusCode -ne 200) { throw "CRL over http returned $($crl.StatusCode)" }
+      $r.http_crl = 'ok'
+      $r.old_ca_keys = @((certutil -store my) | Select-String 'Key Container = ' |
+          Where-Object { $_.Line -notmatch [regex]::Escape($CAName) -and $_.Line -match 'CA' }).Count
+      $Ansible.Result = $r
+    parameters:
+      CAName: "{{ dc_spec.ca_name }}"
+      Fqdn: "{{ inventory_hostname }}"
+      Thumbprint: "{{ dc_ca_backup_thumbprint }}"
+  changed_when: false
+  register: dc_ca_verify
+
+- name: Report the restored CA
+  ansible.builtin.debug:
+    msg: "{{ dc_ca_verify.result }}"
+
+- name: Remove the staged backup from the DC
+  ansible.windows.win_file:
+    path: C:\Windows\Temp\adcs-restore
+    state: absent

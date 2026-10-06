@@ -101,6 +101,7 @@ domain_controller_specs:
     # hostname and restoring the CA keeps every consumer (Terraform AD CS
     # provider included) working unchanged.
     hosts_ca: true
+    ca_name: myrobertson-DC1-CA-1
     nics:
       - mac: BC:24:11:B2:81:26
         ip: 192.168.1.3

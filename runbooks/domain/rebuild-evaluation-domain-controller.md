@@ -138,23 +138,66 @@ If the demotion already ran, the old disk boots as a demoted member server.
 That is still useful for its data, but it is not a DC. A finished re-run is
 usually the better way forward.
 
-## dc1 and the CA (not codified yet)
+## dc1 and the CA
 
-dc1 hosts the Enterprise CA `myrobertson-DC1-CA-1` and its IIS enrolment
-services, and the playbook refuses it. Its config string is
-`dc1.myrobertson.net\myrobertson-DC1-CA-1`, so the plan is to rebuild **under
-the same hostname** and restore the CA there. Every consumer, including the
-Terraform AD CS provider, keeps working unchanged. Steps to codify:
+dc1 hosts **myrobertson-DC1-CA-1**, an Enterprise **Root** CA that signs Vault's
+`pki_int`, `pki_int_prod` and `pki_int_staging` intermediates. It is the root of
+the internal PKI. The rebuild handles it, but only with a fresh backup and its
+own confirmation flag:
 
-1. `certutil -backupDB` + `certutil -backupKey` + export
-   `HKLM\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration`, with the key
-   backup password and files escrowed off-box.
-2. Remove the CA role, then rebuild through this playbook.
-3. Install AD CS with the existing key (`Install-AdcsCertificationAuthority
-   -CertFile ... -KeyContainerName`), restore the database and registry, and
-   reinstall the web enrolment roles.
-4. Set `spec_verified: true` on dc1 only after checking its NICs against the
-   live guest.
+```sh
+ansible-playbook -i $INV ansible/domain/backup_adcs_ca.yml          # minutes before, every time
+ansible-playbook -i $INV ansible/domain/rebuild_domain_controller.yml \
+  -e dc_rebuild_target=dc1.myrobertson.net -e dc_rebuild_confirm=true -e dc_rebuild_ca_confirm=true
+```
+
+The preflight requires a `complete` Vault backup under 12 hours old, with its
+recorded CA thumbprint and its local archive present. On a resume it accepts an
+older backup, since that is the one taken before the CA was removed.
+
+**Backup** (`backup_adcs_ca.yml`, non-destructive): it publishes a fresh CRL, then
+backs up the database and key of the active CA. It also exports the OLD
+`myrobertson-DC1-CA` keys. That CA is still trusted in AD and NTAuth, and
+PowerShell cannot see its certificates; only certutil can. Every PFX is
+re-opened to prove its key is inside. The key material, registry config and
+template list go to Vault at `secret/windows/domain/adcs/<CA>/backup`. The full
+archive, database included, goes to `~/homelab-backups/adcs/` and to
+`kermit:/volume1/NetBackup/adcs-ca` (owner-only, newest 30 kept).
+
+**Removal** (`tasks/adcs_ca_remove.yml`, before demotion): unconfigures CES, CEP,
+Web Enrollment and the CA, then removes the role features, which demotion
+requires. AD objects are deliberately left in place.
+
+**The computer account is kept for a CA host.** The CDP container and Cert
+Publishers grant rights to DC1$'s SID, and rejoining under the same name reuses
+the account.
+
+**Restore** (`tasks/adcs_ca_restore.yml`, after the new DC verifies):
+- Re-imports the old CA keys.
+- Installs the Enterprise Root CA from the backed-up key with
+  `-OverwriteExistingCAinDS`.
+- Restores the database and registry config (once only, guarded by a marker
+  file), sets the exact template list, restores CertEnroll and publishes a CRL.
+- Reinstalls Web Enrollment, CES and CEP on the CA certificate.
+- Verifies that the thumbprint matches the backup, the CA answers `certutil
+  -ping`, the templates match, the database has rows and the CRL is served over
+  http.
+
+**Identities:** the AD CS steps run as **Administrator**, the only Enterprise
+Admin, from `secret/windows/domain/domain_admin` via runas. svc-ansible-win is
+only a Domain Admin.
+
+**Outage window:** from removal until the restore finishes (~2h), the CA issues
+nothing and `http://dc1/CertEnroll` is down. The LDAP CDP keeps serving the CRL
+the backup published, which is valid for 1 week.
+
+**If the restore fails:**
+- **Before the old disks are destroyed:** the final play only runs after
+  everything verifies, so the old disk is still on the VM as `unusedN`. Roll
+  back as above. The old disk has the CA role removed and is demoted, so re-run
+  the restore steps there by hand from the same archive.
+- **Otherwise:** fix the cause and resume with `-e dc_rebuild_resume=true`. The
+  restore steps are idempotent.
 
 ## Install details worth knowing
 

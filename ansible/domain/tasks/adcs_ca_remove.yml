@@ -1,0 +1,87 @@
+---
+# Remove the Enterprise CA role from a DC so it can be demoted. Included by
+# rebuild_domain_controller.yml for a spec with hosts_ca: true, AFTER the
+# preflight has proven a fresh, complete backup_adcs_ca.yml backup exists.
+#
+# This unconfigures the CA locally only. Uninstall-AdcsCertificationAuthority
+# does NOT delete the CA's objects in AD (Enrollment Services, AIA, CDP, NTAuth),
+# and that is what makes the restore under the same hostname work: the new
+# install re-attaches to them. The CA's keys stay in the machine store until the
+# disk is wiped - they are in the backup.
+#
+# From here until adcs_ca_restore.yml finishes, the CA issues nothing and
+# http://<host>/CertEnroll is down. The LDAP CDP still serves the CRL published
+# by the backup, which is valid for a week (CRLPeriod 1 week).
+#
+# Runs as an Enterprise Admin (dc_ca_admin_user) via runas: the only member of
+# Enterprise Admins is Administrator, and the WinRM identity is not one.
+
+- name: Read the live CA
+  ansible.windows.win_powershell:
+    script: |
+      $cfg = 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration'
+      $Ansible.Result = @{
+          active = "$((Get-ItemProperty $cfg -ErrorAction SilentlyContinue).Active)"
+          role_installed = [bool](Get-WindowsFeature ADCS-Cert-Authority).Installed
+      }
+  changed_when: false
+  register: dc_ca_live
+
+- name: Refuse if the live CA is not the one the spec and backup are for
+  ansible.builtin.assert:
+    that: >-
+      not dc_ca_live.result.role_installed | bool
+      or dc_ca_live.result.active in ['', dc_spec.ca_name]
+    fail_msg: >-
+      {{ inventory_hostname }} runs CA '{{ dc_ca_live.result.active }}' but the
+      spec (and the backup checked in preflight) are for '{{ dc_spec.ca_name }}'.
+
+# The web role services are best-effort: their configuration lives on the disk
+# that is about to be wiped, and removing the features below takes them out
+# regardless. The CA unconfigure itself must succeed.
+- name: Unconfigure the CA and its web services
+  become: true
+  become_method: ansible.builtin.runas
+  become_user: "{{ dc_ca_admin_user }}"
+  vars:
+    ansible_become_password: "{{ dc_ca_admin_password }}"
+  ansible.windows.win_powershell:
+    error_action: stop
+    script: |
+      $done = @()
+      foreach ($step in @(
+          @{ n = 'CES'; s = { Uninstall-AdcsEnrollmentWebService -AllEnrollmentServices -Force } },
+          @{ n = 'CEP'; s = { Uninstall-AdcsEnrollmentPolicyWebService -AllPolicyServers -Force } },
+          @{ n = 'WebEnrollment'; s = { Uninstall-AdcsWebEnrollment -Force } })) {
+          try { & $step.s | Out-Null; $done += $step.n } catch { $done += "$($step.n) skipped: $($_.Exception.Message)" }
+      }
+      $cfg = 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration'
+      if ((Get-ItemProperty $cfg -ErrorAction SilentlyContinue).Active) {
+          Uninstall-AdcsCertificationAuthority -Force | Out-Null
+          $done += 'CA unconfigured'
+      }
+      $Ansible.Changed = $done.Count -gt 0
+      $Ansible.Result = $done
+  when: dc_ca_live.result.role_installed | bool
+  register: dc_ca_unconfigured
+
+- name: Show what was unconfigured
+  ansible.builtin.debug:
+    msg: "{{ dc_ca_unconfigured.result | default('CA role already absent') }}"
+
+# Demotion refuses while the Certification Authority role service is installed,
+# so the features have to go too, not just the configuration.
+- name: Remove the AD CS role services
+  ansible.windows.win_feature:
+    name:
+      - ADCS-Enroll-Web-Pol
+      - ADCS-Enroll-Web-Svc
+      - ADCS-Web-Enrollment
+      - ADCS-Cert-Authority
+    state: absent
+  register: dc_ca_features_removed
+
+- name: Restart to finish removing the role
+  ansible.windows.win_reboot:
+    reboot_timeout: 1800
+  when: dc_ca_features_removed.reboot_required | default(false) | bool

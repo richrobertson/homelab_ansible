@@ -89,14 +89,67 @@
           nics against the live guest (Get-NetIPConfiguration) and qm config,
           then set spec_verified: true.
 
-    - name: Refuse the CA host until the CA backup/restore path is codified
-      ansible.builtin.assert:
-        that: not (dc_spec.hosts_ca | default(false) | bool)
-        fail_msg: >-
-          {{ dc_rebuild_target }} hosts the Enterprise CA. Rebuilding it needs a
-          CA backup (database + key + registry) and a restore onto the new build
-          under the same hostname, which this playbook does not do yet. See
-          runbooks/domain/rebuild-evaluation-domain-controller.md.
+    # A CA host is rebuilt with its CA removed first and restored afterwards
+    # (tasks/adcs_ca_remove.yml, tasks/adcs_ca_restore.yml), from a
+    # backup_adcs_ca.yml backup. This is the root of the internal PKI, so it
+    # takes its own confirmation and a FRESH backup, taken minutes before - not
+    # whatever happens to be in Vault.
+    - name: CA host - load and check the backup the restore will use
+      when: dc_spec.hosts_ca | default(false) | bool
+      block:
+        - name: CA host - require explicit confirmation
+          ansible.builtin.assert:
+            that: dc_rebuild_ca_confirm | default(false) | bool
+            fail_msg: >-
+              {{ dc_rebuild_target }} hosts the Enterprise Root CA
+              {{ dc_spec.ca_name }} (it signs every Vault PKI intermediate). Run
+              backup_adcs_ca.yml first, then add -e dc_rebuild_ca_confirm=true.
+          when: dc_rebuild_go | bool
+
+        - name: CA host - read the backup record from Vault
+          ansible.builtin.set_fact:
+            dc_ca_backup: >-
+              {{ lookup('community.hashi_vault.vault_kv2_get',
+                        'windows/domain/adcs/' ~ dc_spec.ca_name ~ '/backup',
+                        engine_mount_point='secret').secret }}
+          no_log: true
+
+        - name: CA host - work out the backup's age and archive path
+          ansible.builtin.set_fact:
+            dc_ca_backup_age_hours: >-
+              {{ ((now(utc=true) - (dc_ca_backup.stamp | to_datetime('%Y%m%dT%H%M%SZ'))).total_seconds() / 3600) | round(1) }}
+            dc_ca_archive: >-
+              {{ dc_rebuild_ca_backup_dir | default(lookup('ansible.builtin.env', 'HOME') ~ '/homelab-backups/adcs') }}/{{ dc_spec.ca_name }}-{{ dc_ca_backup.stamp }}.zip
+            dc_ca_backup_password: "{{ dc_ca_backup.password }}"
+            dc_ca_backup_thumbprint: "{{ dc_ca_backup.active_ca_thumbprint | default('') }}"
+          no_log: true
+
+        - name: CA host - look for the archive
+          ansible.builtin.stat:
+            path: "{{ dc_ca_archive }}"
+          register: dc_ca_archive_stat
+
+        # A resumed run legitimately uses a backup older than the window: it is
+        # the one taken before the CA was removed.
+        - name: CA host - the backup must be complete, recent, and on disk
+          ansible.builtin.assert:
+            that:
+              - dc_ca_backup.status == 'complete'
+              - dc_ca_backup_thumbprint | length == 40
+              - dc_ca_archive_stat.stat.exists
+              - dc_rebuild_resume | bool
+                or dc_ca_backup_age_hours | float <= dc_rebuild_ca_backup_max_age_hours | default(12) | float
+            fail_msg: >-
+              Backup for {{ dc_spec.ca_name }}: status={{ dc_ca_backup.status }},
+              age={{ dc_ca_backup_age_hours }}h, thumbprint recorded={{ dc_ca_backup_thumbprint | length == 40 }},
+              archive {{ dc_ca_archive }} present={{ dc_ca_archive_stat.stat.exists }}.
+              Run backup_adcs_ca.yml now and re-run.
+
+        - name: CA host - show the backup in use
+          ansible.builtin.debug:
+            msg: >-
+              Using backup {{ dc_ca_backup.stamp }} ({{ dc_ca_backup_age_hours }}h old),
+              CA thumbprint {{ dc_ca_backup_thumbprint }}, archive {{ dc_ca_archive }}.
 
     - name: Refuse the DHCP primary
       ansible.builtin.assert:
@@ -292,6 +345,37 @@
           $Ansible.Changed = $rel.Count -gt 0
           $Ansible.Result = @($rel | ForEach-Object Name)
 
+- name: AD CS - remove the CA so the DC can be demoted
+  hosts: dc_rebuild_old
+  gather_facts: false
+  vars:
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+    dc_ca_archive: "{{ hostvars['localhost'].dc_ca_archive }}"
+    dc_ca_backup_password: "{{ hostvars['localhost'].dc_ca_backup_password }}"
+    dc_ca_backup_thumbprint: "{{ hostvars['localhost'].dc_ca_backup_thumbprint }}"
+    # Enterprise Admins has one member, Administrator; the WinRM identity
+    # (svc-ansible-win) is only a Domain Admin. Enterprise CA setup wants EA.
+    dc_ca_admin_user: MYROBERTSON\Administrator
+    dc_ca_admin_password: >-
+      {{ lookup('community.hashi_vault.vault_kv2_get', 'windows/domain/domain_admin',
+                engine_mount_point='secret').secret.password }}
+    dc_rebuild_skip_demote: false
+  tasks:
+    - name: Skip unless confirmed, a CA host, and not resuming
+      ansible.builtin.meta: end_play
+      when: >-
+        not hostvars['localhost'].dc_rebuild_go | bool
+        or hostvars['localhost'].dc_rebuild_resume_mode | bool
+        or not dc_spec.hosts_ca | default(false) | bool
+        or dc_rebuild_skip_demote | bool
+
+    - name: Wait for the target to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 3900
+
+    - name: Remove the CA role
+      ansible.builtin.include_tasks: tasks/adcs_ca_remove.yml
+
 - name: Demote the target gracefully
   hosts: dc_rebuild_old
   gather_facts: false
@@ -415,8 +499,16 @@
               Remove-ADObject -Identity $server -Recursive -Confirm:$false
               $removed += "server:$($server.DistinguishedName)"
           }
+          # A CA host KEEPS its computer account. The CA's AD objects (the
+          # CN=<host> CDP container, its CRL entries) and Cert Publishers grant
+          # rights to that account's SID. The rebuild joins under the same name,
+          # which reuses the existing account and SID, so those grants carry
+          # over. Deleting it would leave the restored CA unable to publish its
+          # CRL to LDAP.
+          $keepComputer = ${{ 'true' if dc_spec.hosts_ca | default(false) | bool else 'false' }}
           $computer = Get-ADComputer -Filter "Name -eq '$name'" -Properties 'msDS-KrbTgtLink'
-          if ($computer) {
+          if ($computer -and $keepComputer) { $removed += "computer KEPT (CA host): $($computer.DistinguishedName)" }
+          elseif ($computer) {
               $krbtgt = $computer.'msDS-KrbTgtLink'
               Set-ADObject -Identity $computer -ProtectedFromAccidentalDeletion $false
               Remove-ADObject -Identity $computer -Recursive -Confirm:$false
@@ -688,6 +780,30 @@
           days left and {{ dc_rebuild_verify.result.rearms_left }} rearm(s).
           Next: fix_dc_time_drift_windows.yml, configure_windows_winrm.yml,
           ansible/proxmox/guest_fstrim.yml, ansible/synology/configure_windows_activebackup_agent.yml.
+
+- name: AD CS - restore the CA onto the rebuilt DC
+  hosts: dc_rebuild_old
+  gather_facts: false
+  vars:
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+    dc_ca_archive: "{{ hostvars['localhost'].dc_ca_archive }}"
+    dc_ca_backup_password: "{{ hostvars['localhost'].dc_ca_backup_password }}"
+    dc_ca_backup_thumbprint: "{{ hostvars['localhost'].dc_ca_backup_thumbprint }}"
+    # Enterprise Admins has one member, Administrator; the WinRM identity
+    # (svc-ansible-win) is only a Domain Admin. Enterprise CA setup wants EA.
+    dc_ca_admin_user: MYROBERTSON\Administrator
+    dc_ca_admin_password: >-
+      {{ lookup('community.hashi_vault.vault_kv2_get', 'windows/domain/domain_admin',
+                engine_mount_point='secret').secret.password }}
+  tasks:
+    - name: Skip unless confirmed and a CA host
+      ansible.builtin.meta: end_play
+      when: >-
+        not hostvars['localhost'].dc_rebuild_go | bool
+        or not dc_spec.hosts_ca | default(false) | bool
+
+    - name: Restore the CA
+      ansible.builtin.include_tasks: tasks/adcs_ca_restore.yml
 
 - name: DHCP - make the rebuilt partner a working DHCP server
   hosts: dc_rebuild_old
