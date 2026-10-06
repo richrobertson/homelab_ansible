@@ -1,0 +1,99 @@
+---
+# Rearm the Windows Server EVALUATION licence on domain controllers before it
+# expires, and say clearly when a DC has run out of rearms and must be rebuilt.
+#
+# There are no Windows Server licences; every DC runs evaluation media. An
+# expired evaluation shuts Windows down every 60 minutes, which is what dc1 and
+# dns01 did from 2026-09-29. The lifecycle is:
+#
+#   evaluation window (~180 days) -> rearm (resets the window) -> ... ->
+#   rearms exhausted -> rebuild_domain_controller.yml on fresh media
+#
+# This playbook is the "rearm" step. It always reports every DC's remaining
+# days and rearms; it only rearms a DC that is inside dc_rearm_threshold_days of
+# expiry, and only with -e dc_rearm_confirm=true. A rearm needs a reboot, so it
+# runs one DC at a time and reboots from INSIDE the guest (win_reboot). Never
+# use `qm shutdown`/`qm reboot` for this: on an HA resource that becomes an HA
+# stop.
+#
+# Rearming early wastes nothing except the remaining days of the current
+# window, which is why the default threshold is short.
+#
+# Run:
+#   ansible-playbook -i inventory/environments/production.ini \
+#     ansible/domain/rearm_domain_controller_eval.yml                 # report
+#   ansible-playbook ... -e dc_rearm_confirm=true                      # rearm due DCs
+- name: Report and rearm Windows evaluation licences on domain controllers
+  hosts: domain_controllers_all_windows
+  gather_facts: false
+  serial: 1
+  vars:
+    dc_rearm_confirm: false
+    dc_rearm_threshold_days: 21
+  tasks:
+    - name: Read the evaluation licence state
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $lic = Get-CimInstance SoftwareLicensingProduct `
+              -Filter "PartialProductKey IS NOT NULL AND Name LIKE 'Windows%'"
+          $Ansible.Result = @{
+              description = $lic.Description
+              license_status = [int]$lic.LicenseStatus
+              days_left = [math]::Floor($lic.GracePeriodRemaining / 1440)
+              rearms_left = [int]$lic.RemainingSkuReArmCount
+          }
+      changed_when: false
+      register: dc_rearm_state
+
+    - name: Summarise
+      ansible.builtin.set_fact:
+        dc_rearm_is_eval: "{{ 'TIMEBASED_EVAL' in dc_rearm_state.result.description }}"
+        dc_rearm_days_left: "{{ dc_rearm_state.result.days_left | int }}"
+        dc_rearm_rearms_left: "{{ dc_rearm_state.result.rearms_left | int }}"
+        # LicenseStatus 1 = Licensed (inside the window). Anything else on an
+        # evaluation - typically 5, Notification - means it has expired.
+        dc_rearm_expired: "{{ dc_rearm_state.result.license_status | int != 1 }}"
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: {{ 'EXPIRED' if dc_rearm_expired | bool else 'licensed' }},
+          {{ dc_rearm_days_left }} day(s) left, {{ dc_rearm_rearms_left }} rearm(s) left
+          ({{ dc_rearm_state.result.description }})
+
+    - name: Fail loudly when a DC is due but has no rearms left
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} has {{ dc_rearm_days_left }} day(s) left and NO
+          rearms. Rebuild it: rebuild_domain_controller.yml
+          -e dc_rebuild_target={{ inventory_hostname }}
+      when:
+        - dc_rearm_is_eval | bool
+        - dc_rearm_expired | bool or dc_rearm_days_left | int <= dc_rearm_threshold_days | int
+        - dc_rearm_rearms_left | int == 0
+
+    - name: Rearm
+      ansible.windows.win_command: cscript //nologo C:\Windows\System32\slmgr.vbs /rearm
+      when:
+        - dc_rearm_confirm | bool
+        - dc_rearm_is_eval | bool
+        - dc_rearm_expired | bool or dc_rearm_days_left | int <= dc_rearm_threshold_days | int
+        - dc_rearm_rearms_left | int > 0
+      register: dc_rearm_done
+
+    - name: Reboot to apply the rearm
+      ansible.windows.win_reboot:
+        reboot_timeout: 1800
+      when: dc_rearm_done is changed
+
+    - name: Confirm the new window
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $lic = Get-CimInstance SoftwareLicensingProduct `
+              -Filter "PartialProductKey IS NOT NULL AND Name LIKE 'Windows%'"
+          if ($lic.LicenseStatus -ne 1) { throw "Still not licensed after rearm: status $($lic.LicenseStatus)" }
+          $Ansible.Result = "$([math]::Floor($lic.GracePeriodRemaining / 1440)) days, $($lic.RemainingSkuReArmCount) rearm(s) left"
+      changed_when: false
+      when: dc_rearm_done is changed

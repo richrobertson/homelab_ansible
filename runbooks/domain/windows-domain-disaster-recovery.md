@@ -57,6 +57,12 @@ failover state, last known good time, and the ABB recovery point for each host.
 
 ## 2. Recover one failed domain controller when another survives
 
+This is codified: `ansible/domain/rebuild_domain_controller.yml` rebuilds a DC
+in place on fresh evaluation media from `vars/domain_controller_specs.yml`. Add
+`-e dc_rebuild_skip_demote=true` for a DC that is dead rather than expired. See
+[rebuild-evaluation-domain-controller.md](rebuild-evaluation-domain-controller.md).
+The steps below are what it automates.
+
 Preferred path:
 
 1. Seize FSMO roles only if the failed holder will not return.
