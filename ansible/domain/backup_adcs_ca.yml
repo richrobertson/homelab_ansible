@@ -1,0 +1,225 @@
+---
+# Back up the Enterprise Root CA on dc1 - keys, certificates, database, config -
+# so dc1 can be rebuilt (rebuild_domain_controller.yml) and the CA restored
+# onto the new build under the same hostname. Non-destructive: safe to run any
+# time, and worth running routinely.
+#
+# WHY IT MATTERS. myrobertson-DC1-CA-1 is the root of the whole internal PKI:
+# Vault's pki_int, pki_int_prod and pki_int_staging intermediates are all signed
+# by it (checked 2026-10-06), so every Vault-issued certificate chains here. Its
+# key exists only on dc1. Losing it means re-issuing every intermediate and
+# everything below them.
+#
+# WHAT IS BACKED UP
+#   - The ACTIVE CA (myrobertson-DC1-CA-1): Backup-CARoleService = database +
+#     every certificate/key of that CA, one password-protected PFX.
+#   - The OLD CA (myrobertson-DC1-CA): uninstalled long ago but still a trusted
+#     root in AD and NTAuth with certificates valid to 2030/2035, and its keys
+#     (containers myrobertson-DC1-CA, (1), (2), (3)) sit only on dc1. Exported
+#     too, so it can still sign a CRL if anything issued by it ever matters.
+#   - HKLM\...\CertSvc\Configuration\<CA> (CRL/AIA URLs, validity, CRL periods),
+#     the published template list, and the CertEnroll folder (published CRT/CRL
+#     files served over http://dc1.myrobertson.net/CertEnroll).
+#
+# WHERE IT GOES
+#   - Vault secret/windows/domain/adcs/<CA>/backup: the PFX password, the PFXs
+#     (base64), the registry export, the template list. Small, and these are the
+#     parts that cannot be recreated. The password is written FIRST.
+#   - adcs_backup_local_dir on the controller: the full archive including the
+#     database (~19 MB on 2026-10-06; too big for a Vault entry). The nightly
+#     PBS backup of VM 1002 is a second copy of the database.
+#
+# A fresh CRL is published first, so the published CRL has its full validity
+# (1 week) ahead of any rebuild window.
+#
+# Run:
+#   ansible-playbook -i inventory/environments/production.ini ansible/domain/backup_adcs_ca.yml
+- name: Back up the Enterprise CA
+  hosts: "{{ adcs_backup_host | default('dc1.myrobertson.net') }}"
+  gather_facts: false
+  vars:
+    adcs_backup_local_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/homelab-backups/adcs"
+    adcs_backup_vault_mount: secret
+    adcs_backup_stamp: "{{ now(utc=true).strftime('%Y%m%dT%H%M%SZ') }}"
+    adcs_backup_remote_dir: C:\Windows\Temp\adcs-backup-{{ adcs_backup_stamp }}
+  tasks:
+    - name: Pin the timestamp for the whole run
+      ansible.builtin.set_fact:
+        adcs_backup_stamp: "{{ adcs_backup_stamp }}"
+        adcs_backup_remote_dir: "{{ adcs_backup_remote_dir }}"
+
+    # Enumerated with certutil, NOT Cert:\LocalMachine\My. On dc1 the PowerShell
+    # certificate provider lists 3 certificates in My while `certutil -store my`
+    # lists 9 - the five old-CA certificates are invisible to PowerShell, and an
+    # earlier version of this play backed up "0 old CA keys" as a result.
+    # A CA's key container is named after the CA ("<CA>" or "<CA>(n)"), so: any
+    # certificate whose key container starts with its own CN, other than the
+    # active CA, is an old CA key worth keeping.
+    - name: Identify the active CA and every old CA certificate that still has a key
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $cfg = 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration'
+          $active = (Get-ItemProperty $cfg).Active
+          $text = (certutil -store my) -join "`n"
+          $others = foreach ($b in ($text -split '================ Certificate \d+ ================')) {
+              $cn = [regex]::Match($b, '(?m)^Subject: CN=([^,\n]+)').Groups[1].Value.Trim()
+              $serial = [regex]::Match($b, '(?m)^Serial Number: ([0-9a-fA-F]+)').Groups[1].Value
+              $container = [regex]::Match($b, 'Key Container = (.+)').Groups[1].Value.Trim()
+              $notAfter = [regex]::Match($b, '(?m)^ NotAfter: (.+)').Groups[1].Value.Trim()
+              if ($cn -and $serial -and $container -and $cn -ne $active -and $container.StartsWith($cn)) {
+                  @{ serial = $serial; name = $cn; container = $container; not_after = $notAfter }
+              }
+          }
+          $Ansible.Result = @{ active = $active; others = @($others) }
+      changed_when: false
+      register: adcs_backup_inventory
+
+    - name: Show the old CA keys found
+      ansible.builtin.debug:
+        msg: "{{ adcs_backup_inventory.result.others | map(attribute='container') | list }}"
+
+    - name: Generate the PFX password
+      ansible.builtin.set_fact:
+        adcs_backup_password: "{{ lookup('ansible.builtin.password', '/dev/null', chars=['ascii_letters', 'digits'], length=32) }}"
+      no_log: true
+
+    - name: Escrow the PFX password in Vault before using it
+      community.hashi_vault.vault_kv2_write:
+        engine_mount_point: "{{ adcs_backup_vault_mount }}"
+        path: "windows/domain/adcs/{{ adcs_backup_inventory.result.active }}/backup"
+        data:
+          password: "{{ adcs_backup_password }}"
+          stamp: "{{ adcs_backup_stamp }}"
+          status: in-progress
+      delegate_to: localhost
+      no_log: true
+
+    # become/runas is required. Over a plain WinRM (network) logon the KEY backup
+    # works but the DATABASE backup fails with E_ACCESSDENIED (0x80070005) - the
+    # CA's backup interface rejects that logon type. A runas logon of the same
+    # Domain Admin backs up both (verified 2026-10-06).
+    - name: Publish a fresh CRL, then back up the active CA, the old CA keys and the config
+      become: true
+      become_method: ansible.builtin.runas
+      become_user: "{{ ansible_user }}"
+      vars:
+        ansible_become_password: "{{ ansible_password }}"
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          param([string]$Password)
+          $dir = '{{ adcs_backup_remote_dir }}'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          certutil -crl | Out-Null
+          $sec = ConvertTo-SecureString $Password -AsPlainText -Force
+          # Database + all certs/keys of the active CA. Writes <CA>.p12 + DataBase\.
+          Backup-CARoleService -Path "$dir\ca" -Password $sec -Force
+          $exported = @()
+          {% for c in adcs_backup_inventory.result.others %}
+          certutil -f -p $Password -exportPFX my {{ c.serial }} "$dir\old-{{ c.serial }}.pfx" NoChain,NoRoot | Out-Null
+          if (-not (Test-Path "$dir\old-{{ c.serial }}.pfx")) { throw 'export failed for old CA cert {{ c.serial }} ({{ c.container }})' }
+          $exported += '{{ c.serial }}'
+          {% endfor %}
+          $active = '{{ adcs_backup_inventory.result.active }}'
+          reg export "HKLM\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$active" "$dir\ca-config.reg" /y | Out-Null
+          (certutil -CATemplates | Where-Object { $_ -match ':' } | ForEach-Object { ($_ -split ':')[0].Trim() }) |
+              Set-Content "$dir\templates.txt"
+          Compress-Archive -Path C:\Windows\System32\CertSrv\CertEnroll\* -DestinationPath "$dir\certenroll.zip" -Force
+          Compress-Archive -Path "$dir\*" -DestinationPath "$dir.zip" -Force
+          # What goes to Vault, keyed by a Vault-safe field name.
+          $vault = @(
+              @{ key = 'active_ca_p12'; path = "ca\$active.p12" },
+              @{ key = 'ca_config_reg'; path = 'ca-config.reg' },
+              @{ key = 'templates_txt'; path = 'templates.txt' }
+          ) + @($exported | ForEach-Object { @{ key = "old_ca_$($_)_pfx"; path = "old-$($_).pfx" } })
+          $Ansible.Result = @{ exported_old = $exported; vault_files = $vault }
+        parameters:
+          Password: "{{ adcs_backup_password }}"
+      register: adcs_backup_made
+      no_log: true
+
+    # Proof, not assumption: re-open every PFX with the password and confirm the
+    # private key is in it. A PFX without its key is a certificate, not a backup.
+    - name: Verify every PFX opens and carries its private key
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          param([string]$Password)
+          $dir = '{{ adcs_backup_remote_dir }}'
+          $out = @()
+          foreach ($f in Get-ChildItem $dir -Recurse -Include *.p12, *.pfx) {
+              $col = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+              $col.Import($f.FullName, $Password, 'EphemeralKeySet')
+              foreach ($c in $col) {
+                  if (-not $c.HasPrivateKey) { throw "$($f.Name): $($c.Subject) has NO private key" }
+                  $out += "$($f.Name): $($c.GetNameInfo('SimpleName', $false)) $($c.NotAfter.ToString('yyyy-MM-dd')) key=yes"
+              }
+          }
+          if (-not (Test-Path "$dir\ca\DataBase\*.edb")) { throw 'database missing from backup' }
+          $Ansible.Result = $out
+        parameters:
+          Password: "{{ adcs_backup_password }}"
+      changed_when: false
+      register: adcs_backup_verified
+      no_log: true
+
+    - name: Show what was verified
+      ansible.builtin.debug:
+        msg: "{{ adcs_backup_verified.result }}"
+
+    - name: Read the key material back for Vault
+      ansible.builtin.slurp:
+        src: "{{ adcs_backup_remote_dir }}\\{{ item.path }}"
+      loop: "{{ adcs_backup_made.result.vault_files }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: adcs_backup_slurp
+      no_log: true
+
+    - name: Store the key material in Vault
+      community.hashi_vault.vault_kv2_write:
+        engine_mount_point: "{{ adcs_backup_vault_mount }}"
+        path: "windows/domain/adcs/{{ adcs_backup_inventory.result.active }}/backup"
+        data: >-
+          {{ {'password': adcs_backup_password, 'stamp': adcs_backup_stamp, 'status': 'complete',
+              'host': inventory_hostname, 'old_ca': adcs_backup_inventory.result.others | to_json}
+             | combine(dict(adcs_backup_slurp.results | map(attribute='item.key')
+                            | zip(adcs_backup_slurp.results | map(attribute='content')))) }}
+      delegate_to: localhost
+      no_log: true
+
+    - name: Make the local archive directory
+      ansible.builtin.file:
+        path: "{{ adcs_backup_local_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Fetch the full archive, database included
+      ansible.builtin.fetch:
+        src: "{{ adcs_backup_remote_dir }}.zip"
+        dest: "{{ adcs_backup_local_dir }}/{{ adcs_backup_inventory.result.active }}-{{ adcs_backup_stamp }}.zip"
+        flat: true
+
+    - name: Lock down the local archive (it holds encrypted private keys)
+      ansible.builtin.file:
+        path: "{{ adcs_backup_local_dir }}/{{ adcs_backup_inventory.result.active }}-{{ adcs_backup_stamp }}.zip"
+        mode: "0600"
+      delegate_to: localhost
+
+    - name: Remove the staging copy from the CA host
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ adcs_backup_remote_dir }}"
+        - "{{ adcs_backup_remote_dir }}.zip"
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          Backed up {{ adcs_backup_inventory.result.active }} plus
+          {{ adcs_backup_inventory.result.others | length }} old CA key(s). Vault:
+          {{ adcs_backup_vault_mount }}/windows/domain/adcs/{{ adcs_backup_inventory.result.active }}/backup.
+          Archive: {{ adcs_backup_local_dir }}/{{ adcs_backup_inventory.result.active }}-{{ adcs_backup_stamp }}.zip
