@@ -686,9 +686,111 @@
           {{ inventory_hostname }} rebuilt. Evaluation has
           {{ (dc_rebuild_verify.result.grace_minutes_left | int / 1440) | round(0) | int }}
           days left and {{ dc_rebuild_verify.result.rearms_left }} rearm(s).
-          Next: configure_windows_dhcp_ha.yml (if a DHCP partner),
-          fix_dc_time_drift_windows.yml, configure_windows_winrm.yml,
+          Next: fix_dc_time_drift_windows.yml, configure_windows_winrm.yml,
           ansible/proxmox/guest_fstrim.yml, ansible/synology/configure_windows_activebackup_agent.yml.
+
+- name: DHCP - make the rebuilt partner a working DHCP server
+  hosts: dc_rebuild_old
+  gather_facts: false
+  tasks:
+    - name: Skip unless confirmed and the target is the DHCP partner
+      ansible.builtin.meta: end_play
+      when: >-
+        not hostvars['localhost'].dc_rebuild_go | bool
+        or inventory_hostname not in groups['dhcp_partner_windows'] | default([])
+
+    # The post-install step Server Manager nags about: create the DHCP
+    # Administrators/Users groups and mark the role configured. Without it the
+    # service runs but the console keeps flagging an incomplete install.
+    - name: Complete the DHCP role's post-install configuration
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $key = 'HKLM:\SOFTWARE\Microsoft\ServerManager\Roles\12'
+          if ((Get-ItemProperty $key -ErrorAction SilentlyContinue).ConfigurationState -eq 2) { $Ansible.Changed = $false; return }
+          Add-DhcpServerSecurityGroup
+          Set-ItemProperty -Path $key -Name ConfigurationState -Value 2 -Force
+          Restart-Service DHCPServer
+
+- name: DHCP - re-create failover with the rebuilt partner
+  hosts: dhcp_primary_windows
+  gather_facts: false
+  vars:
+    dc_rebuild_target: "{{ hostvars['localhost'].dc_rebuild_target }}"
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+    dhcp_failover_secret: >-
+      {{ lookup('community.hashi_vault.vault_kv2_get', domain_controller_dhcp_failover.vault_path,
+                engine_mount_point='secret').secret[domain_controller_dhcp_failover.vault_field] }}
+  vars_files:
+    - vars/domain_controller_specs.yml
+  tasks:
+    - name: Skip unless confirmed and the target is the DHCP partner
+      ansible.builtin.meta: end_play
+      when: >-
+        not hostvars['localhost'].dc_rebuild_go | bool
+        or dc_rebuild_target not in groups['dhcp_partner_windows'] | default([])
+
+    # A rebuilt server must be authorised under its CURRENT address. dns01 was
+    # still authorised as 192.168.1.244 on 2026-10-06, months after it moved to
+    # .101 - an unauthorised Windows DHCP server refuses to hand out leases.
+    - name: Authorise the partner in AD under its current address only
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $name = '{{ dc_rebuild_target }}'
+          $ip = '{{ dc_spec.nics[0].ip }}'
+          $changed = $false
+          foreach ($stale in @(Get-DhcpServerInDC | Where-Object { $_.DnsName -eq $name -and "$($_.IPAddress)" -ne $ip })) {
+              Remove-DhcpServerInDC -DnsName $stale.DnsName -IPAddress $stale.IPAddress
+              $changed = $true
+          }
+          if (-not (Get-DhcpServerInDC | Where-Object { $_.DnsName -eq $name -and "$($_.IPAddress)" -eq $ip })) {
+              Add-DhcpServerInDC -DnsName $name -IPAddress $ip
+              $changed = $true
+          }
+          $Ansible.Changed = $changed
+
+    # become/runas is required. Add-DhcpServerv4Failover configures the PARTNER
+    # over RPC with the caller's credentials, and a plain WinRM (NTLM) session
+    # cannot pass them on - the second hop fails as "Failed to get version of
+    # the DHCP server dns01..." even though the service and firewall are fine.
+    # A runas logon holds real credentials and can make that hop.
+    - name: Create the failover relationship over every scope on the primary
+      become: true
+      become_method: ansible.builtin.runas
+      become_user: "{{ ansible_user }}"
+      vars:
+        ansible_become_password: "{{ ansible_password }}"
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          $name = '{{ inventory_hostname }}-{{ dc_rebuild_target }}'
+          if (Get-DhcpServerv4Failover -Name $name -ErrorAction SilentlyContinue) { $Ansible.Changed = $false; return }
+          $params = @{
+              Name                = $name
+              PartnerServer       = '{{ dc_rebuild_target }}'
+              ScopeId             = @(Get-DhcpServerv4Scope | ForEach-Object ScopeId)
+              SharedSecret        = {{ dhcp_failover_secret | to_json }}
+              ServerRole          = '{{ domain_controller_dhcp_failover.server_role }}'
+              ReservePercent      = {{ domain_controller_dhcp_failover.reserve_percent }}
+              MaxClientLeadTime   = '{{ domain_controller_dhcp_failover.max_client_lead_time }}'
+              AutoStateTransition = ${{ domain_controller_dhcp_failover.auto_state_transition | bool | lower }}
+              StateSwitchInterval = '{{ domain_controller_dhcp_failover.state_switch_interval }}'
+          }
+          # -Force: the cmdlet otherwise asks for confirmation, which fails in a
+          # non-interactive session ("PowerShell is in NonInteractive mode").
+          Add-DhcpServerv4Failover @params -Force
+      no_log: true
+
+    - name: Wait for the relationship to reach NORMAL
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Result = (Get-DhcpServerv4Failover -Name '{{ inventory_hostname }}-{{ dc_rebuild_target }}').State.ToString()
+      changed_when: false
+      register: dhcp_rebuild_failover_state
+      until: dhcp_rebuild_failover_state.result | upper == 'NORMAL'
+      retries: 20
+      delay: 15
 
 - name: Destroy the detached old disks
   hosts: dc_rebuild_node

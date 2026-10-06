@@ -40,6 +40,20 @@ domain_controller_virtio_iso: local:iso/virtio-win-stable.iso
 # Driver folder inside the virtio-win ISO for this Windows build.
 domain_controller_virtio_os_dir: 2k25
 
+# DHCP failover between dhcp_primary_windows and dhcp_partner_windows, as
+# re-created after a partner rebuild. Values are the live relationship's, as
+# recorded in runbooks/domain/dhcp_failover_repair.txt: hot standby with the
+# primary Active, 5% reserve, every scope on the primary. The shared secret is
+# read from Vault at runtime, never stored here.
+domain_controller_dhcp_failover:
+  server_role: Active
+  reserve_percent: 5
+  max_client_lead_time: "01:00:00"
+  auto_state_transition: true
+  state_switch_interval: "01:00:00"
+  vault_path: windows/domain/dhcp_failover
+  vault_field: shared_secret
+
 domain_controller_specs:
   dns01.myrobertson.net:
     computer_name: DNS01

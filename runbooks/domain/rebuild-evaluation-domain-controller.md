@@ -1,8 +1,9 @@
 # Domain controllers as cattle: rearm and rebuild on evaluation media
 
 There are no Windows Server licences. Every domain controller runs **Windows
-Server Evaluation**, which gives about 180 days per window and a fixed number of
-rearms. An expired evaluation **shuts Windows down every 60 minutes** and HA
+Server Evaluation**. A fresh Server 2025 evaluation install gives **180 days and
+1 rearm**, so roughly a year per build (measured on the dns01 rebuild,
+2026-10-06). An expired evaluation **shuts Windows down every 60 minutes** and HA
 starts it again, indefinitely. dc1 and dns01 did that from 2026-09-29.
 
 So no DC is precious. Each one is declared in code, its evaluation is rearmed
@@ -69,13 +70,32 @@ removes the DHCP failover relationship if the target is the partner -> demotes
 the DC -> deletes its computer object from a survivor -> HA-stops the VM,
 detaches its disks and creates blank ones -> boots the evaluation ISO with a
 rendered autounattend -> waits for WinRM -> installs roles and promotes ->
-verifies SYSVOL/NETLOGON, site and RODC flag -> destroys the old disks.
+verifies SYSVOL/NETLOGON, site and RODC flag -> for the DHCP partner,
+re-authorises it under its current IP and re-creates the failover relationship
+(hot standby, every scope, NORMAL checked) -> destroys the old disks.
+
+The first dns01 rebuild took about 1h45 end to end: Setup ~45 minutes, plus
+~12 minutes of demotion pre-checks.
+
+### Resuming a run that stopped
+
+If a run stops after the reimage (laptop closed, a failure during promotion),
+do NOT re-run it plainly. The preflight refuses because the old disks are still
+`unusedN`, and new passwords would not match the install. Resume instead:
+
+```sh
+ansible-playbook -i $INV ansible/domain/rebuild_domain_controller.yml \
+  -e dc_rebuild_target=dns01.myrobertson.net -e dc_rebuild_confirm=true -e dc_rebuild_resume=true
+```
+
+This reads the passwords back from Vault, skips everything up to and including
+the reimage, and skips promotion if the domain already lists the DC. Re-running
+it when nothing is left to do changes nothing on the servers.
 
 Afterwards, run the playbooks that configure a DC once it exists. The final
 message lists them:
 
 ```sh
-ansible-playbook -i $INV ansible/domain/configure_windows_dhcp_ha.yml      # DHCP partner only
 ansible-playbook -i $INV ansible/domain/fix_dc_time_drift_windows.yml
 ansible-playbook -i $INV ansible/domain/configure_windows_winrm.yml
 ansible-playbook -i $INV ansible/proxmox/guest_fstrim.yml
@@ -154,3 +174,24 @@ Terraform AD CS provider, keeps working unchanged. Steps to codify:
 - **dns01's second gateway:** the old build had a default gateway on
   192.168.88.1 as well. The spec drops it, because a DC with two default routes
   picks its reply path by metric.
+
+## Lessons from the first real run (dns01, 2026-10-06)
+
+Each of these is fixed in the code. They are written down so nobody "simplifies"
+the fix away.
+
+- **Demotion vs the hourly shutdown:** the demotion's pre-checks took ~12 minutes
+  (an ~11 s DNS timeout per reverse zone) and finished one minute before the
+  expired evaluation shut down. The play now waits for the hourly restart if
+  the guest has been up more than 30 minutes.
+- **Never reboot through the bootstrap identity after promotion:** promotion
+  deletes local accounts, so `reboot: true` on the promote step can never log
+  back in. The playbook fires `shutdown /r` instead and reconnects as the domain
+  identity.
+- **Guest agent:** `qemu-ga` alone never starts without the virtio-serial
+  driver. bootstrap.ps1 installs `virtio-win-gt-x64.msi` first.
+- **DHCP failover needs runas and `-Force`:** a WinRM session cannot reach the
+  partner's DHCP RPC (double hop: "Failed to get version of the DHCP server"),
+  and the cmdlet prompts for confirmation.
+- **Stale DHCP authorisation:** dns01 was still authorised in AD as .244,
+  months after moving to .101. The play removes stale entries for the name.
