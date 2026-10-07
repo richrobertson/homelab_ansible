@@ -56,12 +56,18 @@
             outdated_after: 30
             read_threads: 1
             verify_threads: 2
-          - id: verify-pbs-b2-monthly
-            schedule: "Sun *-1..7 09:30"
-            comment: Monthly full verify for the primary S3-compatible datastore
-            ignore_verified: false
-            read_threads: 1
-            verify_threads: 2
+          # NO monthly full verify on B2 (removed 2026-10-07). It re-read the
+          # whole datastore through B2 at ~3.8 MiB/s: 38.6 h on 2026-10-04, so
+          # it overlapped the next daily verify, B2 body-read drops jumped from
+          # ~20/day to 124 ("error reading a body from connection" - transport,
+          # 0 bad chunks), 10 good snapshots were marked failed, and the
+          # failed-snapshot sweep (pbs_verify_failed_sweep.yml) deferred two
+          # evenings running because a verify was still active. It was also
+          # redundant: the daily job's outdated_after: 30 re-verifies every
+          # snapshot whose last check is over 30 days old, spread over the
+          # month instead of in one pass. This playbook removes the job from
+          # PBS because it is no longer listed. AWS (pbs-s3) keeps its monthly
+          # job - that endpoint does not drop connections.
 
   tasks:
     - name: Build managed datastore and job lists
