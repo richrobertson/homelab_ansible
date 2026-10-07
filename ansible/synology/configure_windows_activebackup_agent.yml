@@ -137,6 +137,18 @@
               }
           }
           if ($confirmLine -lt 0) {
+              # Re-attach, not first enrollment: a host Kermit already knows -
+              # e.g. a DC rebuilt in place, whose VM keeps its SMBIOS UUID and
+              # so its device_uuid - authenticates with "auth" ->
+              # auth_by_token and goes straight to long_poll, with no
+              # confirm_auth at all (dc1, 2026-10-06). That is a working
+              # enrollment; anything else is still a failure.
+              $text = $lines -join "`n"
+              if ($text -match 'RoutineHandler\(auth_by_token\)' -and $text -match '"action": "long_poll"' -and
+                  $text -notmatch 'Auth failed') {
+                  [pscustomobject]@{ ComputerName = $env:COMPUTERNAME; Enrollment = 're-attached to existing device' }
+                  return
+              }
               throw 'The agent did not attempt to confirm enrollment'
           }
 
