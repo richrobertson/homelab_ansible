@@ -199,6 +199,17 @@
       delegate_to: localhost
       no_log: true
 
+    # Monthly "rotation" for a backup means: refresh it at least monthly. The
+    # credential-age alerts then remind if backup_adcs_ca.yml stops being run.
+    - name: Record the backup's age metadata
+      ansible.builtin.command: >-
+        vault kv metadata patch
+        -custom-metadata=rotated_at={{ adcs_backup_stamp | to_datetime('%Y%m%dT%H%M%SZ') | string | replace(' ', 'T') }}Z
+        -custom-metadata=rotation_interval_days=30
+        {{ adcs_backup_vault_mount }}/windows/domain/adcs/{{ adcs_backup_inventory.result.active }}/backup
+      delegate_to: localhost
+      changed_when: true
+
     - name: Make the local archive directory
       ansible.builtin.file:
         path: "{{ adcs_backup_local_dir }}"
