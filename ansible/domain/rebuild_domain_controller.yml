@@ -552,6 +552,20 @@
       delay: 5
       changed_when: false
 
+    # The cluster has crs ha-rebalance-on-start=1, so an HA start may try to
+    # MIGRATE the guest - impossible while the install ISOs sit on this node's
+    # local storage ("Problem found while scanning volumes"). Both 2026-10-06
+    # rebuilds logged such a failed migration (ProxmoxMigrationTaskFailures).
+    # So the reinstall runs outside HA and the VM rejoins HA once the media are
+    # ejected (and again, idempotently, in the final play).
+    - name: Take the VM out of HA for the reinstall
+      ansible.builtin.shell: |
+        if ha-manager config | grep -qx 'vm:{{ dc_spec.vmid }}'; then
+          ha-manager remove vm:{{ dc_spec.vmid }} && echo removed
+        fi
+      register: dc_rebuild_ha_removed
+      changed_when: "'removed' in dc_rebuild_ha_removed.stdout"
+
     - name: Detach the old disks (kept as unusedN until the new DC verifies)
       ansible.builtin.command: qm set {{ dc_spec.vmid }} --delete scsi0,efidisk0,tpmstate0
 
@@ -612,10 +626,10 @@
     # "Press any key to boot from CD". Nobody presses it unattended, so send
     # Enter for 40 s once the VM is running. After Setup's first reboot scsi0 is
     # bootable and the prompt never appears again.
-    - name: Start the VM through HA and press a key at the CD prompt
+    - name: Start the VM (outside HA) and press a key at the CD prompt
       ansible.builtin.shell: |
         set -e
-        ha-manager set vm:{{ dc_spec.vmid }} --state started
+        qm start {{ dc_spec.vmid }}
         for i in $(seq 1 60); do
           qm status {{ dc_spec.vmid }} | grep -q running && break
           sleep 2
@@ -638,6 +652,14 @@
       ansible.builtin.file:
         path: /var/lib/vz/template/iso/{{ dc_unattend_iso }}
         state: absent
+
+    - name: Put the VM back under HA now the media are gone
+      ansible.builtin.shell: |
+        if ! ha-manager config | grep -qx 'vm:{{ dc_spec.vmid }}'; then
+          ha-manager add vm:{{ dc_spec.vmid }} --state started && echo added
+        fi
+      register: dc_rebuild_ha_added
+      changed_when: "'added' in dc_rebuild_ha_added.stdout"
 
 - name: Check whether the fresh install is already a DC
   hosts: dc_rebuild_source
@@ -840,6 +862,47 @@
     - name: Restore the CA
       ansible.builtin.include_tasks: tasks/adcs_ca_restore.yml
 
+- name: LDAPS - enroll the DC certificate and prove 636 serves it
+  hosts: dc_rebuild_old
+  gather_facts: false
+  vars:
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+  tasks:
+    - name: Skip unless confirmed
+      ansible.builtin.meta: end_play
+      when: not hostvars['localhost'].dc_rebuild_go | bool
+
+    # A new DC gets its LDAPS certificate by autoenrollment, which retries only
+    # every ~8 hours. dc1 was promoted while its own CA was down, so it served
+    # NOTHING on 636 until enrollment was pulsed by hand (ADLdapsUnreachable,
+    # 2026-10-07). Pulse it here - after any CA restore - and require it.
+    - name: Pulse certificate autoenrollment
+      become: true
+      become_method: ansible.builtin.runas
+      become_user: "{{ ansible_user }}"
+      vars:
+        ansible_become_password: "{{ ansible_password }}"
+      ansible.windows.win_powershell:
+        script: |
+          gpupdate /target:computer /force | Out-Null
+          certutil -pulse | Out-Null
+      changed_when: false
+
+    - name: Wait for LDAPS on 636 to present this DC's certificate
+      ansible.builtin.shell: >-
+        openssl s_client -connect {{ inventory_hostname }}:636 </dev/null 2>/dev/null
+        | openssl x509 -noout -subject -issuer
+      delegate_to: localhost
+      register: dc_rebuild_ldaps
+      changed_when: false
+      retries: 20
+      delay: 30
+      until: inventory_hostname | lower in dc_rebuild_ldaps.stdout | lower
+
+    - name: Report LDAPS
+      ansible.builtin.debug:
+        msg: "{{ dc_rebuild_ldaps.stdout_lines }}"
+
 - name: DHCP - make the rebuilt partner a working DHCP server
   hosts: dc_rebuild_old
   gather_facts: false
@@ -942,6 +1005,26 @@
       until: dhcp_rebuild_failover_state.result | upper == 'NORMAL'
       retries: 20
       delay: 15
+
+- name: HA - make sure the rebuilt DC is HA-managed
+  hosts: dc_rebuild_node
+  gather_facts: false
+  vars:
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
+  tasks:
+    - name: Skip unless confirmed
+      ansible.builtin.meta: end_play
+      when: not hostvars['localhost'].dc_rebuild_go | bool
+
+    # Idempotent backstop for a run that stopped between taking the VM out of
+    # HA and the reimage play putting it back.
+    - name: Re-add to HA if missing
+      ansible.builtin.shell: |
+        if ! ha-manager config | grep -qx 'vm:{{ dc_spec.vmid }}'; then
+          ha-manager add vm:{{ dc_spec.vmid }} --state started && echo added
+        fi
+      register: dc_rebuild_ha_final
+      changed_when: "'added' in dc_rebuild_ha_final.stdout"
 
 - name: Destroy the detached old disks
   hosts: dc_rebuild_node
