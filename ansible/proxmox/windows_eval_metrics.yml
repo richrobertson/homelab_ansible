@@ -1,0 +1,101 @@
+---
+# Export the Windows evaluation/licence state of every running Windows guest
+# (rhonda, dc1, dns01, janice) as node_exporter textfile metrics, for the
+# WindowsEvaluation* alerts in homelab_flux infrastructure/configs/
+# windows-eval-alerts.yaml.
+#
+# There are no Windows Server licences: every DC runs evaluation media, rearmed
+# by ansible/domain/rearm_domain_controller_eval.yml and rebuilt by
+# ansible/domain/rebuild_domain_controller.yml when rearms run out. Before this,
+# nothing watched the clock - dc1 and dns01 expired on 2026-09-29 and shut down
+# hourly for a week before it was noticed.
+#
+# The collector asks each guest through the QEMU guest agent, so it needs no
+# Windows credentials and keeps working on an expired guest. Runs on every node;
+# each reports only the guests it hosts. Hourly - the numbers move by days.
+#
+# Run:
+#   ansible-playbook -i inventory/environments/production.ini ansible/proxmox/windows_eval_metrics.yml
+- name: Export Windows evaluation licence metrics
+  hosts: "{{ pve_windows_eval_metrics_target_hosts | default('proxmox_nodes') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    pve_windows_eval_metrics_textfile_dir: /var/lib/prometheus/node-exporter
+    pve_windows_eval_metrics_script: /usr/local/sbin/pve-windows-eval-metrics.py
+    pve_windows_eval_metrics_interval: 1h
+
+  tasks:
+    # Created and wired into node_exporter by pve_ha_failover_metrics.yml on
+    # these same nodes; only asserted here so a fresh node fails loudly.
+    - name: Require the node exporter textfile directory
+      ansible.builtin.stat:
+        path: "{{ pve_windows_eval_metrics_textfile_dir }}"
+      register: pve_windows_eval_textfile_dir
+      failed_when: not pve_windows_eval_textfile_dir.stat.isdir | default(false)
+
+    - name: Install the collector
+      ansible.builtin.template:
+        src: pve-windows-eval-metrics.py.j2
+        dest: "{{ pve_windows_eval_metrics_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pve-windows-eval-metrics.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Collect Windows evaluation licence metrics from guest agents
+          After=pve-cluster.service pve-guests.service
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ pve_windows_eval_metrics_script }}
+          TimeoutStartSec=15min
+
+    - name: Install the timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pve-windows-eval-metrics.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run the Windows evaluation metrics collector every {{ pve_windows_eval_metrics_interval }}
+
+          [Timer]
+          OnBootSec=10min
+          OnUnitActiveSec={{ pve_windows_eval_metrics_interval }}
+          RandomizedDelaySec=2min
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: Enable the timer
+      ansible.builtin.systemd_service:
+        name: pve-windows-eval-metrics.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Collect once now
+      ansible.builtin.systemd_service:
+        name: pve-windows-eval-metrics.service
+        state: started
+
+    - name: Read what was published
+      ansible.builtin.command: grep -E '^windows_eval_(remaining_seconds|rearms_remaining|licensed|query_success)' {{ pve_windows_eval_metrics_textfile_dir }}/windows_eval.prom
+      register: pve_windows_eval_published
+      changed_when: false
+      failed_when: false
+
+    - name: Show it
+      ansible.builtin.debug:
+        msg: "{{ pve_windows_eval_published.stdout_lines }}"

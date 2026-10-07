@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+# {{ ansible_managed }}
+#
+# Export the Windows licence/evaluation state of every running Windows guest on
+# THIS Proxmox node as node_exporter textfile metrics.
+#
+# Asked through the QEMU guest agent (qm guest exec), so it needs no Windows
+# credentials and works on a DC whose evaluation has expired and is shutting
+# down hourly - exactly when it matters. Each node reports only its own guests
+# and rewrites its whole file every run, so a migrated guest moves with it.
+#
+# Why: every DC runs Windows Server EVALUATION media (no licences). An expired
+# evaluation shuts Windows down every 60 minutes; dc1 and dns01 did that for a
+# week from 2026-09-29 before anyone noticed. See
+# homelab_ansible/runbooks/domain/rebuild-evaluation-domain-controller.md.
+import glob
+import json
+import os
+import re
+import socket
+import subprocess
+import tempfile
+import time
+
+OUT = "{{ pve_windows_eval_metrics_textfile_dir }}/windows_eval.prom"
+# Everything below is literal Python (its f-string braces are not Jinja).
+{% raw %}
+NODE = socket.gethostname().split(".")[0]
+PS = (
+    "$l = Get-CimInstance SoftwareLicensingProduct "
+    "-Filter \"PartialProductKey IS NOT NULL AND Name LIKE 'Windows%'\" | Select-Object -First 1; "
+    "'{0}|{1}|{2}|{3}' -f $l.LicenseStatus, $l.GracePeriodRemaining, $l.RemainingSkuReArmCount, $l.Description"
+)
+
+
+def esc(v):
+    return str(v).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def windows_guests():
+    for conf in sorted(glob.glob("/etc/pve/qemu-server/*.conf")):
+        vmid = os.path.basename(conf)[:-5]
+        text = open(conf).read().split("\n[", 1)[0]  # ignore snapshot sections
+        if not re.search(r"^ostype: win", text, re.M):
+            continue
+        name = (re.search(r"^name: (.+)$", text, re.M) or [None, vmid])[1].strip()
+        yield vmid, name
+
+
+def running(vmid):
+    r = subprocess.run(["qm", "status", vmid], capture_output=True, text=True, timeout=30)
+    return "running" in r.stdout
+
+
+def query(vmid):
+    r = subprocess.run(
+        ["qm", "guest", "exec", vmid, "--timeout", "60", "--",
+         "powershell.exe", "-NoProfile", "-Command", PS],
+        capture_output=True, text=True, timeout=90,
+    )
+    if r.returncode != 0:
+        return None
+    out = json.loads(r.stdout).get("out-data", "").strip()
+    parts = out.split("|", 3)
+    if len(parts) != 4 or not parts[0].strip().isdigit():
+        return None
+    status, grace_min, rearms, desc = parts
+    return {
+        "licensed": 1 if int(status) == 1 else 0,
+        "status": int(status),
+        "remaining_seconds": int(grace_min or 0) * 60,
+        "rearms": int(rearms or 0),
+        "evaluation": 1 if "TIMEBASED_EVAL" in desc else 0,
+    }
+
+
+lines = [
+    "# HELP windows_eval_query_success 1 if the guest agent answered the licence query.",
+    "# TYPE windows_eval_query_success gauge",
+    "# HELP windows_eval_is_evaluation 1 if the guest runs a time-based EVALUATION licence.",
+    "# TYPE windows_eval_is_evaluation gauge",
+    "# HELP windows_eval_licensed 1 if LicenseStatus is Licensed (inside the window); 0 = expired/notification.",
+    "# TYPE windows_eval_licensed gauge",
+    "# HELP windows_eval_license_status Raw SoftwareLicensingProduct.LicenseStatus.",
+    "# TYPE windows_eval_license_status gauge",
+    "# HELP windows_eval_remaining_seconds Time left in the current licence/evaluation window.",
+    "# TYPE windows_eval_remaining_seconds gauge",
+    "# HELP windows_eval_rearms_remaining Rearms left (RemainingSkuReArmCount).",
+    "# TYPE windows_eval_rearms_remaining gauge",
+]
+for vmid, name in windows_guests():
+    if not running(vmid):
+        continue
+    labels = f'vmid="{esc(vmid)}",guest="{esc(name)}",pve_node="{esc(NODE)}"'
+    try:
+        q = query(vmid)
+    except Exception:
+        q = None
+    lines.append(f"windows_eval_query_success{{{labels}}} {0 if q is None else 1}")
+    if q is None:
+        continue
+    lines.append(f"windows_eval_is_evaluation{{{labels}}} {q['evaluation']}")
+    lines.append(f"windows_eval_licensed{{{labels}}} {q['licensed']}")
+    lines.append(f"windows_eval_license_status{{{labels}}} {q['status']}")
+    lines.append(f"windows_eval_remaining_seconds{{{labels}}} {q['remaining_seconds']}")
+    lines.append(f"windows_eval_rearms_remaining{{{labels}}} {q['rearms']}")
+
+lines += [
+    "# HELP windows_eval_collector_last_run_timestamp_seconds When this collector last completed.",
+    "# TYPE windows_eval_collector_last_run_timestamp_seconds gauge",
+    f'windows_eval_collector_last_run_timestamp_seconds{{pve_node="{esc(NODE)}"}} {int(time.time())}',
+]
+
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(OUT), prefix=".windows_eval.")
+with os.fdopen(fd, "w") as fh:
+    fh.write("\n".join(lines) + "\n")
+os.chmod(tmp, 0o644)
+os.replace(tmp, OUT)
+{% endraw %}
