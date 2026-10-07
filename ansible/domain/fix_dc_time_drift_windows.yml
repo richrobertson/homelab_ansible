@@ -1,105 +1,123 @@
 ---
-- name: Fix time drift on Windows AD domain controllers
-  hosts: domain_controllers_windows
+# Keep Windows domain time correct: the PDC emulator syncs from external NTP and
+# is the domain's reliable source; every other DC (the RODC included) follows the
+# domain hierarchy (NT5DS) to it. Then PROVE it, and fail if it is not true.
+#
+# WHY THIS WAS REWRITTEN (2026-10-06). All three DCs were ~64 s behind. The PDC
+# (rhonda) had not synced since its rearm reboot on 2026-09-29: event 36 ("none
+# of the time service providers provided a usable time stamp") every day, source
+# "Free-running System Clock" while still advertising Stratum 1, and its peer list
+# collapsed to one unanswered IP. rhonda resolves DNS against ITSELF, so at boot
+# time.cloudflare.com / time.google.com could not be resolved before w32time
+# started; after ResolvePeerBackoffMaxTimes w32time drops such peers and never
+# retries them. AnnounceFlags 5 kept it advertising anyway, and dc1/dns01
+# faithfully followed it.
+#
+# The previous version of this play also made it worse three ways:
+#   - it targeted every writable DC, making dc1 an external-NTP "reliable"
+#     source too, instead of only the PDC;
+#   - its peers were hostnames only, the exact thing that fails at boot;
+#   - its resync ran with failed_when: false, so a broken sync never surfaced.
+#
+# The ACTUAL cause turned out to be Group Policy, not DNS: GPO "PDC Time Sync"
+# pinned the PDC to 128.138.140.44, which no longer answers, and policy overrides
+# local w32tm config. This play now manages that GPO value and leaves local
+# settings alone.
+#
+# Run:
+#   ansible-playbook -i inventory/environments/production.ini ansible/domain/fix_dc_time_drift_windows.yml
+# Three plays, so the PDC is corrected BEFORE the others resync to it. In one
+# play over the inventory order, dc1 would "pass" by matching a still-wrong PDC
+# and then fall behind when the PDC's clock stepped.
+- name: Find the PDC emulator
+  hosts: domain_controllers_all_windows
   gather_facts: false
-
-  vars:
-    dc_w32time_ntp_peers:
-      - "time.cloudflare.com"
-      - "time.google.com"
-      - "pool.ntp.org"
-    dc_w32time_special_poll_interval: 900
-    dc_w32time_announce_flags: 5
-    dc_w32time_max_pos_phase_correction: 4294967295
-    dc_w32time_max_neg_phase_correction: 4294967295
-
-  pre_tasks:
-    - name: Build w32time peer list with client mode flags
-      ansible.builtin.set_fact:
-        dc_w32time_peer_list: "{{ dc_w32time_ntp_peers | map('regex_replace', '$', ',0x8') | join(' ') }}"
-
   tasks:
-    - name: Configure w32time NTP peer list
-      ansible.windows.win_regedit:
-        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters
-        name: NtpServer
-        data: "{{ dc_w32time_peer_list }}"
-        type: string
-      notify: Restart w32time
-
-    - name: Configure w32time source type to manual NTP
-      ansible.windows.win_regedit:
-        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters
-        name: Type
-        data: NTP
-        type: string
-      notify: Restart w32time
-
-    - name: Mark domain controller as reliable time source
-      ansible.windows.win_regedit:
-        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config
-        name: AnnounceFlags
-        data: "{{ dc_w32time_announce_flags }}"
-        type: dword
-      notify: Restart w32time
-
-    - name: Allow large positive phase corrections
-      ansible.windows.win_regedit:
-        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config
-        name: MaxPosPhaseCorrection
-        data: "{{ dc_w32time_max_pos_phase_correction }}"
-        type: dword
-      notify: Restart w32time
-
-    - name: Allow large negative phase corrections
-      ansible.windows.win_regedit:
-        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config
-        name: MaxNegPhaseCorrection
-        data: "{{ dc_w32time_max_neg_phase_correction }}"
-        type: dword
-      notify: Restart w32time
-
-    - name: Enable NTP server provider
-      ansible.windows.win_regedit:
-        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpServer
-        name: Enabled
-        data: 1
-        type: dword
-      notify: Restart w32time
-
-    - name: Enable NTP client provider
-      ansible.windows.win_regedit:
-        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpClient
-        name: Enabled
-        data: 1
-        type: dword
-      notify: Restart w32time
-
-    - name: Configure w32time poll interval
-      ansible.windows.win_regedit:
-        path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpClient
-        name: SpecialPollInterval
-        data: "{{ dc_w32time_special_poll_interval }}"
-        type: dword
-      notify: Restart w32time
-
-    - name: Ensure w32time service is running and set to auto start
-      ansible.windows.win_service:
-        name: W32Time
-        start_mode: auto
-        state: started
-
-    - name: Apply w32time runtime config
-      ansible.windows.win_command: w32tm /config /update
+    - name: Ask the domain
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Result = (Get-ADDomain).PDCEmulator.ToLower()
       changed_when: false
+      register: dc_time_pdc
+      run_once: true
 
-    - name: Force immediate rediscover and resync
-      ansible.windows.win_command: w32tm /resync /rediscover /force
+    - name: Group the PDC
+      ansible.builtin.add_host:
+        name: "{{ dc_time_pdc.result }}"
+        groups: dc_time_pdc
       changed_when: false
-      failed_when: false
+      run_once: true
 
-  handlers:
-    - name: Restart w32time
-      ansible.windows.win_service:
-        name: W32Time
-        state: restarted
+- name: PDC emulator - external NTP, reliable source
+  hosts: dc_time_pdc
+  gather_facts: false
+  vars:
+    # Hostnames first; the IPs are the same services' anycast addresses and work
+    # when DNS is not up yet (the boot-time failure above).
+    dc_time_pdc_peers:
+      - time.cloudflare.com
+      - time.google.com
+      - 162.159.200.1      # time.cloudflare.com
+      - 216.239.35.0       # time.google.com
+      - 216.239.35.4       # time.google.com
+    dc_time_special_poll_interval: 900
+    # Healthy offset. The PDC is compared with an external server; the others
+    # with the PDC.
+    dc_time_max_offset_seconds: 1.0
+    dc_time_reference: time.cloudflare.com
+    dc_time_is_pdc: true
+    dc_time_pdc_host: "{{ inventory_hostname }}"
+    # GPO "PDC Time Sync" (linked to Domain Controllers, WMI filter
+    # DomainRole = 5, i.e. only the PDC emulator) is what actually sets the
+    # PDC's peers. Its NtpServer was 128.138.140.44,0x08 (NIST Boulder), which
+    # stopped answering (0x800705B4) - the real cause of the 2026-10-06 drift.
+    # "Client Time Sync" at the domain root points everything else at
+    # Rhonda.myrobertson.net,0x9 and is left as it is.
+    dc_time_pdc_gpo: PDC Time Sync
+  tasks:
+    - name: Set the PDC GPO's NTP peers
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          param([string]$Gpo, [string]$Peers)
+          Import-Module GroupPolicy
+          $key = 'HKLM\Software\Policies\Microsoft\W32Time\Parameters'
+          $now = (Get-GPRegistryValue -Name $Gpo -Key $key -ValueName NtpServer -ErrorAction SilentlyContinue).Value
+          if ("$now".TrimEnd([char]0) -eq $Peers) { $Ansible.Changed = $false; return }
+          Set-GPRegistryValue -Name $Gpo -Key $key -ValueName NtpServer -Type String -Value $Peers | Out-Null
+          $Ansible.Result = "was: $("$now".TrimEnd([char]0))"
+        parameters:
+          Gpo: "{{ dc_time_pdc_gpo }}"
+          Peers: "{{ dc_time_pdc_peers | map('regex_replace', '$', ',0x8') | join(' ') }}"
+      register: dc_time_gpo
+
+    - name: Apply policy on the PDC now
+      ansible.windows.win_command: gpupdate /target:computer /force
+      when: dc_time_gpo is changed
+
+    - name: Resync and verify
+      ansible.builtin.include_tasks: tasks/dc_time_sync.yml
+
+- name: Other DCs - follow the domain hierarchy to the PDC
+  hosts: domain_controllers_all_windows:!dc_time_pdc
+  gather_facts: false
+  serial: 1
+  vars:
+    # Hostnames first; the IPs are the same services' anycast addresses and work
+    # when DNS is not up yet (the boot-time failure above).
+    dc_time_pdc_peers:
+      - time.cloudflare.com
+      - time.google.com
+      - 162.159.200.1      # time.cloudflare.com
+      - 216.239.35.0       # time.google.com
+      - 216.239.35.4       # time.google.com
+    dc_time_special_poll_interval: 900
+    # Healthy offset. The PDC is compared with an external server; the others
+    # with the PDC.
+    dc_time_max_offset_seconds: 1.0
+    dc_time_reference: time.cloudflare.com
+    dc_time_is_pdc: false
+    dc_time_pdc_host: "{{ groups['dc_time_pdc'][0] }}"
+  tasks:
+    - name: Resync and verify against the PDC
+      ansible.builtin.include_tasks: tasks/dc_time_sync.yml

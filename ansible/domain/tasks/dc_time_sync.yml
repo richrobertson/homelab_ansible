@@ -1,0 +1,75 @@
+---
+# Shared by both plays in fix_dc_time_drift_windows.yml: configure one DC's
+# w32time for its role (dc_time_is_pdc), resync, and prove the offset.
+# No local w32tm settings here on purpose: two GPOs govern them and policy
+# overrides anything set locally (that is how the old version of this play
+# "fixed" the PDC without changing what it actually did). See the PDC play.
+# The Hyper-V time provider does nothing on KVM; keep it from ever
+# competing if a guest is moved.
+- name: Disable the Hyper-V time provider
+  ansible.windows.win_regedit:
+    path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\VMICTimeProvider
+    name: Enabled
+    data: 0
+    type: dword
+
+# Step, don't slew. The default MaxAllowedPhaseOffset (300 s) slews any error
+# under five minutes; correcting rhonda's 64 s that way overshot to 23 s AHEAD
+# and still climbing (2026-10-06). At 1 s, a real error is stepped once and the
+# clock is then disciplined normally.
+- name: Step errors over one second instead of slewing them
+  ansible.windows.win_regedit:
+    path: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config
+    name: MaxAllowedPhaseOffset
+    data: 1
+    type: dword
+
+# Restart + rediscover re-resolves the peer names. That is the step that
+# recovers a PDC whose peers were dropped at boot.
+- name: Restart w32time and resync with rediscovery
+  ansible.windows.win_powershell:
+    error_action: stop
+    script: |
+      Restart-Service W32Time
+      Start-Sleep -Seconds 5
+      w32tm /resync /force | Out-Null  # /rediscover with /force is E_INVALIDARG; the restart re-resolves peers
+      if ($LASTEXITCODE -ne 0) { throw "w32tm /resync failed ($LASTEXITCODE)" }
+
+- name: Measure the offset
+  ansible.windows.win_powershell:
+    error_action: stop
+    script: |
+      param([string]$Reference)
+      $line = w32tm /stripchart /computer:$Reference /samples:3 /dataonly |
+          Where-Object { $_ -match ', [+-]\d' } | Select-Object -Last 1
+      if (-not $line) { throw "no stripchart sample from $Reference" }
+      $Ansible.Result = @{
+          source = (w32tm /query /source).Trim()
+          offset = [double]([regex]::Match($line, '([+-]\d+(\.\d+)?)s').Groups[1].Value)
+      }
+    parameters:
+      Reference: "{{ dc_time_reference if dc_time_is_pdc | bool else dc_time_pdc_host }}"
+  changed_when: false
+  register: dc_time_measure
+  # A stepped clock and a fresh peer can take a few polls to settle.
+  retries: 6
+  delay: 20
+  until: >-
+    dc_time_measure is succeeded
+    and (dc_time_measure.result.offset | float | abs) <= dc_time_max_offset_seconds | float
+
+- name: Check the source is a real one
+  ansible.builtin.assert:
+    that:
+      - "'Free-running' not in dc_time_measure.result.source"
+      - "'Local CMOS' not in dc_time_measure.result.source"
+      - dc_time_is_pdc | bool or dc_time_pdc_host.split('.')[0] in dc_time_measure.result.source | lower
+    fail_msg: "{{ inventory_hostname }} syncs from '{{ dc_time_measure.result.source }}'"
+
+- name: Report
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}{{ ' (PDC)' if dc_time_is_pdc | bool else '' }}:
+      source {{ dc_time_measure.result.source }}, offset
+      {{ dc_time_measure.result.offset }}s against
+      {{ dc_time_reference if dc_time_is_pdc | bool else dc_time_pdc_host }}

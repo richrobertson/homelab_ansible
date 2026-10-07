@@ -813,7 +813,7 @@
           {{ inventory_hostname }} rebuilt. Evaluation has
           {{ (dc_rebuild_verify.result.grace_minutes_left | int / 1440) | round(0) | int }}
           days left and {{ dc_rebuild_verify.result.rearms_left }} rearm(s).
-          Next: fix_dc_time_drift_windows.yml, configure_windows_winrm.yml,
+          Next: configure_windows_winrm.yml,
           ansible/proxmox/guest_fstrim.yml, ansible/synology/configure_windows_activebackup_agent.yml.
 
 - name: AD CS - restore the CA onto the rebuilt DC
@@ -964,3 +964,11 @@
       ansible.builtin.command: >-
         qm disk unlink {{ dc_spec.vmid }} --idlist {{ item.split(':')[0] }} --force 1
       loop: "{{ dc_rebuild_final_config.stdout_lines | select('match', '^unused[0-9]+: \\S+:vm-' ~ dc_spec.vmid ~ '-disk-') | list }}"
+
+# Every DC's clock, including the one just built, re-verified against the PDC
+# (and the PDC against external NTP) - see that playbook for the 2026-10-06
+# drift. Only on a confirmed run; a preflight changes nothing.
+- name: Time - configure and verify every DC
+  ansible.builtin.import_playbook: fix_dc_time_drift_windows.yml
+  when: hostvars['localhost'].dc_rebuild_go | default(false) | bool
+
