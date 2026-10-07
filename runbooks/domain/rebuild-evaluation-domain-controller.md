@@ -238,3 +238,35 @@ the fix away.
   and the cmdlet prompts for confirmation.
 - **Stale DHCP authorisation:** dns01 was still authorised in AD as .244,
   months after moving to .101. The play removes stale entries for the name.
+
+## Lessons from the dc1 + CA run (2026-10-06)
+
+The CA came back as the same CA: thumbprint `5C98DAA0...3F18`, 121 issued rows,
+the five original templates, and http CRL/AIA. All three Vault intermediates
+still verify against it. Getting there exposed these, and each is fixed in code:
+
+- **Evaluation window:** the wait-for-a-fresh-hour loop polled over WinRM, and a
+  refused connection during the hourly shutdown is a hard failure, not a retry.
+  It now asks the Proxmox guest agent (`tasks/wait_eval_window.yml`). It also
+  runs before the CA removal, which took ~15 minutes of feature removal.
+- **Boot order:** set in the same `qm set` as the new CD drives, it did not
+  stick; the VM booted virtio ISO -> PXE -> ... and the CD-prompt keypresses
+  missed. It is now its own call, and the playbook checks it.
+- **SAN policy:** WinPE brought the virtio-scsi (SAS) disk up "Offline
+  (Policy)", read-only, so DiskConfiguration failed with 0x80070013 and Setup
+  dropped to the manual disk page. autounattend now sets `SanPolicy=1` and runs
+  diskpart `online disk` in RunSynchronous before disk configuration. (This
+  time it was fixed by hand in Shift+F10.)
+- **Promotion result:** dcpromo exit 4 (success with non-critical failures,
+  e.g. no DNS delegation) is reported as failed by the module. Success is now
+  judged by the domain listing the DC. A resume restarts a promotion that is
+  still pending.
+- **`-OverwriteExistingCAinDS`** is not valid with `-CertFile`; installing from
+  the backed-up certificate re-attaches to the existing AD objects anyway.
+- **reg.exe writes success to STDERR,** which PowerShell turned into a failure.
+  It now runs as a process and the exit code is checked.
+- **`CertUtil` is not a template.** certutil's "CertUtil: -CATemplates command
+  completed successfully." footer was parsed into the backed-up template list.
+  Excluded on backup, and ignored on restore for older backups.
+- **Re-imported old-CA keys get GUID container names**
+  (`myrobertson-DC1-CA-<guid>`). Backups after the restore still find all five.

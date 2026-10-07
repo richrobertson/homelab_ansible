@@ -588,13 +588,25 @@
         path: "{{ dc_rebuild_stage.path }}"
         state: absent
 
-    - name: Attach the install, driver and unattend media and boot disk-first
+    - name: Attach the install, driver and unattend media
       ansible.builtin.command: >-
         qm set {{ dc_spec.vmid }}
         --ide0 {{ domain_controller_iso }},media=cdrom
         --ide2 {{ domain_controller_virtio_iso }},media=cdrom
         --ide3 local:iso/{{ dc_unattend_iso }},media=cdrom
-        --boot order=scsi0;ide0
+
+    # Its own call, AFTER the media exist. Set in the same call as the new
+    # drives, it did not stick on dc1 (2026-10-06): Proxmox kept the old order
+    # minus the deleted disk plus the new drives (ide2;net0;ide3;ide0), so the
+    # VM tried the virtio ISO and PXE first and the CD-prompt keypresses missed.
+    - name: Boot disk-first, then the install ISO
+      ansible.builtin.command: qm set {{ dc_spec.vmid }} --boot order=scsi0;ide0
+
+    - name: Check the boot order took
+      ansible.builtin.command: qm config {{ dc_spec.vmid }}
+      register: dc_rebuild_boot
+      changed_when: false
+      failed_when: "'boot: order=scsi0;ide0' not in dc_rebuild_boot.stdout"
 
     # The blank scsi0 falls through to ide0, whose UEFI loader waits ~5 s for
     # "Press any key to boot from CD". Nobody presses it unattended, so send
@@ -663,6 +675,18 @@
   vars_files:
     - vars/domain_controller_specs.yml
   tasks:
+    # Already listed as a DC (a resumed run). If the promotion's restart never
+    # happened, the machine is in between: the domain identity cannot log on
+    # yet but the bootstrap Administrator still can, so restart it from here.
+    # Once restarted, local accounts are gone and this logon is simply refused
+    # - which is fine, and why errors are ignored. (dc1, 2026-10-06: the verify
+    # play otherwise waited on a logon that could not happen.)
+    - name: Restart a promotion that is still pending
+      ansible.windows.win_command: shutdown.exe /r /t 10 /c "complete DC promotion (rebuild_domain_controller.yml)"
+      when: hostvars['localhost'].dc_rebuild_already_dc | default(false) | bool
+      ignore_errors: true
+      ignore_unreachable: true
+
     - name: Skip if the domain already lists it as a DC
       ansible.builtin.meta: end_play
       when: hostvars['localhost'].dc_rebuild_already_dc | default(false) | bool
@@ -699,6 +723,26 @@
         # waiting; the verify play reconnects as the domain identity.
         reboot: false
       no_log: true
+      # dcpromo exits 4 for "succeeded, with non-critical failures" - on dc1
+      # (2026-10-06) the usual "could not create a DNS delegation" - and the
+      # module reports that as failed although the DC was promoted. Judge
+      # success by what the domain says instead (next task).
+      ignore_errors: true
+      register: dc_rebuild_promote
+
+    - name: Confirm the domain now lists the new DC (from a survivor)
+      ansible.windows.win_powershell:
+        error_action: stop
+        script: |
+          if (-not (Get-ADDomainController -Filter "Name -eq '{{ dc_spec.computer_name }}'")) {
+              throw 'not listed as a domain controller'
+          }
+      delegate_to: "{{ groups['dc_rebuild_source'][0] }}"
+      changed_when: false
+      register: dc_rebuild_promoted
+      retries: 10
+      delay: 30
+      until: dc_rebuild_promoted is succeeded
 
     - name: Restart to complete the promotion
       ansible.windows.win_command: shutdown.exe /r /t 15 /c "rebuild_domain_controller.yml - complete promotion"

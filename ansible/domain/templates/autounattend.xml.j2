@@ -31,7 +31,23 @@
 {% endfor %}
       </DriverPaths>
     </component>
+    <!-- The virtio-scsi disk enumerates as SAS, and WinPE's SAN policy brings
+         such disks up "Offline (Policy)" and read-only. DiskConfiguration then
+         fails with 0x80070013 (write-protected) and Setup drops to the manual
+         disk page - the first dc1 rebuild (2026-10-06) stopped exactly there.
+         SanPolicy alone did not clear it on a re-run, so also online the disk
+         with diskpart before DiskConfiguration runs. -->
+    <component name="Microsoft-Windows-PartitionManager" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <SanPolicy>1</SanPolicy>
+    </component>
     <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>cmd.exe /c "(echo san policy=OnlineAll&amp;echo select disk 0&amp;echo attributes disk clear readonly&amp;echo online disk noerr) &gt; X:\online-disk.txt &amp;&amp; diskpart /s X:\online-disk.txt"</Path>
+          <Description>Bring the install disk online and writable</Description>
+        </RunSynchronousCommand>
+      </RunSynchronous>
       <DiskConfiguration>
         <Disk wcm:action="add">
           <DiskID>0</DiskID>

@@ -13,6 +13,11 @@
 #
 # Runs the AD CS steps as an Enterprise Admin via runas (see adcs_ca_remove.yml).
 
+- name: Make the staging directory
+  ansible.windows.win_file:
+    path: C:\Windows\Temp\adcs-restore
+    state: directory
+
 - name: Stage the backup archive on the new DC
   ansible.windows.win_copy:
     src: "{{ dc_ca_archive }}"
@@ -67,8 +72,10 @@
       Password: "{{ dc_ca_backup_password }}"
   no_log: true
 
-# -OverwriteExistingCAinDS: the old install's objects are still in AD by
-# design; without it setup refuses because "a CA with this name exists".
+# Installing from the backed-up certificate (-CertFile) is the documented CA
+# migration path and re-attaches to the CA's existing AD objects as-is.
+# -OverwriteExistingCAinDS is NOT valid with -CertFile ("Parameter set cannot
+# be resolved", dc1 2026-10-06) - it belongs to the new-key parameter set.
 - name: Install the Enterprise Root CA from the backed-up key
   become: true
   become_method: ansible.builtin.runas
@@ -84,7 +91,7 @@
       $sec = ConvertTo-SecureString $Password -AsPlainText -Force
       Install-AdcsCertificationAuthority -CAType EnterpriseRootCA `
           -CertFile "C:\Windows\Temp\adcs-restore\x\ca\$CAName.p12" -CertFilePassword $sec `
-          -OverwriteExistingCAinDS -Force | Out-Null
+          -Force | Out-Null
     parameters:
       Password: "{{ dc_ca_backup_password }}"
       CAName: "{{ dc_spec.ca_name }}"
@@ -107,8 +114,12 @@
       $x = 'C:\Windows\Temp\adcs-restore\x'
       Stop-Service CertSvc
       Restore-CARoleService -Path "$x\ca" -DatabaseOnly -Force
-      reg import "$x\ca-config.reg" 2>&1 | Out-Null
-      if ($LASTEXITCODE -ne 0) { throw 'reg import of the CA configuration failed' }
+      # reg.exe writes "The operation completed successfully." to STDERR, which
+      # PowerShell turns into an error record and, under error_action stop, a
+      # failure (dc1 2026-10-06, after a successful import). Judge by exit code.
+      $p = Start-Process reg.exe -ArgumentList 'import', "`"$x\ca-config.reg`"" -Wait -PassThru -NoNewWindow `
+          -RedirectStandardError "$x\reg-import.err" -RedirectStandardOutput "$x\reg-import.out"
+      if ($p.ExitCode -ne 0) { throw "reg import of the CA configuration failed: exit $($p.ExitCode)" }
       Start-Service CertSvc
       Set-Content -Path $marker -Value "Restored $(Get-Date -Format o) from {{ dc_ca_archive | basename }}"
 
@@ -124,7 +135,7 @@
       $x = 'C:\Windows\Temp\adcs-restore\x'
       # Exactly the backed-up list: setup publishes its own defaults (User,
       # EFS, Administrator...) that were not offered before.
-      $want = @(Get-Content "$x\templates.txt" | Where-Object { $_ })
+      $want = @(Get-Content "$x\templates.txt" | Where-Object { $_ -and $_ -ne 'CertUtil' })
       certutil -SetCATemplates ($want -join ',') | Out-Null
       if ($LASTEXITCODE -ne 0) { throw 'SetCATemplates failed' }
       Expand-Archive -Path "$x\certenroll.zip" -DestinationPath C:\Windows\System32\CertSrv\CertEnroll -Force
@@ -184,8 +195,8 @@
       $live = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.GetNameInfo('SimpleName', $false) -eq $CAName -and $_.HasPrivateKey }
       $r.thumbprint = ($live | Sort-Object NotAfter | Select-Object -Last 1).Thumbprint
       if ($r.thumbprint -ne $Thumbprint) { throw "CA certificate $($r.thumbprint) is not the backed-up $Thumbprint" }
-      $want = @(Get-Content "$x\templates.txt" | Where-Object { $_ } | Sort-Object)
-      $have = @(certutil -CATemplates | Where-Object { $_ -match ':' } | ForEach-Object { ($_ -split ':')[0].Trim() } | Sort-Object)
+      $want = @(Get-Content "$x\templates.txt" | Where-Object { $_ -and $_ -ne 'CertUtil' } | Sort-Object)
+      $have = @(certutil -CATemplates | Where-Object { $_ -match ':' -and $_ -notmatch '^CertUtil:' } | ForEach-Object { ($_ -split ':')[0].Trim() } | Sort-Object)
       if (Compare-Object $want $have) { throw "templates differ: want [$($want -join ',')] have [$($have -join ',')]" }
       $r.templates = $have -join ','
       $r.issued_rows = (certutil -view -restrict 'Disposition=20' -out RequestID csv | Measure-Object).Count - 1

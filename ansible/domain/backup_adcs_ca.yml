@@ -128,7 +128,11 @@
           {% endfor %}
           $active = '{{ adcs_backup_inventory.result.active }}'
           reg export "HKLM\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$active" "$dir\ca-config.reg" /y | Out-Null
-          (certutil -CATemplates | Where-Object { $_ -match ':' } | ForEach-Object { ($_ -split ':')[0].Trim() }) |
+          # Skip certutil's own "CertUtil: -CATemplates command completed
+          # successfully." footer - it also contains a colon, and once ended up in
+          # the list as a template called CertUtil.
+          (certutil -CATemplates | Where-Object { $_ -match ':' -and $_ -notmatch '^CertUtil:' } |
+              ForEach-Object { ($_ -split ':')[0].Trim() }) |
               Set-Content "$dir\templates.txt"
           Compress-Archive -Path C:\Windows\System32\CertSrv\CertEnroll\* -DestinationPath "$dir\certenroll.zip" -Force
           Compress-Archive -Path "$dir\*" -DestinationPath "$dir.zip" -Force
