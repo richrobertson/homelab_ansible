@@ -373,6 +373,11 @@
       ansible.builtin.wait_for_connection:
         timeout: 3900
 
+    # Same guard as the demotion: don't start a feature removal late in an
+    # expired evaluation's hour (the first dc1 run started it at 38 minutes).
+    - name: Wait for most of an hour ahead on an expired evaluation
+      ansible.builtin.include_tasks: tasks/wait_eval_window.yml
+
     - name: Remove the CA role
       ansible.builtin.include_tasks: tasks/adcs_ca_remove.yml
 
@@ -380,6 +385,7 @@
   hosts: dc_rebuild_old
   gather_facts: false
   vars:
+    dc_spec: "{{ hostvars['localhost'].dc_spec }}"
     dc_rebuild_skip_demote: false
   tasks:
     - name: Skip in resume mode (done by the run being resumed)
@@ -405,25 +411,10 @@
     # in the middle of a demotion leaves a half-removed DC, so only start with
     # most of the hour ahead: if the expired guest has been up more than 30
     # minutes, wait for its hourly restart first.
-    - name: Read licence state and minutes since boot
-      ansible.windows.win_powershell:
-        error_action: stop
-        script: |
-          $lic = Get-CimInstance SoftwareLicensingProduct `
-              -Filter "PartialProductKey IS NOT NULL AND Name LIKE 'Windows%'"
-          $Ansible.Result = @{
-              expired = $lic.LicenseStatus -ne 1
-              uptime_minutes = [int]((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalMinutes
-          }
-      changed_when: false
-      register: dc_rebuild_window
-      until: >-
-        dc_rebuild_window is succeeded
-        and (not dc_rebuild_window.result.expired | bool
-             or dc_rebuild_window.result.uptime_minutes | int <= 30)
-      retries: 50
-      delay: 60
-      ignore_unreachable: true
+    - name: Wait for most of an hour ahead on an expired evaluation
+      ansible.builtin.include_tasks: tasks/wait_eval_window.yml
+      vars:
+        dc_eval_window_max_uptime: 30
 
     # reboot: false on purpose. The disk is wiped next, so the post-demotion
     # reboot buys nothing, and the module's reconnect after it is what failed

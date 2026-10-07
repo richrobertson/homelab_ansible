@@ -1,0 +1,41 @@
+---
+# Block until an expired-evaluation DC has most of an hour ahead of it, i.e.
+# until it has been up at most dc_eval_window_max_uptime minutes. A DC that is
+# still inside its evaluation period passes at once.
+#
+# Asked through the Proxmox guest agent on the VM's node, NOT over WinRM. The
+# first dc1 run (2026-10-06) did this over WinRM with until/retries, and when the
+# hourly shutdown arrived the connection was REFUSED - which Ansible raises as a
+# hard failure, not a retryable one, so the wait died at exactly the moment it
+# existed for. A failing `qm guest exec` is an ordinary non-zero rc and retries.
+#
+# Needs: dc_spec (vmid, proxmox_node). Optional: dc_eval_window_max_uptime.
+
+- name: Wait for a fresh evaluation hour (via the guest agent on {{ dc_spec.proxmox_node }})
+  ansible.builtin.command: >-
+    qm guest exec {{ dc_spec.vmid }} --timeout 60 --
+    powershell.exe -NoProfile -Command
+    "$l = Get-CimInstance SoftwareLicensingProduct -Filter \"PartialProductKey IS NOT NULL AND Name LIKE 'Windows%'\";
+    '{0} {1}' -f [int]((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalMinutes, $l.LicenseStatus"
+  delegate_to: "{{ dc_spec.proxmox_node }}"
+  register: dc_eval_window
+  changed_when: false
+  failed_when: false
+  until: >-
+    dc_eval_window.rc == 0
+    and ((dc_eval_window.stdout | from_json)['out-data'] | default('') | trim | split(' ') | length == 2)
+    and (((dc_eval_window.stdout | from_json)['out-data'] | trim | split(' '))[1] | int == 1
+         or ((dc_eval_window.stdout | from_json)['out-data'] | trim | split(' '))[0] | int
+            <= dc_eval_window_max_uptime | default(20) | int)
+  retries: 90
+  delay: 60
+
+- name: Fail if no window ever opened
+  ansible.builtin.assert:
+    that: dc_eval_window is not failed and dc_eval_window.rc == 0
+    fail_msg: "Could not confirm a fresh evaluation hour: {{ dc_eval_window.stdout | default(dc_eval_window.stderr | default('')) }}"
+
+# The guest agent answers before WinRM does after a boot.
+- name: Wait for WinRM after the window opens
+  ansible.builtin.wait_for_connection:
+    timeout: 1800
