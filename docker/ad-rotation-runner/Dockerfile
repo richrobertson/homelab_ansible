@@ -22,8 +22,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     ANSIBLE_COLLECTIONS_PATH=/usr/share/ansible/collections \
     ANSIBLE_HOST_KEY_CHECKING=false \
-    ANSIBLE_RETRY_FILES_ENABLED=false \
-    HOME=/home/runner
+    ANSIBLE_RETRY_FILES_ENABLED=false
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl unzip \
@@ -41,7 +40,7 @@ RUN curl -fsSLo /tmp/vault.zip "https://releases.hashicorp.com/vault/${VAULT_VER
 COPY docker/ad-rotation-runner/requirements.txt docker/ad-rotation-runner/collections.yml /tmp/
 RUN pip install -r /tmp/requirements.txt \
  && ansible-galaxy collection install -r /tmp/collections.yml -p "${ANSIBLE_COLLECTIONS_PATH}" \
- && rm -rf /tmp/requirements.txt /tmp/collections.yml /tmp/ansible-local /root/.ansible
+ && rm -rf /tmp/requirements.txt /tmp/collections.yml /tmp/ansible-local /root/.ansible /home/runner
 
 RUN useradd --uid 10001 --create-home --home-dir /home/runner --shell /usr/sbin/nologin runner
 WORKDIR /opt/homelab_ansible
@@ -55,8 +54,10 @@ COPY --chown=root:root inventory/runner/ ./inventory/runner/
 COPY --chown=root:root scripts/rotate_due_service_accounts.py ./scripts/
 
 USER 10001
-# Set only AFTER switching user: a root-run step must never pre-create the
-# controller's temp dir (it did, and every ansible-* command then failed with
-# EACCES as uid 10001). In k8s this lives on the emptyDir mounted at /home/runner.
-ENV ANSIBLE_LOCAL_TEMP=/home/runner/.ansible/tmp
+# HOME and the controller temp dir are set only AFTER switching user. Set any
+# earlier, the root-run ansible-galaxy step pre-creates them root-owned (it did,
+# twice: /tmp/ansible-local, then /home/runner/.ansible) and every ansible-*
+# command as uid 10001 dies with EACCES on DEFAULT_LOCAL_TMP. In k8s this lives on the emptyDir mounted at /home/runner.
+ENV HOME=/home/runner \
+    ANSIBLE_LOCAL_TEMP=/home/runner/.ansible/tmp
 ENTRYPOINT ["python3", "/opt/homelab_ansible/scripts/rotate_due_service_accounts.py"]
