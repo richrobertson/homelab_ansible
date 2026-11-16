@@ -23,7 +23,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ANSIBLE_COLLECTIONS_PATH=/usr/share/ansible/collections \
     ANSIBLE_HOST_KEY_CHECKING=false \
     ANSIBLE_RETRY_FILES_ENABLED=false \
-    ANSIBLE_LOCAL_TEMP=/tmp/ansible-local \
     HOME=/home/runner
 
 RUN apt-get update \
@@ -42,7 +41,7 @@ RUN curl -fsSLo /tmp/vault.zip "https://releases.hashicorp.com/vault/${VAULT_VER
 COPY docker/ad-rotation-runner/requirements.txt docker/ad-rotation-runner/collections.yml /tmp/
 RUN pip install -r /tmp/requirements.txt \
  && ansible-galaxy collection install -r /tmp/collections.yml -p "${ANSIBLE_COLLECTIONS_PATH}" \
- && rm /tmp/requirements.txt /tmp/collections.yml
+ && rm -rf /tmp/requirements.txt /tmp/collections.yml /tmp/ansible-local /root/.ansible
 
 RUN useradd --uid 10001 --create-home --home-dir /home/runner --shell /usr/sbin/nologin runner
 WORKDIR /opt/homelab_ansible
@@ -56,4 +55,8 @@ COPY --chown=root:root inventory/runner/ ./inventory/runner/
 COPY --chown=root:root scripts/rotate_due_service_accounts.py ./scripts/
 
 USER 10001
+# Set only AFTER switching user: a root-run step must never pre-create the
+# controller's temp dir (it did, and every ansible-* command then failed with
+# EACCES as uid 10001). In k8s this lives on the emptyDir mounted at /home/runner.
+ENV ANSIBLE_LOCAL_TEMP=/home/runner/.ansible/tmp
 ENTRYPOINT ["python3", "/opt/homelab_ansible/scripts/rotate_due_service_accounts.py"]
