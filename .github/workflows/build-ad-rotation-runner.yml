@@ -1,0 +1,83 @@
+name: Build AD rotation runner image
+
+# Builds docker/ad-rotation-runner on every PR that could change what the
+# unattended AD rotation runs, smoke-tests it, and publishes to GHCR only from
+# main. The prod CronJob (homelab_flux) consumes ghcr.io/<owner>/ad-rotation-runner.
+on:
+  pull_request:
+    paths:
+      - docker/ad-rotation-runner/**
+      - ansible/domain/rotate_service_account_passwords.yml
+      - ansible/domain/vars/**
+      - inventory/runner/**
+      - scripts/rotate_due_service_accounts.py
+      - ansible.cfg
+      - .github/workflows/build-ad-rotation-runner.yml
+  push:
+    branches: [main]
+    paths:
+      - docker/ad-rotation-runner/**
+      - ansible/domain/rotate_service_account_passwords.yml
+      - ansible/domain/vars/**
+      - inventory/runner/**
+      - scripts/rotate_due_service_accounts.py
+      - ansible.cfg
+      - .github/workflows/build-ad-rotation-runner.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ad-rotation-runner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/ad-rotation-runner
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build image (local, not pushed)
+        run: docker build -f docker/ad-rotation-runner/Dockerfile -t ad-rotation-runner:ci .
+
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+          run() { docker run --rm --entrypoint "$1" ad-rotation-runner:ci "${@:2}"; }
+          run vault version
+          run kubectl version --client
+          run ansible-playbook --version
+          run ansible-galaxy collection list ansible.windows
+          run ansible-galaxy collection list community.hashi_vault
+          # The 03:00-04:00 maintenance-window check needs time-zone data.
+          run python3 -c "from zoneinfo import ZoneInfo; ZoneInfo('America/Los_Angeles')"
+          # The wrapper must import and parse its arguments without Vault access.
+          docker run --rm ad-rotation-runner:ci --help >/dev/null
+          # The playbook must parse with exactly the core + collections in the image.
+          docker run --rm --workdir /opt/homelab_ansible --entrypoint ansible-playbook \
+            ad-rotation-runner:ci --syntax-check -i inventory/runner/rotation.ini \
+            ansible/domain/rotate_service_account_passwords.yml
+          # Non-root by construction.
+          test "$(docker run --rm --entrypoint id ad-rotation-runner:ci -u)" = "10001"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push image
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          version="0.1.${{ github.run_number }}"
+          short="${GITHUB_SHA::7}"
+          for tag in "$version" "sha-$short"; do
+            docker tag ad-rotation-runner:ci "$IMAGE:$tag"
+            docker push "$IMAGE:$tag"
+          done
+          echo "pushed $IMAGE:$version ($short)" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,6 @@
+# Python packages for the AD rotation runner image. Pinned; bump deliberately.
+ansible-core==2.20.11
+pywinrm==0.5.0
+hvac==2.4.0
+PyYAML==6.0.3
+tzdata==2026.6

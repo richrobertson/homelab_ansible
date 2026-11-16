@@ -1,0 +1,7 @@
+# Ansible collections for the AD rotation runner image - the versions the
+# rotation playbook is already run with from the operator workstation.
+collections:
+  - name: ansible.windows
+    version: "3.5.0"
+  - name: community.hashi_vault
+    version: "7.1.0"
