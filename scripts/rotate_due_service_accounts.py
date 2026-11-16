@@ -31,6 +31,8 @@ import json
 import os
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
 import urllib.request
 from zoneinfo import ZoneInfo
 
@@ -51,13 +53,14 @@ CONNECTION_ACCOUNT = "svc-ansible-win"
 
 
 def log(msg: str) -> None:
-    print(f"{dt.datetime.now(dt.timezone.utc):%Y-%m-%dT%H:%M:%SZ} {msg}", flush=True)
+    print(f"{dt.datetime.now(dt.UTC):%Y-%m-%dT%H:%M:%SZ} {msg}", flush=True)
 
 
 def vault_paths() -> dict[str, str]:
     """account name -> KV path, assembled exactly as the playbook's sac_all_accounts:
     sai_bind_accounts + sai_automation_accounts + [sai_winrm_account] + sai_existing_accounts."""
-    ids = yaml.safe_load(open(IDENTITIES))
+    with open(IDENTITIES, encoding="utf-8") as fh:
+        ids = yaml.safe_load(fh)
     accts = list(ids.get("sai_bind_accounts") or []) + list(ids.get("sai_automation_accounts") or [])
     if isinstance(ids.get("sai_winrm_account"), dict):
         accts.append(ids["sai_winrm_account"])
@@ -68,7 +71,7 @@ def vault_paths() -> dict[str, str]:
 def rotated_at(path: str) -> dt.datetime | None:
     r = subprocess.run(
         ["vault", "kv", "metadata", "get", "-format=json", "-mount=secret", path],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=60, check=False,
     )
     if r.returncode != 0:
         raise RuntimeError(f"vault metadata read failed for {path}: {r.stderr.strip()[:200]}")
@@ -76,7 +79,7 @@ def rotated_at(path: str) -> dt.datetime | None:
     val = meta.get("rotated_at")
     if not val:
         return None
-    return dt.datetime.fromisoformat(val.replace("Z", "+00:00"))
+    return dt.datetime.fromisoformat(val)
 
 
 def in_window(now_local: dt.datetime, start: int, end: int) -> bool:
@@ -87,14 +90,19 @@ def notify(title: str, message: str, priority: int) -> None:
     url, token = os.environ.get("GOTIFY_URL"), os.environ.get("GOTIFY_TOKEN")
     if not url or not token:
         return
+    # GOTIFY_URL comes from the environment; refuse anything but http(s) so a
+    # file:// or custom-scheme value can never turn this into a local file read.
+    if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+        log("gotify notify skipped: GOTIFY_URL scheme must be http or https")
+        return
     body = json.dumps({"title": title, "message": message, "priority": priority}).encode()
     req = urllib.request.Request(
         f"{url.rstrip('/')}/message", data=body,
         headers={"Content-Type": "application/json", "X-Gotify-Key": token},
     )
     try:
-        urllib.request.urlopen(req, timeout=15).read()
-    except Exception as exc:  # notification must never mask the real result
+        urllib.request.urlopen(req, timeout=15).read()  # nosec B310 - scheme checked above
+    except (urllib.error.URLError, OSError, ValueError) as exc:  # never mask the real result
         log(f"gotify notify failed: {exc}")
 
 
@@ -116,14 +124,15 @@ def main() -> int:
         log("refusing: --due-days must stay under the 42-day domain maxPwdAge")
         return 2
 
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     window = in_window(now.astimezone(ZoneInfo(args.window_tz)), args.window_start, args.window_end)
     allowed = AUTOMATABLE | (APP_RESTART_KINDS if window else set())
 
     try:
-        consumers = yaml.safe_load(open(CONSUMERS))["sac_consumers"]
+        with open(CONSUMERS, encoding="utf-8") as fh:
+            consumers = yaml.safe_load(fh)["sac_consumers"]
         paths = vault_paths()
-    except Exception as exc:
+    except (OSError, yaml.YAMLError, KeyError, TypeError) as exc:
         log(f"cannot load account config: {exc}")
         notify("AD rotation: planning failed", str(exc)[:500], 8)
         return 2
@@ -147,7 +156,7 @@ def main() -> int:
             continue
         try:
             ts = rotated_at(paths[name])
-        except Exception as exc:
+        except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
             log(str(exc))
             notify("AD rotation: planning failed", str(exc)[:500], 8)
             return 2
@@ -175,7 +184,7 @@ def main() -> int:
         if restarts:
             cmd += ["-e", "sac_accept_app_restart=true"]
         log(f"rotating {name}")
-        r = subprocess.run(cmd, cwd=REPO, text=True, capture_output=True)
+        r = subprocess.run(cmd, cwd=REPO, text=True, capture_output=True, check=False)
         tail = "\n".join((r.stdout + r.stderr).strip().splitlines()[-12:])
         if r.returncode == 0:
             ok.append(name)
