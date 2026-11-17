@@ -50,6 +50,19 @@ AUTOMATABLE = {"vault_only", "vault_ldap_auth", "keycloak_component"}
 APP_RESTART_KINDS = {"occ"}
 # The account the play connects to the DC as; the playbook refuses it.
 CONNECTION_ACCOUNT = "svc-ansible-win"
+# Each cluster runs its own runner and can reach only its own API server (prod
+# pods cannot reach staging at all - deliberate isolation). An account belongs
+# to staging when every consumer that names a kube_context names this one;
+# everything else, including Vault-only accounts, belongs to prod.
+STAGING_CONTEXT = "admin@staging"
+
+
+def account_env(spec: dict) -> str:
+    """'prod', 'staging', or 'mixed' (consumers in both clusters)."""
+    ctxs = {c.get("kube_context") for c in spec.get("consumers") or []} - {None}
+    if STAGING_CONTEXT in ctxs:
+        return "staging" if ctxs == {STAGING_CONTEXT} else "mixed"
+    return "prod"
 
 
 def log(msg: str) -> None:
@@ -118,6 +131,9 @@ def main() -> int:
                     default=os.environ.get("ROTATION_DRY_RUN", "") in ("1", "true"),
                     help="plan only; never invoke the playbook with confirmation")
     ap.add_argument("--only", help="restrict to one account (testing)")
+    ap.add_argument("--env", choices=("prod", "staging"),
+                    default=os.environ.get("ROTATION_ENV", "prod"),
+                    help="rotate only accounts whose consumers live in this cluster")
     args = ap.parse_args()
 
     if args.due_days >= 42:
@@ -142,6 +158,12 @@ def main() -> int:
         if args.only and name != args.only:
             continue
         kinds = {c.get("update") for c in spec.get("consumers") or []}
+        env = account_env(spec)
+        if env == "mixed":
+            skipped.append((name, "consumers span prod AND staging; split the account"))
+            continue
+        if env != args.env:
+            continue
         if name == CONNECTION_ACCOUNT:
             skipped.append((name, "is the WinRM connection account (needs a second identity)"))
             continue
@@ -166,6 +188,7 @@ def main() -> int:
             continue
         plan.append((name, age, bool(kinds & APP_RESTART_KINDS)))
 
+    log(f"environment: {args.env}")
     for name, why in skipped:
         log(f"skip   {name:<20} {why}")
     for name, age, restarts in plan:
