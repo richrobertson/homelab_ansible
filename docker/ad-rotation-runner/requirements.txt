@@ -4,3 +4,5 @@ pywinrm==0.5.0
 hvac==2.4.0
 PyYAML==6.0.3
 tzdata==2026.6
+# aws_iam_access_key rotation kind (scripts/rotation_aws.py)
+boto3==1.35.36
