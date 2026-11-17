@@ -12,6 +12,7 @@ on:
       - inventory/runner/**
       - scripts/rotate_due_service_accounts.py
       - scripts/rotate_due_k8s_secrets.py
+      - scripts/rotation_aws.py
       - ansible/k8s/vars/**
       - ansible.cfg
       - .github/workflows/build-ad-rotation-runner.yml
@@ -24,6 +25,7 @@ on:
       - inventory/runner/**
       - scripts/rotate_due_service_accounts.py
       - scripts/rotate_due_k8s_secrets.py
+      - scripts/rotation_aws.py
       - ansible/k8s/vars/**
       - ansible.cfg
       - .github/workflows/build-ad-rotation-runner.yml
@@ -65,6 +67,7 @@ jobs:
           docker run --rm ad-rotation-runner:ci --help >/dev/null
           # Same for the k8s_secret rotator, which also loads its consumer map.
           docker run --rm --entrypoint python3 ad-rotation-runner:ci /opt/homelab_ansible/scripts/rotate_due_k8s_secrets.py --help >/dev/null
+          docker run --rm --workdir /opt/homelab_ansible/scripts --entrypoint python3 ad-rotation-runner:ci -c "import rotation_aws, boto3; print('aws kind ok, boto3', boto3.__version__)"
           docker run --rm --entrypoint python3 ad-rotation-runner:ci -c "import yaml; m=yaml.safe_load(open('/opt/homelab_ansible/ansible/k8s/vars/k8s_secret_consumers.yml'))['k8s_secret_rotations']; assert m, 'empty map'; print(len(m), 'k8s secrets mapped')"
           # The playbook must parse with exactly the core + collections in the image.
           docker run --rm --workdir /opt/homelab_ansible --entrypoint ansible-playbook \

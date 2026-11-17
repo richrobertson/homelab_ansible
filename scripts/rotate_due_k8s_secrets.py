@@ -138,6 +138,10 @@ def verify(ctx: str, spec: dict, user: str, good: str, bad: str | None) -> None:
 
 
 def rotate(name: str, spec: dict, ctx: str) -> None:
+    if spec.get("kind") == "aws_iam_access_key":
+        from rotation_aws import rotate_aws_iam_key  # boto3 only needed for this kind
+        rotate_aws_iam_key(name, spec, run, vault_json, log, StepError)
+        return
     field = spec["field"]
     cur = vault_json("kv", "get", "-mount=secret", name)["data"]
     old_version, old, user = cur["metadata"]["version"], cur["data"][field], cur["data"][spec["verify"]["user_field"]]
@@ -184,7 +188,7 @@ def main() -> int:
     for name, spec in entries.items():
         if spec.get("kube_context") != ctx or (args.only and name != args.only):
             continue
-        if spec.get("generator") not in GENERATORS:
+        if spec.get("kind", "k8s_vss") == "k8s_vss" and spec.get("generator") not in GENERATORS:
             log(f"skip   {name:<34} unknown generator {spec.get('generator')}")
             continue
         try:
