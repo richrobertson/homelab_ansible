@@ -59,7 +59,9 @@ def run(cmd: list[str], stdin: str | None = None, timeout: int = 120) -> str:
 
 
 def vault_json(*args: str) -> dict:
-    return json.loads(run(["vault", *args, "-format=json"]))
+    # The vault CLI rejects flags after the positional path, so -format goes
+    # before the last argument (the path).
+    return json.loads(run(["vault", *args[:-1], "-format=json", args[-1]]))
 
 
 def kubectl(ctx: str, *args: str, stdin: str | None = None, timeout: int = 120) -> str:
