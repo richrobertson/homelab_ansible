@@ -160,6 +160,11 @@ def report_b2_health(entries: dict, env: str, ctx: str) -> None:
 
 
 def rotate(name: str, spec: dict, ctx: str) -> None:
+    if spec.get("kind") == "keycloak_oidc_client":
+        from rotation_keycloak_oidc import rotate_keycloak_oidc_client
+        rotate_keycloak_oidc_client(name, spec, ctx, run, vault_json, kubectl, sync_and_confirm, restart,
+                                    log, StepError)
+        return
     if spec.get("kind") == "b2_application_key":
         from rotation_b2 import rotate_b2_key
         rotate_b2_key(name, spec, run, vault_json, log, StepError)
