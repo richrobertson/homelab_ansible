@@ -84,3 +84,18 @@
           - "Exported PBS configuration from {{ inventory_hostname }} to Vault path {{ pbs_config_vault_path }}."
           - "Captured paths: {{ pbs_existing_config_paths | join(', ') }}"
           - "PBS version: {{ pbs_version.stdout | default('unknown') | replace('\n', ' ') }}"
+
+    # This secret is a CONFIG BACKUP, not a credential, so "rotated" means
+    # "re-exported". Stamp the export time so the credential-age alerts measure
+    # backup freshness: rotation_interval_days 30 = re-export at least monthly
+    # (the export sat at 2026-04-27 for seven months before this was added).
+    - name: Stamp the export time as the secret's rotation metadata
+      ansible.builtin.command: >-
+        vault kv metadata patch
+        -custom-metadata=rotated_at={{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }}
+        -custom-metadata=rotation_interval_days=30
+        -custom-metadata=rotation_note=config-backup-not-a-credential
+        {{ pbs_config_vault_path }}
+      delegate_to: localhost
+      become: false
+      changed_when: true
