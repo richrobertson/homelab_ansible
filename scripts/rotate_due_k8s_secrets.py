@@ -177,6 +177,10 @@ def rotate(name: str, spec: dict, ctx: str) -> None:
         from rotation_nextcloud_admin import rotate_nextcloud_admin
         rotate_nextcloud_admin(name, spec, ctx, run, kubectl, vault_json, sync_and_confirm, restart, log, StepError)
         return
+    if spec.get("kind") == "syncthing_api_key":
+        from rotation_syncthing import rotate_syncthing_api_key
+        rotate_syncthing_api_key(name, spec, ctx, run, kubectl, vault_json, sync_and_confirm, log, StepError)
+        return
     field = spec["field"]
     cur = vault_json("kv", "get", "-mount=secret", name)["data"]
     old_version, old, user = cur["metadata"]["version"], cur["data"][field], cur["data"][spec["verify"]["user_field"]]
