@@ -1,0 +1,24 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Rotate the Backblaze B2 key used by the {{ pbs_b2_key_rotation_datastore }} PBS datastore
+Documentation=file://{{ pbs_b2_key_rotation_script }}
+# The rotation talks to Vault and Backblaze, and reloads the proxy it depends on.
+After=network-online.target proxmox-backup-proxy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ pbs_b2_key_rotation_script }}
+# Backstop against a wedged run; a normal run is a few minutes.
+TimeoutStartSec=1800
+# The script writes its own status metric and needs to reload the proxy, so it
+# runs as root without further confinement. It already refuses to start twice
+# via flock.
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,65 @@
+---
+# roles/pbs_b2_key_rotation
+#
+# Sibling of pbs_s3_key_rotation (read its defaults header first) for the
+# Backblaze B2 endpoint. Differences, all forced by B2:
+#
+# * No Vault secrets engine exists for B2, so the rotator is the STORED scoped key
+#   ops/backblaze/key-rotator (B2 key "vault-key-rotator", 10 capabilities; the
+#   master key at ops/backblaze/masterkey is never touched). It is read through
+#   the existing AppRole backblaze-key-rotation.
+# * A B2 key can only mint keys holding capabilities it has itself, so the new
+#   key gets `new_key_capabilities` below - least privilege for PBS. The bucket
+#   uses Object Lock in COMPLIANCE mode (3 days, checked 2026-11-17), so the old
+#   key's extra caps (bypassGovernance, retention/legal-hold, bucket writes) did
+#   nothing for PBS anyway: compliance locks cannot be bypassed by any key.
+# * Deletes cannot be proven at rotation time (a test object is locked for 3
+#   days). So the OLD key is NOT deleted at the swap: it is kept for
+#   old_key_grace_days and deleted only once a garbage-collection run on the
+#   datastore has completed OK with the new key. Until then rollback is a config
+#   swap. (Roy, 2026-11-17.)
+
+pbs_b2_key_rotation_endpoint_id: backblaze-b2-pbs
+pbs_b2_key_rotation_bucket: myrobertson-pbs
+pbs_b2_key_rotation_bucket_id: bb288c2b85cbce8e9cd3091b
+pbs_b2_key_rotation_datastore: pbs-b2
+pbs_b2_key_rotation_key_name_prefix: pbs
+pbs_b2_key_rotation_new_key_capabilities:
+  - listBuckets
+  - listAllBucketNames
+  - readBuckets
+  - listFiles
+  - readFiles
+  - writeFiles
+  - deleteFiles
+
+pbs_b2_key_rotation_vault_addr: "https://vault.myrobertson.net:8200"
+pbs_b2_key_rotation_vault_ca_file: /etc/vault-agent.d/vault-ca.pem
+pbs_b2_key_rotation_rotator_kv_mount: ops
+pbs_b2_key_rotation_rotator_kv_path: backblaze/key-rotator
+pbs_b2_key_rotation_record_kv_mount: secret
+pbs_b2_key_rotation_record_kv_path: proxmox/pbs/prod/backblaze-b2
+pbs_b2_key_rotation_policy_name: backblaze-key-rotation
+pbs_b2_key_rotation_approle_name: backblaze-key-rotation
+pbs_b2_key_rotation_token_ttl_seconds: 900
+pbs_b2_key_rotation_token_max_ttl_seconds: 1800
+
+pbs_b2_key_rotation_interval_days: 90
+pbs_b2_key_rotation_rotate_after_days: 75
+pbs_b2_key_rotation_old_key_grace_days: 7
+# If no garbage collection has run at all this long after a swap, fail loudly
+# rather than hold two keys forever.
+pbs_b2_key_rotation_gc_wait_max_days: 14
+# 04:15, clear of the AWS rotation (03:30 +45m) and PBS's own jobs.
+pbs_b2_key_rotation_on_calendar: "*-*-* 04:15:00"
+pbs_b2_key_rotation_randomized_delay: "30m"
+pbs_b2_key_rotation_defer_on_active_tasks: true
+pbs_b2_key_rotation_require_clean_baseline: true
+pbs_b2_key_rotation_new_key_wait_seconds: 120
+pbs_b2_key_rotation_backup_retain: 5
+
+pbs_b2_key_rotation_script: /usr/local/sbin/pbs-rotate-b2-key.py
+pbs_b2_key_rotation_state_dir: /var/lib/pbs-b2-key-rotation
+pbs_b2_key_rotation_unit_name: pbs-rotate-b2-key
+pbs_b2_key_rotation_role_id_file: /etc/vault-agent.d/pbs-b2-rotation-role-id
+pbs_b2_key_rotation_secret_id_file: /etc/vault-agent.d/pbs-b2-rotation-secret-id

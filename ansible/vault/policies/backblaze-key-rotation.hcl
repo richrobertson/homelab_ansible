@@ -21,3 +21,12 @@ path "ops/data/backblaze/key-rotator" {
 path "ops/metadata/backblaze/key-rotator" {
   capabilities = ["read"]
 }
+
+# Added 2026-11-17 for ansible/proxmox/roles/pbs_b2_key_rotation (the PBS host's
+# pbs-rotate-b2-key.timer): record the rotated pbs-b2 key - and only that.
+path "secret/data/proxmox/pbs/prod/backblaze-b2" {
+  capabilities = ["read", "create", "update", "patch"]
+}
+path "secret/metadata/proxmox/pbs/prod/backblaze-b2" {
+  capabilities = ["read", "patch"]
+}

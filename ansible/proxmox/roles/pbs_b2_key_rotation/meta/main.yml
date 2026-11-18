@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  role_name: pbs_b2_key_rotation
+  description: >-
+    Rotate the Backblaze B2 application key behind the PBS pbs-b2 datastore -
+    mint, prove, swap, reload, verify, record in Vault - and delete the old key
+    only after a garbage-collection run has proven the new key end to end.
+  license: MIT
+  min_ansible_version: "2.14"
+dependencies: []
