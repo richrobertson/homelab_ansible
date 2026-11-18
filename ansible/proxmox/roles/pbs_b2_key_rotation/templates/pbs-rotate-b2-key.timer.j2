@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Daily due-check for the {{ pbs_b2_key_rotation_datastore }} B2 key rotation
+Documentation=file://{{ pbs_b2_key_rotation_script }}
+
+[Timer]
+# Runs daily: rotates when the recorded key age reaches
+# {{ pbs_b2_key_rotation_rotate_after_days }} days, and on the days after a swap
+# checks whether the held old key may now be deleted (grace + a clean GC). Checking daily rather than monthly
+# is what keeps the rotation from drifting past the {{ pbs_b2_key_rotation_interval_days }}-day
+# alert threshold.
+OnCalendar={{ pbs_b2_key_rotation_on_calendar }}
+RandomizedDelaySec={{ pbs_b2_key_rotation_randomized_delay }}
+# Catch up after downtime: a PBS host that was off for a fortnight should
+# evaluate the key on the next boot rather than waiting for the next window.
+Persistent=true
+Unit={{ pbs_b2_key_rotation_unit_name }}.service
+
+[Install]
+WantedBy=timers.target

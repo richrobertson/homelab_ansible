@@ -1,0 +1,612 @@
+#!/usr/bin/env python3
+# {{ ansible_managed }}
+#
+# Rotate the Backblaze B2 application key behind the {{ pbs_b2_key_rotation_endpoint_id }}
+# S3 endpoint that the {{ pbs_b2_key_rotation_datastore }} datastore uses.
+#
+# Sibling of pbs-rotate-s3-key.py (read its header). Same order, same rollback,
+# with two B2-specific differences (see roles/pbs_b2_key_rotation/defaults):
+#
+#   1. preflight  - endpoint key == Vault record, no active tasks, read-back check passes
+#   2. mint       - b2_create_key with the least-privilege capability set,
+#                   restricted to the bucket, using the STORED rotator key
+#   3. prove      - the NEW key authorizes and lists the bucket
+#   4. swap       - back up s3.cfg, `s3 endpoint update`, re-assert 0640 root:backup
+#   5. reload     - SIGHUP proxmox-backup-proxy
+#   6. verify     - read-back (snapshot verify via the proxy), sibling assertion, journal
+#   7. record     - patch Vault (new key + old_key_pending_delete) + rotated_at
+#   8. HOLD       - the old key is NOT deleted now. Deletes cannot be proven at
+#                   rotation time (Object Lock, compliance, 3 days), so a later
+#                   run deletes it only after OLD_KEY_GRACE_DAYS AND a garbage
+#                   collection on the datastore has completed OK since the swap.
+#
+# Any failure from step 4 onwards restores the backed-up config, reloads, and
+# deletes the new key. A failure at step 7 leaves the new key live and the old
+# key held: a recoverable, loud state.
+#
+# No B2 SDK is installed; the B2 native API is a handful of JSON POSTs.
+
+import argparse
+import base64
+import datetime
+import fcntl
+import grp
+import json
+import os
+import pwd
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+ENDPOINT_ID = "{{ pbs_b2_key_rotation_endpoint_id }}"
+BUCKET = "{{ pbs_b2_key_rotation_bucket }}"
+BUCKET_ID = "{{ pbs_b2_key_rotation_bucket_id }}"
+DATASTORE = "{{ pbs_b2_key_rotation_datastore }}"
+KEY_NAME_PREFIX = "{{ pbs_b2_key_rotation_key_name_prefix }}"
+NEW_KEY_CAPS = {{ pbs_b2_key_rotation_new_key_capabilities | to_json }}
+
+VAULT_ADDR = "{{ pbs_b2_key_rotation_vault_addr }}"
+VAULT_CA = "{{ pbs_b2_key_rotation_vault_ca_file }}"
+ROTATOR_MOUNT = "{{ pbs_b2_key_rotation_rotator_kv_mount }}"
+ROTATOR_PATH = "{{ pbs_b2_key_rotation_rotator_kv_path }}"
+RECORD_MOUNT = "{{ pbs_b2_key_rotation_record_kv_mount }}"
+RECORD_PATH = "{{ pbs_b2_key_rotation_record_kv_path }}"
+ROLE_ID_FILE = "{{ pbs_b2_key_rotation_role_id_file }}"
+SECRET_ID_FILE = "{{ pbs_b2_key_rotation_secret_id_file }}"
+
+INTERVAL_DAYS = {{ pbs_b2_key_rotation_interval_days | int }}
+ROTATE_AFTER_DAYS = {{ pbs_b2_key_rotation_rotate_after_days | int }}
+GRACE_DAYS = {{ pbs_b2_key_rotation_old_key_grace_days | int }}
+GC_WAIT_MAX_DAYS = {{ pbs_b2_key_rotation_gc_wait_max_days | int }}
+NEW_KEY_WAIT = {{ pbs_b2_key_rotation_new_key_wait_seconds | int }}
+DEFER_ON_ACTIVE_TASKS = {{ 'True' if pbs_b2_key_rotation_defer_on_active_tasks | bool else 'False' }}
+REQUIRE_CLEAN_BASELINE = {{ 'True' if pbs_b2_key_rotation_require_clean_baseline | bool else 'False' }}
+BACKUP_RETAIN = {{ pbs_b2_key_rotation_backup_retain | int }}
+
+STATE_DIR = "{{ pbs_b2_key_rotation_state_dir }}"
+S3_CFG = "/etc/proxmox-backup/s3.cfg"
+LOCK_FILE = os.path.join(STATE_DIR, "rotation.lock")
+PENDING_FILE = os.path.join(STATE_DIR, "pending-delete.json")
+PBM = "/usr/sbin/proxmox-backup-manager"
+DEBUG_TOOL = "/usr/sbin/proxmox-backup-debug"
+B2_AUTH_URL = "https://api.backblazeb2.com/b2api/v3/b2_authorize_account"
+
+CFG_MODE = 0o640
+CFG_OWNER = "root"
+CFG_GROUP = "backup"
+
+
+def log(msg):
+    print("%s %s" % (datetime.datetime.now().strftime("%H:%M:%S"), msg), flush=True)
+
+
+def run(args, timeout=120, env=None, stdin_data=None):
+    proc = subprocess.run(
+        args,
+        input=stdin_data.encode() if stdin_data is not None else None,
+        capture_output=True, timeout=timeout, env=env,
+    )
+    return (proc.returncode, proc.stdout.decode("utf-8", "replace").strip(),
+            proc.stderr.decode("utf-8", "replace").strip())
+
+
+# --------------------------------------------------------------------------
+# B2 native API
+# --------------------------------------------------------------------------
+
+class B2:
+    def __init__(self, key_id, app_key):
+        basic = base64.b64encode(("%s:%s" % (key_id, app_key)).encode()).decode()
+        req = urllib.request.Request(B2_AUTH_URL, headers={"Authorization": "Basic " + basic})
+        with urllib.request.urlopen(req, timeout=30) as r:  # nosec B310 - fixed https URL
+            auth = json.load(r)
+        storage = auth["apiInfo"]["storageApi"]
+        self.account_id = auth["accountId"]
+        self.api_url = storage["apiUrl"]
+        self.token = auth["authorizationToken"]
+        self.capabilities = set(storage.get("capabilities") or [])
+        allowed = storage.get("allowed") or {}
+        self.bucket_ids = [b.get("id") for b in (allowed.get("buckets") or [])] or (
+            [storage["bucketId"]] if storage.get("bucketId") else [])
+
+    def call(self, op, body):
+        req = urllib.request.Request(
+            "%s/b2api/v3/%s" % (self.api_url, op), data=json.dumps(body).encode(),
+            headers={"Authorization": self.token, "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:  # nosec B310 - B2 apiUrl
+                return json.load(r)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+            raise RuntimeError("B2 %s failed: http %d %s" % (op, exc.code, detail)) from exc
+
+    def list_keys(self):
+        return self.call("b2_list_keys", {"accountId": self.account_id, "maxKeyCount": 1000})["keys"]
+
+    def create_key(self, name):
+        return self.call("b2_create_key", {
+            "accountId": self.account_id, "capabilities": NEW_KEY_CAPS,
+            # v3 takes ONE bucketId; the bucketIds list is v4-only and v3 answers
+            # 400 "not currently supported on API version number 3".
+            "keyName": name, "bucketId": BUCKET_ID,
+        })
+
+    def delete_key(self, key_id):
+        return self.call("b2_delete_key", {"applicationKeyId": key_id})
+
+
+def b2_key_works(key_id, app_key):
+    """The new key authorizes, is scoped to the bucket, and can list it."""
+    try:
+        c = B2(key_id, app_key)
+        if BUCKET_ID not in c.bucket_ids:
+            return False, "key not scoped to %s" % BUCKET
+        c.call("b2_list_file_names", {"bucketId": BUCKET_ID, "maxFileCount": 1})
+        return True, "ok"
+    except (urllib.error.URLError, RuntimeError, KeyError, ValueError) as exc:
+        return False, str(exc)[:200]
+
+
+# --------------------------------------------------------------------------
+# Vault (secrets only ever on stdin)
+# --------------------------------------------------------------------------
+
+def vault_env(token=None):
+    env = dict(os.environ)
+    env["VAULT_ADDR"] = VAULT_ADDR
+    env["VAULT_CACERT"] = VAULT_CA
+    env.pop("VAULT_TOKEN", None)
+    if token:
+        env["VAULT_TOKEN"] = token
+    return env
+
+
+def vault_login():
+    with open(ROLE_ID_FILE) as fh:
+        role_id = fh.read().strip()
+    with open(SECRET_ID_FILE) as fh:
+        secret_id = fh.read().strip()
+    rc, out, err = run(["vault", "write", "-format=json", "auth/approle/login", "-"],
+                       env=vault_env(), stdin_data=json.dumps({"role_id": role_id, "secret_id": secret_id}))
+    if rc != 0:
+        raise RuntimeError("vault approle login failed: %s" % (err or out))
+    return json.loads(out)["auth"]["client_token"]
+
+
+def vault_get(token, mount, path):
+    rc, out, err = run(["vault", "kv", "get", "-format=json", "-mount=%s" % mount, path], env=vault_env(token))
+    if rc != 0:
+        raise RuntimeError("vault read %s/%s failed: %s" % (mount, path, err or out))
+    return json.loads(out)["data"]["data"]
+
+
+def vault_patch(token, data):
+    rc, out, err = run(["vault", "kv", "patch", "-format=json", "-mount=%s" % RECORD_MOUNT, RECORD_PATH, "-"],
+                       env=vault_env(token), stdin_data=json.dumps(data))
+    if rc != 0:
+        raise RuntimeError("vault kv patch failed: %s" % (err or out))
+
+
+def vault_stamp(token):
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rc, out, err = run(["vault", "kv", "metadata", "patch", "-mount=%s" % RECORD_MOUNT,
+                        "-custom-metadata=rotated_at=%s" % now,
+                        "-custom-metadata=rotation_interval_days=%d" % INTERVAL_DAYS, RECORD_PATH],
+                       env=vault_env(token))
+    if rc != 0:
+        raise RuntimeError("vault metadata patch failed: %s" % (err or out))
+    return now
+
+
+def vault_rotated_at(token):
+    rc, out, _err = run(["vault", "kv", "metadata", "get", "-format=json", "-mount=%s" % RECORD_MOUNT, RECORD_PATH],
+                        env=vault_env(token))
+    if rc != 0:
+        return None
+    raw = (json.loads(out)["data"].get("custom_metadata") or {}).get("rotated_at")
+    try:
+        return datetime.date.fromisoformat(raw[:10]) if raw else None
+    except ValueError:
+        return None
+
+
+def rotator(token):
+    d = vault_get(token, ROTATOR_MOUNT, ROTATOR_PATH)
+    return B2(d["keyID"], d["applicationKey"])
+
+
+# --------------------------------------------------------------------------
+# PBS (same semantics as pbs-rotate-s3-key.py)
+# --------------------------------------------------------------------------
+
+def pbs_endpoints():
+    rc, out, err = run([PBM, "s3", "endpoint", "list", "--output-format", "json"])
+    if rc != 0:
+        raise RuntimeError("could not list s3 endpoints: %s" % (err or out))
+    return {e["id"]: e for e in json.loads(out)}
+
+
+def config_sections():
+    with open(S3_CFG) as fh:
+        text = fh.read()
+    sections, current, buf = {}, None, []
+    for line in text.splitlines(keepends=True):
+        if line.startswith("s3-endpoint:"):
+            if current:
+                sections[current] = "".join(buf)
+            current, buf = line.split(":", 1)[1].strip(), [line]
+        elif current:
+            buf.append(line)
+    if current:
+        sections[current] = "".join(buf)
+    return sections
+
+
+def assert_cfg_permissions():
+    st = os.stat(S3_CFG)
+    mode, owner, group = st.st_mode & 0o777, pwd.getpwuid(st.st_uid).pw_name, grp.getgrgid(st.st_gid).gr_name
+    if mode != CFG_MODE or owner != CFG_OWNER or group != CFG_GROUP:
+        os.chmod(S3_CFG, CFG_MODE)
+        os.chown(S3_CFG, pwd.getpwnam(CFG_OWNER).pw_uid, grp.getgrnam(CFG_GROUP).gr_gid)
+        log("  corrected s3.cfg to %o %s:%s (was %o %s:%s)" % (CFG_MODE, CFG_OWNER, CFG_GROUP, mode, owner, group))
+
+
+def smallest_snapshot():
+    """Smallest RECENT snapshot with a known size. Snapshots without a recorded
+    size must not sort as 0: that picked a 2.4 GB April snapshot on 2026-11-17,
+    and the more chunks a read-back touches the likelier a B2 HTTP 500 is."""
+    rc, out, _err = run([DEBUG_TOOL, "api", "get", "/admin/datastore/%s/snapshots" % DATASTORE,
+                         "--output-format", "json"], timeout=300)
+    if rc != 0:
+        return None
+    cutoff = time.time() - 7 * 86400
+    try:
+        snaps = [s for s in json.loads(out)
+                 if s.get("backup-type") and s.get("backup-id") and s.get("backup-time") is not None
+                 and (s.get("size") or 0) > 0 and s["backup-time"] >= cutoff]
+    except json.JSONDecodeError:
+        return None
+    return min(snaps, key=lambda s: s["size"]) if snaps else None
+
+
+# Phrases, never bare numbers: the proxy journal is full of 64-hex chunk digests
+# that contain "401"/"403" by chance.
+AUTH_FAILURE_MARKERS = ("status code 401", "status code 403", "401 unauthorized", "403 forbidden",
+                        "invalidaccesskeyid", "signaturedoesnotmatch", "access denied", "bad_auth_token")
+
+
+def s3_check(timeout=900):
+    """Health of the endpoint AS THE PROXY SEES IT.
+
+    NOT `proxmox-backup-manager s3 check`: that does a test PutObject without a
+    Content-MD5/x-amz-checksum header, which B2 rejects on any Object Lock bucket
+    ("...header is required for Put Object requests with Object Lock
+    parameters"), so it fails on pbs-b2 with every key, including a working one
+    (found 2026-11-17; real backups send checksums and succeed). Instead, re-read
+    the smallest snapshot through the API with ignore-verified=false: that
+    fetches chunks out of B2 through the running proxy, i.e. with whatever key it
+    has loaded."""
+    snap = smallest_snapshot()
+    if not snap:
+        return False, "no recent snapshot with a known size to read back"
+    label = "%s/%s/%s (%d MiB)" % (snap["backup-type"], snap["backup-id"], snap["backup-time"],
+                                   snap["size"] // 1048576)
+    detail = "not attempted"
+    # B2 intermittently answers chunk GETs with HTTP 500 InternalError (17 of them
+    # on 2026-11-17), and PBS verify does not retry. A 500 says nothing about the
+    # credential, so retry those; any AUTH failure in the proxy journal fails at
+    # once, because that is exactly what this check exists to catch.
+    for attempt in range(1, 4):
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        rc, out, err = run([DEBUG_TOOL, "api", "create", "/admin/datastore/%s/verify" % DATASTORE,
+                            "--backup-type", snap["backup-type"], "--backup-id", str(snap["backup-id"]),
+                            "--backup-time", str(snap["backup-time"]), "--ignore-verified", "false"],
+                           timeout=timeout)
+        if rc == 0 and "TASK OK" in (out + err):
+            return True, "verified %s" % label
+        _rc, jout, _jerr = run(["journalctl", "-u", "proxmox-backup-proxy", "--since", stamp,
+                                "--no-pager", "-o", "cat"], timeout=60)
+        low = jout.lower()
+        if any(m in low for m in AUTH_FAILURE_MARKERS):
+            return False, "verify %s hit an AUTH failure: %s" % (label, (err or out)[-200:])
+        detail = "verify %s failed without auth errors (attempt %d/3; B2 500s?)" % (label, attempt)
+        log("  " + detail)
+        time.sleep(30)
+    return False, detail
+
+
+def active_datastore_tasks():
+    rc, out, _err = run([PBM, "task", "list", "--output-format", "json"])
+    if rc != 0:
+        return []
+    try:
+        tasks = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    return [t.get("upid", "?") for t in tasks
+            if not t.get("endtime") and (DATASTORE in json.dumps(t) or ENDPOINT_ID in json.dumps(t))]
+
+
+def reload_proxy():
+    rc, out, err = run(["systemctl", "reload", "proxmox-backup-proxy"], timeout=60)
+    if rc != 0:
+        raise RuntimeError("proxy reload failed: %s" % (err or out))
+    time.sleep(5)
+
+
+def journal_since(stamp):
+    rc, out, _err = run(["journalctl", "-u", "proxmox-backup-proxy", "--since", stamp, "--no-pager"], timeout=60)
+    if rc != 0:
+        return []
+    return [line for line in out.splitlines() if any(s in line.lower() for s in (
+        "access denied", "invalidaccesskeyid", "signaturedoesnotmatch",
+        "permission denied", "403 forbidden", "unable to read", "unauthorized"))]
+
+
+def backup_config():
+    dest = os.path.join(STATE_DIR, "s3.cfg.%s" % datetime.datetime.now().strftime("%Y%m%dT%H%M%S"))
+    st = os.stat(S3_CFG)
+    shutil.copy2(S3_CFG, dest)
+    os.chmod(dest, 0o600)
+    os.chown(dest, st.st_uid, 0)
+    return dest
+
+
+def restore_config(backup_path):
+    st = os.stat(S3_CFG)
+    shutil.copyfile(backup_path, S3_CFG)
+    os.chmod(S3_CFG, CFG_MODE)
+    os.chown(S3_CFG, st.st_uid, st.st_gid)
+    assert_cfg_permissions()
+
+
+def prune_backups():
+    entries = sorted(f for f in os.listdir(STATE_DIR) if f.startswith("s3.cfg."))
+    for stale in entries[:-BACKUP_RETAIN] if len(entries) > BACKUP_RETAIN else []:
+        os.unlink(os.path.join(STATE_DIR, stale))
+
+
+def gc_runs_since(epoch):
+    """[(starttime, status)] of garbage collections on the datastore since epoch."""
+    rc, out, _err = run([DEBUG_TOOL, "api", "get", "/nodes/localhost/tasks", "--typefilter",
+                         "garbage_collection", "--store", DATASTORE, "--since", str(int(epoch)),
+                         "--limit", "50", "--output-format", "json"], timeout=120)
+    if rc != 0:
+        raise RuntimeError("could not list garbage-collection tasks")
+    return [(t["starttime"], t.get("status")) for t in json.loads(out)
+            if t.get("starttime", 0) >= epoch and t.get("endtime")]
+
+
+# --------------------------------------------------------------------------
+# Phase 2: delete the held old key once proven safe
+# --------------------------------------------------------------------------
+
+def finalize_pending(token):
+    """0 = nothing pending / deleted, 2 = still holding, 1 = refused (loud)."""
+    if not os.path.exists(PENDING_FILE):
+        return 0
+    with open(PENDING_FILE) as fh:
+        p = json.load(fh)
+    age = (time.time() - p["swapped_at"]) / 86400
+    configured = pbs_endpoints()[ENDPOINT_ID].get("access-key")
+    record = vault_get(token, RECORD_MOUNT, RECORD_PATH)
+    if configured != p["new_key_id"] or record.get("keyID") != p["new_key_id"]:
+        log("ERROR: pending delete of ...%s refused: PBS uses ...%s, Vault records ...%s, "
+            "expected ...%s. Resolve by hand." % (p["old_key_id"][-4:], (configured or "?")[-4:],
+                                                  (record.get("keyID") or "?")[-4:], p["new_key_id"][-4:]))
+        return 1
+    if age < GRACE_DAYS:
+        log("holding old key ...%s: %.1f of %d grace days elapsed" % (p["old_key_id"][-4:], age, GRACE_DAYS))
+        return 2
+    runs = gc_runs_since(p["swapped_at"])
+    bad = [s for _t, s in runs if s != "OK"]
+    if bad:
+        log("ERROR: garbage collection on %s FAILED since the swap (%s). Old key ...%s is kept; "
+            "roll back by restoring the newest %s/s3.cfg.* and reloading the proxy."
+            % (DATASTORE, bad[0][:120], p["old_key_id"][-4:], STATE_DIR))
+        return 1
+    if not runs:
+        if age > GC_WAIT_MAX_DAYS:
+            log("ERROR: no garbage collection on %s in %.0f days since the swap; old key ...%s "
+                "kept. Run a GC and re-check." % (DATASTORE, age, p["old_key_id"][-4:]))
+            return 1
+        log("holding old key ...%s: waiting for a garbage collection on %s" % (p["old_key_id"][-4:], DATASTORE))
+        return 2
+    rot = rotator(token)
+    if p["old_key_id"] in [k["applicationKeyId"] for k in rot.list_keys()]:
+        rot.delete_key(p["old_key_id"])
+    if p["old_key_id"] in [k["applicationKeyId"] for k in rot.list_keys()]:
+        raise RuntimeError("old key ...%s still present after delete" % p["old_key_id"][-4:])
+    vault_patch(token, {"old_key_pending_delete": ""})
+    os.unlink(PENDING_FILE)
+    log("deleted old key ...%s after %d GC run(s) OK with the new key" % (p["old_key_id"][-4:], len(runs)))
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Phase 1: rotate
+# --------------------------------------------------------------------------
+
+def rotate(args):
+    endpoints = pbs_endpoints()
+    if ENDPOINT_ID not in endpoints:
+        raise RuntimeError("endpoint %s is not configured on this host" % ENDPOINT_ID)
+    configured_key = endpoints[ENDPOINT_ID].get("access-key")
+    log("preflight: endpoint %s currently uses key ...%s" % (ENDPOINT_ID, (configured_key or "????")[-4:]))
+
+    token = vault_login()
+    log("preflight: authenticated to Vault via AppRole")
+
+    held = finalize_pending(token)
+    if held == 1:
+        return 1
+    if held == 2 and not args.check:
+        return 0  # one rotation in flight at a time
+
+    rot = rotator(token)
+    keys = {k["applicationKeyId"]: k for k in rot.list_keys()}
+    record = vault_get(token, RECORD_MOUNT, RECORD_PATH)
+    missing = set(NEW_KEY_CAPS) - rot.capabilities
+    if args.check:
+        log("check: rotator key authorizes; missing caps for the new key: %s" % (sorted(missing) or "none"))
+        log("check: PBS key present in B2: %s; Vault record matches PBS: %s"
+            % (configured_key in keys, record.get("keyID") == configured_key))
+        log("check: nothing was modified")
+        return 0 if (not missing and configured_key in keys and record.get("keyID") == configured_key) else 1
+    if missing:
+        raise RuntimeError("rotator key lacks capabilities %s" % sorted(missing))
+    if configured_key not in keys:
+        raise RuntimeError("PBS key ...%s is not a live B2 key; refusing" % (configured_key or "?")[-4:])
+    if record.get("keyID") != configured_key:
+        raise RuntimeError("drift: Vault records ...%s but PBS uses ...%s"
+                           % ((record.get("keyID") or "?")[-4:], configured_key[-4:]))
+
+    rotated_at = vault_rotated_at(token)
+    age_days = (datetime.date.today() - rotated_at).days if rotated_at else None
+    if not args.force and age_days is not None and age_days < ROTATE_AFTER_DAYS:
+        log("nothing to do: %d < %d days" % (age_days, ROTATE_AFTER_DAYS))
+        return 0
+    log("due: recorded key age %s day(s)" % ("unknown" if age_days is None else age_days))
+
+    if DEFER_ON_ACTIVE_TASKS:
+        busy = active_datastore_tasks()
+        if busy:
+            log("deferring: %d task(s) active against %s" % (len(busy), DATASTORE))
+            return 0
+    if REQUIRE_CLEAN_BASELINE:
+        ok, detail = s3_check()
+        if not ok:
+            raise RuntimeError("baseline read-back check already failing (%s); refusing" % detail)
+        log("preflight: baseline read-back passes (%s)" % detail)
+
+    new_key = None
+    backup_path = None
+    swapped = False
+    try:
+        name = "%s-%s" % (KEY_NAME_PREFIX, datetime.date.today().strftime("%Y%m%d"))
+        new_key = rot.create_key(name)
+        log("minted %s ...%s (old ...%s still live)" % (name, new_key["applicationKeyId"][-4:], configured_key[-4:]))
+
+        deadline, ok, detail = time.time() + NEW_KEY_WAIT, False, "not attempted"
+        while time.time() < deadline:
+            ok, detail = b2_key_works(new_key["applicationKeyId"], new_key["applicationKey"])
+            if ok:
+                break
+            time.sleep(5)
+        if not ok:
+            raise RuntimeError("new key never became usable: %s" % detail)
+        log("new key verified directly against %s" % BUCKET)
+
+        before = config_sections()
+        backup_path = backup_config()
+        log("backed up s3.cfg to %s" % backup_path)
+        # Same deliberate argv trade as the AWS rotation: letting PBS write its own
+        # config beats hand-editing s3.cfg (the 2026-08-21 outage).
+        rc, out, err = run([PBM, "s3", "endpoint", "update", ENDPOINT_ID,
+                            "--access-key", new_key["applicationKeyId"],
+                            "--secret-key", new_key["applicationKey"]], timeout=60)
+        if rc != 0:
+            raise RuntimeError("s3 endpoint update failed: %s" % (err or out))
+        swapped = True
+        assert_cfg_permissions()
+        after = config_sections()
+        for sect, text in before.items():
+            if sect != ENDPOINT_ID and after.get(sect) != text:
+                raise RuntimeError("endpoint %s changed during the swap" % sect)
+        log("sibling endpoint stanzas byte-identical after swap")
+
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        reload_proxy()
+        log("reloaded proxmox-backup-proxy")
+        ok, detail = s3_check()
+        if not ok:
+            raise RuntimeError("post-swap read-back failed: %s" % detail)
+        log("post-swap read-back passes (%s)" % detail)
+        complaints = journal_since(stamp)
+        if complaints:
+            raise RuntimeError("proxy journal shows auth errors after reload: %s" % complaints[0][:200])
+    except Exception as exc:
+        log("ERROR: %s" % exc)
+        if swapped and backup_path:
+            log("rolling back to %s" % backup_path)
+            try:
+                restore_config(backup_path)
+                reload_proxy()
+                ok, detail = s3_check()
+                log("rollback %s (read-back: %s)" % ("OK" if ok else "FAILED", detail))
+            except Exception as rb:
+                log("CRITICAL: rollback failed: %s - restore %s to %s by hand (0640 root:backup) "
+                    "and reload proxmox-backup-proxy" % (rb, backup_path, S3_CFG))
+        if new_key:
+            try:
+                rot.delete_key(new_key["applicationKeyId"])
+                log("deleted the unused new key ...%s" % new_key["applicationKeyId"][-4:])
+            except Exception as de:
+                log("WARNING: could not delete new key ...%s: %s" % (new_key["applicationKeyId"][-4:], de))
+        return 1
+
+    # Swap verified. Hold the old key; record everything.
+    pending = {"old_key_id": configured_key, "new_key_id": new_key["applicationKeyId"],
+               "swapped_at": int(time.time())}
+    with open(PENDING_FILE, "w") as fh:
+        json.dump(pending, fh)
+    os.chmod(PENDING_FILE, 0o600)
+    try:
+        # Fresh token: the AppRole's TTL is 15 minutes and two read-backs can take
+        # longer. The first live run (2026-11-17) swapped successfully, then failed
+        # this write with "invalid token" 19 minutes after logging in.
+        token = vault_login()
+        now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        vault_patch(token, {
+            "keyID": new_key["applicationKeyId"], "applicationKey": new_key["applicationKey"],
+            "keyName": new_key["keyName"], "created_at": now_iso, "validated_at": now_iso,
+            "validation": "pbs-rotate-b2-key: b2_list_file_names + snapshot read-back through the proxy after swap",
+            "capabilities": ",".join(NEW_KEY_CAPS),
+            "old_key_pending_delete": "%s (delete after %d days + a clean GC on %s)"
+                                      % (configured_key, GRACE_DAYS, DATASTORE),
+        })
+        vault_stamp(token)
+    except Exception as exc:
+        log("ERROR: swap succeeded but recording it in Vault failed: %s" % exc)
+        log("       %s is LIVE on ...%s; old ...%s is held. Fix Vault by hand: the "
+            "pending delete will refuse until Vault records the new key."
+            % (ENDPOINT_ID, new_key["applicationKeyId"][-4:], configured_key[-4:]))
+        return 1
+    prune_backups()
+    log("ROTATION COMPLETE: %s now uses ...%s; old ...%s held for %d days + a clean GC"
+        % (ENDPOINT_ID, new_key["applicationKeyId"][-4:], configured_key[-4:], GRACE_DAYS))
+    return 0
+
+
+def _on_signal(signum, _frame):
+    raise RuntimeError("interrupted by signal %d" % signum)
+
+
+def main():
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+    parser = argparse.ArgumentParser(description="Rotate the PBS B2 application key.")
+    parser.add_argument("--check", action="store_true", help="validate the credential path; change nothing")
+    parser.add_argument("--force", action="store_true", help="rotate regardless of recorded key age")
+    args = parser.parse_args()
+    os.makedirs(STATE_DIR, exist_ok=True)
+    os.chmod(STATE_DIR, 0o750)
+    with open(LOCK_FILE, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log("another rotation is already running; exiting")
+            return 0
+        try:
+            return rotate(args)
+        except Exception as exc:
+            log("ERROR: %s" % exc)
+            return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
