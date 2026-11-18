@@ -46,7 +46,7 @@ IDENTITIES = os.path.join(REPO, "ansible/domain/vars/service_account_identities.
 # Must mirror sac_automatable_updates in the playbook. `occ` is added only inside
 # the maintenance window, exactly as the playbook adds it only when
 # sac_accept_app_restart=true.
-AUTOMATABLE = {"vault_only", "vault_ldap_auth", "keycloak_component"}
+AUTOMATABLE = {"vault_only", "vault_ldap_auth", "keycloak_component", "dhcp_dns_credential"}
 APP_RESTART_KINDS = {"occ"}
 # The account the play connects to the DC as; the playbook refuses it.
 CONNECTION_ACCOUNT = "svc-ansible-win"
@@ -92,7 +92,11 @@ def rotated_at(path: str) -> dt.datetime | None:
     val = meta.get("rotated_at")
     if not val:
         return None
-    return dt.datetime.fromisoformat(val)
+    ts = dt.datetime.fromisoformat(val)
+    # Hand-stamped values can be a bare date ("2026-09-17", netsvc did) which
+    # parses naive; subtracting that from an aware now() raised TypeError and
+    # killed planning for EVERY account. Treat a naive stamp as UTC.
+    return ts if ts.tzinfo else ts.replace(tzinfo=dt.UTC)
 
 
 def in_window(now_local: dt.datetime, start: int, end: int) -> bool:
