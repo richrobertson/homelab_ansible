@@ -168,6 +168,10 @@ def rotate(name: str, spec: dict, ctx: str) -> None:
         from rotation_aws import rotate_aws_iam_key  # boto3 only needed for this kind
         rotate_aws_iam_key(name, spec, run, vault_json, log, StepError)
         return
+    if spec.get("kind") == "nextcloud_admin":
+        from rotation_nextcloud_admin import rotate_nextcloud_admin
+        rotate_nextcloud_admin(name, spec, ctx, run, kubectl, vault_json, sync_and_confirm, restart, log, StepError)
+        return
     field = spec["field"]
     cur = vault_json("kv", "get", "-mount=secret", name)["data"]
     old_version, old, user = cur["metadata"]["version"], cur["data"][field], cur["data"][spec["verify"]["user_field"]]
