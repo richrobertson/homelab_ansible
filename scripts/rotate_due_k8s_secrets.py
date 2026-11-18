@@ -137,7 +137,33 @@ def verify(ctx: str, spec: dict, user: str, good: str, bad: str | None) -> None:
     raise StepError(f"verify failed (discovery/expected-login/refused-login = {out})")
 
 
+def report_b2_health(entries: dict, env: str, ctx: str) -> None:
+    """For b2_application_key entries whose consumers live in THIS cluster, write
+    a read-only status summary to the entry's health_path. The prod runner reads
+    it before deleting a held old key. Never fatal: a missing report only means
+    the old key is held longer."""
+    from rotation_b2 import health_report
+    for name, spec in entries.items():
+        if spec.get("kind") != "b2_application_key" or spec.get("consumer_cluster") != env:
+            continue
+        try:
+            rep = health_report(name, lambda *a: kubectl(ctx, *a))
+            stamp = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            run(["vault", "kv", "put", "-mount=secret", spec["health_path"], "-"],
+                stdin=json.dumps({"checked_at": stamp, "report": json.dumps(rep)}))
+            run(["vault", "kv", "metadata", "patch", "-mount=secret", f"-custom-metadata=rotated_at={stamp}",
+                 "-custom-metadata=rotation_interval_days=3650",
+                 "-custom-metadata=rotation_note=status report, not a credential", spec["health_path"]])
+            log(f"health {name:<34} {rep['secrets']} secrets, {len(rep['restic'])} restic, {len(rep['cnpg'])} CNPG")
+        except Exception as exc:  # noqa: BLE001 - reporting must never block rotation
+            log(f"health {name:<34} report failed: {exc}")
+
+
 def rotate(name: str, spec: dict, ctx: str) -> None:
+    if spec.get("kind") == "b2_application_key":
+        from rotation_b2 import rotate_b2_key
+        rotate_b2_key(name, spec, run, vault_json, log, StepError)
+        return
     if spec.get("kind") == "aws_iam_access_key":
         from rotation_aws import rotate_aws_iam_key  # boto3 only needed for this kind
         rotate_aws_iam_key(name, spec, run, vault_json, log, StepError)
@@ -185,12 +211,23 @@ def main() -> int:
 
     now, plan = dt.datetime.now(dt.UTC), []
     log(f"k8s secrets, environment: {args.env}")
+    report_b2_health(entries, args.env, ctx)
     for name, spec in entries.items():
         if spec.get("kube_context") != ctx or (args.only and name != args.only):
             continue
         if spec.get("kind", "k8s_vss") == "k8s_vss" and spec.get("generator") not in GENERATORS:
             log(f"skip   {name:<34} unknown generator {spec.get('generator')}")
             continue
+        if spec.get("kind") == "b2_application_key":
+            from rotation_b2 import pending
+            try:
+                if pending(vault_json, name):
+                    log(f"HELD   {name:<34} old key awaiting grace + healthy backups")
+                    plan.append((name, spec))
+                    continue
+            except (RuntimeError, StepError, ValueError, subprocess.TimeoutExpired) as exc:
+                log(str(exc))
+                return 2
         try:
             ts, iv = rotated_at(name), interval_days(name)
         except (RuntimeError, StepError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
