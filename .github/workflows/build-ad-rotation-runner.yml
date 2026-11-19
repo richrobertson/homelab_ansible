@@ -13,6 +13,7 @@ on:
       - scripts/rotate_due_service_accounts.py
       - scripts/rotate_due_k8s_secrets.py
       - scripts/rotation_aws.py
+      - scripts/rotation_unifi.py
       - scripts/rotation_b2.py
       - scripts/rotation_keycloak_oidc.py
       - scripts/rotation_nextcloud_admin.py
@@ -31,6 +32,7 @@ on:
       - scripts/rotate_due_service_accounts.py
       - scripts/rotate_due_k8s_secrets.py
       - scripts/rotation_aws.py
+      - scripts/rotation_unifi.py
       - scripts/rotation_b2.py
       - scripts/rotation_keycloak_oidc.py
       - scripts/rotation_nextcloud_admin.py
@@ -77,7 +79,7 @@ jobs:
           docker run --rm ad-rotation-runner:ci --help >/dev/null
           # Same for the k8s_secret rotator, which also loads its consumer map.
           docker run --rm --entrypoint python3 ad-rotation-runner:ci /opt/homelab_ansible/scripts/rotate_due_k8s_secrets.py --help >/dev/null
-          docker run --rm --workdir /opt/homelab_ansible/scripts --entrypoint python3 ad-rotation-runner:ci -c "import rotation_aws, rotation_b2, rotation_keycloak_oidc, rotation_nextcloud_admin, rotation_syncthing, rotation_synology, boto3, paramiko; print('aws + b2 + keycloak_oidc + nextcloud_admin + syncthing + synology kinds ok, boto3', boto3.__version__, 'paramiko', paramiko.__version__)"
+          docker run --rm --workdir /opt/homelab_ansible/scripts --entrypoint python3 ad-rotation-runner:ci -c "import rotation_aws, rotation_b2, rotation_unifi, rotation_keycloak_oidc, rotation_nextcloud_admin, rotation_syncthing, rotation_synology, boto3, paramiko; print('aws + b2 + unifi + keycloak_oidc + nextcloud_admin + syncthing + synology kinds ok, boto3', boto3.__version__, 'paramiko', paramiko.__version__)"
           docker run --rm --entrypoint python3 ad-rotation-runner:ci -c "import yaml; m=yaml.safe_load(open('/opt/homelab_ansible/ansible/k8s/vars/k8s_secret_consumers.yml'))['k8s_secret_rotations']; assert m, 'empty map'; print(len(m), 'k8s secrets mapped')"
           # Synology kind: pinned host keys load, the replication-plan parser reads
           # real synodr output, and generated passwords meet DSM's policy.
