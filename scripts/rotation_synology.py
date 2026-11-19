@@ -440,3 +440,173 @@ class DsmSso:
                 return
             time.sleep(5)
         raise self.err(f"DSM {self.nas.name} SSO check failed: {out[-120:]}")
+
+
+# --------------------------------------------------------------------------
+# kind mailu_mailbox_password
+# --------------------------------------------------------------------------
+# A Mailu mailbox whose password is ALSO the SMTP login in DSM's notification
+# settings on several NAS (secret/mailu/prod/accounts/nas-notifications).
+# Order: prove reality matches Vault (SMTP AUTH with the Vault value; DSM on
+# every NAS names this account) -> set in Mailu -> prove new AUTHs / old is
+# refused -> Vault -> each NAS's DSM SMTP auth -> read back. Any failure puts
+# the old password back in Mailu, Vault and every NAS already touched.
+
+# Runs inside the Mailu admin pod. stdin: the password. Prints a status word only.
+_MAILU_SETPW = r'''
+import sys, warnings
+warnings.filterwarnings("ignore")
+from mailu import create_app, models
+pw = sys.stdin.read()
+app = create_app()
+with app.app_context():
+    u = models.db.session.get(models.User, sys.argv[1])
+    if u is None:
+        print("no-such-user"); sys.exit(2)
+    u.set_password(pw)
+    models.db.session.commit()
+    print("setpw-ok")
+'''
+
+# Runs as root on the NAS with DSM's python3. stdin: user, password.
+# argv[1]: set|get. Prints status words only, never the password. synowebapi
+# takes smtp_auth as an argument (as the existing playbook does); it is a
+# short-lived root process on the NAS.
+_DSM_MAIL_AUTH_PY = r'''
+import json, subprocess, sys
+API = "/usr/syno/bin/synowebapi"
+def call(*a):
+    out = subprocess.run([API, "--exec", *a], capture_output=True, text=True, timeout=60).stdout
+    i = out.find("{")
+    return json.loads(out[i:]) if i >= 0 else {}
+if sys.argv[1] == "set":
+    user = sys.stdin.readline().rstrip("\n"); pw = sys.stdin.readline().rstrip("\n")
+    r = call("api=SYNO.Core.Notification.Mail.Auth", "method=set", "version=1",
+             "smtp_auth=" + json.dumps({"enable": True, "user": user, "pass": pw}))
+    print("set-ok" if r.get("success") else "set-failed")
+r = call("api=SYNO.Core.Notification.Mail.Auth", "method=get", "version=1")
+d = r.get("data") or {}
+auth = d.get("smtp_auth", d)
+print("user=" + str(auth.get("user", "")) + " enable=" + str(auth.get("enable", "")).lower())
+'''
+
+
+def smtp_auth_ok(host: str, port: int, user: str, password: str, step_error: type) -> bool:
+    """True if SMTP AUTH succeeds, False if REFUSED (535). Anything else raises."""
+    import smtplib
+    import ssl
+    try:
+        s = smtplib.SMTP(host, port, timeout=30)
+        s.starttls(context=ssl.create_default_context())
+    except (OSError, smtplib.SMTPException) as exc:
+        raise step_error(f"SMTP {host}:{port} unreachable: {type(exc).__name__}: {str(exc)[:120]}") from None
+    try:
+        s.login(user, password)
+        return True
+    except smtplib.SMTPAuthenticationError:
+        return False
+    except smtplib.SMTPException as exc:
+        raise step_error(f"SMTP AUTH error: {type(exc).__name__}: {str(exc)[:120]}") from None
+    finally:
+        try:
+            s.quit()
+        except Exception:  # noqa: BLE001,S110 - best-effort close
+            pass
+
+
+def rotate_mailu_mailbox_password(name: str, spec: dict, ctx: str, run: Callable, vault_json: Callable,
+                                  kubectl: Callable, log: Callable, step_error: type) -> None:
+    field = spec.get("field", "password")
+    cur = vault_json("kv", "get", "-mount=secret", name)["data"]
+    version, data = cur["metadata"]["version"], cur["data"]
+    old, user = data[field], data[spec.get("user_field", "username")]
+    smtp_host, smtp_port = data.get("smtp_server", spec.get("smtp_host")), int(data.get("smtp_port", 587))
+    cred = vault_json("kv", "get", "-mount=secret", spec["ssh_credentials"])["data"]["data"]
+    ssh_pw = cred["password"]
+    nases = [Nas(n["name"], n["host"], n.get("port", 22), cred["username"], step_error) for n in spec["nas"]]
+    ns, sel = spec["mailu"]["namespace"], spec["mailu"]["admin_selector"]
+
+    def admin_pod() -> str:
+        out = kubectl(ctx, "-n", ns, "get", "pods", "-l", sel, "--field-selector=status.phase=Running",
+                      "-o", "jsonpath={.items[0].metadata.name}").strip()
+        if not out:
+            raise step_error(f"no running Mailu admin pod ({ns}, {sel})")
+        return out
+
+    def mailu_set(pw: str) -> None:
+        out = kubectl(ctx, "-n", ns, "exec", "-i", admin_pod(), "--", "sh", "-c",
+                      'cd /app 2>/dev/null; exec python3 -c "$1" "$2"', "sh", _MAILU_SETPW, user,
+                      stdin=pw).strip()
+        if out.splitlines()[-1:] != ["setpw-ok"]:
+            raise step_error(f"Mailu set_password: {out[-120:]}")
+
+    def dsm(nas: Nas, mode: str, pw: str = "") -> str:
+        return nas.sudo(ssh_pw, 'exec python3 -c "$1" "$2"', _DSM_MAIL_AUTH_PY, mode,
+                        stdin=f"{user}\n{pw}\n" if mode == "set" else "").strip()
+
+    def dsm_set(nas: Nas, pw: str) -> None:
+        out = dsm(nas, "set", pw)
+        if not out.startswith("set-ok") or f"user={user} enable=true" not in out:
+            raise step_error(f"DSM {nas.name} mail auth set: {out[-120:]}")
+
+    # ---- pre-flight -----------------------------------------------------------
+    if not smtp_auth_ok(smtp_host, smtp_port, user, old, step_error):
+        raise step_error("pre-flight: SMTP refuses the CURRENT Vault password; refusing")
+    for nas in nases:
+        out = dsm(nas, "get")
+        if f"user={user} enable=true" not in out:
+            raise step_error(f"pre-flight: DSM {nas.name} mail auth is not {user} (got {out[-80:]}); refusing")
+    admin_pod()
+    log(f"  pre-flight ok: SMTP accepts the current password; DSM on {len(nases)} NAS uses {user}")
+    if os.environ.get("ROTATION_PREFLIGHT_ONLY") == name:
+        raise step_error("pre-flight only (ROTATION_PREFLIGHT_ONLY): nothing changed")
+
+    new = generate_password()
+    touched: list[Nas] = []
+    mailu_changed = vault_changed = False
+    try:
+        mailu_changed = True  # before the call: a lost exec may still have applied it
+        mailu_set(new)
+        for _ in range(6):
+            if smtp_auth_ok(smtp_host, smtp_port, user, new, step_error):
+                break
+            time.sleep(5)
+        else:
+            raise step_error("SMTP refuses the NEW password after the Mailu change")
+        if smtp_auth_ok(smtp_host, smtp_port, user, old, step_error):
+            raise step_error("SMTP still accepts the OLD password after the Mailu change")
+        vault_changed = True
+        run(["vault", "kv", "patch", "-mount=secret", name, "-"], stdin=json.dumps({field: new}))
+        if os.environ.get("ROTATION_TEST_FAIL") == name:
+            raise step_error("forced failure (ROTATION_TEST_FAIL) to exercise rollback")
+        for nas in nases:
+            touched.append(nas)
+            dsm_set(nas, new)
+        log(f"  Mailu + Vault + DSM on {len(nases)} NAS updated; new password AUTHs, old refused")
+    except Exception as exc:
+        log(f"  FAILED {name}: {exc}; restoring the old password everywhere")
+        problems = []
+        for nas in touched:
+            try:
+                dsm_set(nas, old)
+            except Exception as e1:  # noqa: BLE001
+                problems.append(f"DSM {nas.name}: {e1}")
+        if mailu_changed:
+            try:
+                mailu_set(old)
+                if not smtp_auth_ok(smtp_host, smtp_port, user, old, step_error):
+                    problems.append("Mailu: old password still refused after restore")
+            except Exception as e2:  # noqa: BLE001
+                problems.append(f"Mailu: {e2}")
+        if vault_changed:
+            try:
+                if vault_json("kv", "get", "-mount=secret", name)["data"]["metadata"]["version"] != version:
+                    run(["vault", "kv", "rollback", "-mount=secret", f"-version={version}", name])
+            except Exception as e3:  # noqa: BLE001
+                problems.append(f"Vault rollback to v{version}: {e3}")
+        if problems:
+            raise RuntimeError(f"ROLLBACK FAILED for {name}: {'; '.join(problems)} (original error: {exc})") from exc
+        raise step_error(f"{exc} (rolled back; old password AUTHs again, Vault v{version})") from exc
+
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    run(["vault", "kv", "metadata", "patch", "-mount=secret", f"-custom-metadata=rotated_at={stamp}", name])
