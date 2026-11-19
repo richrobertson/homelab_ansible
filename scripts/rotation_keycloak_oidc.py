@@ -42,6 +42,12 @@ APP KINDS
                        every start, so `restart: true` proves the Secret and the
                        DB agree.
 
+  synology_dsm_sso     the DSM OIDC SSO client of one NAS (scripts/rotation_synology.py
+                       DsmSso): the live profile is re-set with only the secret
+                       changed, then read back on the NAS and used against the
+                       token endpoint DSM itself has configured. app spec:
+                       {kind, nas: {name, host, port}, ssh_credentials: <vault path>}
+
 Map entry (ansible/k8s/vars/k8s_secret_consumers.yml):
   <vault path>:
     kind: keycloak_oidc_client
@@ -235,11 +241,23 @@ def rotate_keycloak_oidc_client(name: str, spec: dict, ctx: str, run: Callable, 
         return kubectl(ctx, "-n", app["namespace"], "exec", "-i", f"deploy/{app['deployment']}",
                        "-c", app.get("container", "nextcloud"), "--", *args, stdin=stdin, timeout=180)
 
+    dsm = None
+    if app and app.get("kind") == "synology_dsm_sso":
+        from rotation_synology import DsmSso  # paramiko only needed for this app kind
+        dsm = DsmSso(app, vault_json, step_error)
+    elif app and app.get("kind", "nextcloud_user_oidc") != "nextcloud_user_oidc":
+        raise step_error(f"unknown app kind {app.get('kind')}")
+
     def app_set(secret: str) -> None:
-        if app:
+        if dsm:
+            dsm.set(secret, client_id)
+        elif app:
             app_exec("sh", "-c", _NC_SET, "nc", *app["providers"], stdin=f"{secret}\n{client_id}\n")
 
     def app_check(secret: str) -> None:
+        if dsm:
+            dsm.check(secret, client_id)
+            return
         if not app:
             return
         out = ""
@@ -256,7 +274,7 @@ def rotate_keycloak_oidc_client(name: str, spec: dict, ctx: str, run: Callable, 
         raise step_error(f"app {app['namespace']}/{app['deployment']} check failed: {out[-300:]}")
 
     def app_restart() -> None:
-        if app and app.get("restart"):
+        if app and not dsm and app.get("restart"):
             restart(ctx, {"restart": [{"namespace": app["namespace"], "deployment": app["deployment"]}]})
 
     def vss_check(secret: str) -> None:
@@ -279,6 +297,8 @@ def rotate_keycloak_oidc_client(name: str, spec: dict, ctx: str, run: Callable, 
     app_check(old)
     log(f"  pre-flight ok: Keycloak, Vault, Secrets and app agree on the current {client_id} secret")
 
+    if os.environ.get("ROTATION_PREFLIGHT_ONLY") == name:
+        raise step_error("pre-flight only (ROTATION_PREFLIGHT_ONLY): nothing changed")
     new = secrets.token_urlsafe(32)
     try:
         run(["vault", "kv", "patch", "-mount=secret", name, "-"], stdin=json.dumps({field: new}))
