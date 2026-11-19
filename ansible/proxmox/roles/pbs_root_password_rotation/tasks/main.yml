@@ -122,6 +122,16 @@
     enabled: true
     state: started
     daemon_reload: true
+  when: pbs_root_password_rotation_timer_enabled | bool
+
+# See defaults/main.yml: off until the PVE storages stop using root@pam's password.
+- name: Keep the rotation timer stopped while it is not safe to run
+  ansible.builtin.systemd_service:
+    name: "{{ pbs_root_password_rotation_unit_name }}.timer"
+    enabled: false
+    state: stopped
+    daemon_reload: true
+  when: not (pbs_root_password_rotation_timer_enabled | bool)
 
 # Proves AppRole login, the Vault record, and that Vault's password logs in,
 # without changing anything.
