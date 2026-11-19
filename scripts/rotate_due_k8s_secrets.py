@@ -180,6 +180,10 @@ def rotate(name: str, spec: dict, ctx: str) -> None:
         rotate_synology_local_account(name, spec, ctx, run, vault_json, kubectl, sync_and_confirm, restart,
                                       log, StepError)
         return
+    if spec.get("kind") == "unifi_console_ssh":
+        from rotation_unifi import rotate_unifi_console_ssh
+        rotate_unifi_console_ssh(name, spec, ctx, run, vault_json, sync_and_confirm, restart, log, StepError)
+        return
     if spec.get("kind") == "mailu_mailbox_password":
         from rotation_synology import rotate_mailu_mailbox_password
         rotate_mailu_mailbox_password(name, spec, ctx, run, vault_json, kubectl, log, StepError)

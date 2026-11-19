@@ -51,7 +51,7 @@ COPY --chown=root:root ansible.cfg ./ansible.cfg
 COPY --chown=root:root ansible/domain/rotate_service_account_passwords.yml ./ansible/domain/
 COPY --chown=root:root ansible/domain/vars/ ./ansible/domain/vars/
 COPY --chown=root:root inventory/runner/ ./inventory/runner/
-COPY --chown=root:root scripts/rotate_due_service_accounts.py scripts/rotate_due_k8s_secrets.py scripts/rotation_aws.py scripts/rotation_b2.py scripts/rotation_nextcloud_admin.py scripts/rotation_keycloak_oidc.py scripts/rotation_syncthing.py scripts/rotation_synology.py ./scripts/
+COPY --chown=root:root scripts/rotate_due_service_accounts.py scripts/rotate_due_k8s_secrets.py scripts/rotation_aws.py scripts/rotation_b2.py scripts/rotation_nextcloud_admin.py scripts/rotation_keycloak_oidc.py scripts/rotation_syncthing.py scripts/rotation_synology.py scripts/rotation_unifi.py ./scripts/
 # k8s_secret-class rotation map (scripts/rotate_due_k8s_secrets.py).
 COPY --chown=root:root ansible/k8s/vars/ ./ansible/k8s/vars/
 
