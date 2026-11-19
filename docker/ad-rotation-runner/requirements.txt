@@ -6,3 +6,5 @@ PyYAML==6.0.3
 tzdata==2026.6
 # aws_iam_access_key rotation kind (scripts/rotation_aws.py)
 boto3==1.35.36
+# synology_local_account kind + synology_dsm_sso app (scripts/rotation_synology.py)
+paramiko==3.5.1

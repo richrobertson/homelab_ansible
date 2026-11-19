@@ -173,6 +173,13 @@ def rotate(name: str, spec: dict, ctx: str) -> None:
         from rotation_aws import rotate_aws_iam_key  # boto3 only needed for this kind
         rotate_aws_iam_key(name, spec, run, vault_json, log, StepError)
         return
+    if spec.get("kind") == "synology_local_account":
+        from rotation_synology import (
+            rotate_synology_local_account,  # paramiko only needed for this kind
+        )
+        rotate_synology_local_account(name, spec, ctx, run, vault_json, kubectl, sync_and_confirm, restart,
+                                      log, StepError)
+        return
     if spec.get("kind") == "nextcloud_admin":
         from rotation_nextcloud_admin import rotate_nextcloud_admin
         rotate_nextcloud_admin(name, spec, ctx, run, kubectl, vault_json, sync_and_confirm, restart, log, StepError)
