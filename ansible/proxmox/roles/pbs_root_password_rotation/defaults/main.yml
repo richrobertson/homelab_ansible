@@ -1,7 +1,14 @@
 ---
 # Rotates the PBS host's root (root@pam) password and records it in Vault.
-# Vault is the only consumer: the value was generated for the unattended PBS
-# install (2026-04-26) and nothing else stores a copy.
+#
+# DISABLED BY DEFAULT. Vault is NOT the only consumer: the Proxmox VE storages
+# pbs-s3, pbs-b2 and pbs-b2-encrypted (cluster-wide /etc/pve/storage.cfg) log
+# in to PBS as root@pam with this password (/etc/pve/priv/storage/<id>.pw).
+# The first rotation (2026-11-19 01:41Z) broke all three with 401 Unauthorized
+# until the .pw files were rewritten by hand ~3h later. Before enabling the
+# timer, move those storages to a PBS API token so root@pam's password has no
+# copies outside Vault.
+pbs_root_password_rotation_timer_enabled: false
 pbs_root_password_rotation_vault_addr: "https://vault.myrobertson.net:8200"
 pbs_root_password_rotation_vault_ca_file: /etc/vault-agent.d/vault-ca.pem
 pbs_root_password_rotation_kv_mount: secret
