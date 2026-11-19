@@ -89,6 +89,14 @@
     # Must match the LAN-reachable LoadBalancer IP used by the shared myrobertson-com gateway.
     pdns_rec_split_dns_gateway_ip: "10.31.0.69"
     pdns_rec_split_dns_zone_dir: "/etc/powerdns/recursor/zones"
+    # Root KSK-2024 (tag 38696) trust anchor. Without lua-config-file the
+    # recursor uses compiled-in anchors (KSK-2017 only) and SERVFAILs every
+    # DNSSEC-validated query - the 2026-11-16 outage, fixed live by hand that
+    # day. Carried here so a re-run of this playbook keeps it.
+    pdns_rec_config_lua: /etc/powerdns/recursor.lua
+    pdns_rec_config_lua_file_content: |
+      dofile("/usr/share/pdns-recursor/lua-config/rootkeys.lua")
+      addTA(".", "38696 8 2 683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16")
     pdns_rec_split_dns_zones:
       plex.myrobertson.com:
         address: "{{ pdns_rec_split_dns_gateway_ip }}"
@@ -134,6 +142,20 @@
         # which can make local-only hosts such as scooter.myrobertson.net
         # intermittently fail depending on forwarder selection.
         - "myrobertson.net.=192.168.1.245:53;"
+        # The AD-hosted reverse zones. Without these the recursor answers every
+        # 192.168.x PTR/SOA from its built-in RFC1918 empty zone
+        # 168.192.in-addr.arpa (MNAME localhost.). Windows DHCP finds the PTR
+        # zone by asking the scope's DNS server (this recursor), so every PTR
+        # update went to "localhost" for 168.192.in-addr.arpa and rhonda rejected
+        # it NOTAUTH (9009) - ~1.8k/day until 2026-11-18. Forward lookups were
+        # never affected. Applied live 2026-11-18 (recursor.conf.bak-20261118).
+        - "1.168.192.in-addr.arpa.=192.168.1.245:53;"
+        - "2.168.192.in-addr.arpa.=192.168.1.245:53;"
+        - "7.168.192.in-addr.arpa.=192.168.1.245:53;"
+        - "10.168.192.in-addr.arpa.=192.168.1.245:53;"
+        - "11.168.192.in-addr.arpa.=192.168.1.245:53;"
+        - "20.168.192.in-addr.arpa.=192.168.1.245:53;"
+        - "88.168.192.in-addr.arpa.=192.168.1.245:53;"
       auth-zones:
         - "plex.myrobertson.com={{ pdns_rec_split_dns_zone_dir }}/plex.myrobertson.com.zone"
         - "drive.myrobertson.com={{ pdns_rec_split_dns_zone_dir }}/drive.myrobertson.com.zone"
