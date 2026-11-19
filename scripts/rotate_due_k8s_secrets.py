@@ -180,6 +180,10 @@ def rotate(name: str, spec: dict, ctx: str) -> None:
         rotate_synology_local_account(name, spec, ctx, run, vault_json, kubectl, sync_and_confirm, restart,
                                       log, StepError)
         return
+    if spec.get("kind") == "mailu_mailbox_password":
+        from rotation_synology import rotate_mailu_mailbox_password
+        rotate_mailu_mailbox_password(name, spec, ctx, run, vault_json, kubectl, log, StepError)
+        return
     if spec.get("kind") == "nextcloud_admin":
         from rotation_nextcloud_admin import rotate_nextcloud_admin
         rotate_nextcloud_admin(name, spec, ctx, run, kubectl, vault_json, sync_and_confirm, restart, log, StepError)
