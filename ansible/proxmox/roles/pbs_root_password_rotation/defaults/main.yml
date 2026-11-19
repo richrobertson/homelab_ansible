@@ -1,0 +1,20 @@
+---
+# Rotates the PBS host's root (root@pam) password and records it in Vault.
+# Vault is the only consumer: the value was generated for the unattended PBS
+# install (2026-04-26) and nothing else stores a copy.
+pbs_root_password_rotation_vault_addr: "https://vault.myrobertson.net:8200"
+pbs_root_password_rotation_vault_ca_file: /etc/vault-agent.d/vault-ca.pem
+pbs_root_password_rotation_kv_mount: secret
+pbs_root_password_rotation_kv_path: proxmox/pbs/prod/install
+pbs_root_password_rotation_kv_key: root_password
+pbs_root_password_rotation_policy_name: pbs-root-password-rotation
+pbs_root_password_rotation_approle_name: pbs-root-password-rotation
+pbs_root_password_rotation_interval_days: 90
+pbs_root_password_rotation_rotate_after_days: 75
+pbs_root_password_rotation_on_calendar: "*-*-* 04:45:00"
+pbs_root_password_rotation_randomized_delay: "20m"
+pbs_root_password_rotation_script: /usr/local/sbin/pbs-rotate-root-password.py
+pbs_root_password_rotation_state_dir: /var/lib/pbs-root-password-rotation
+pbs_root_password_rotation_unit_name: pbs-rotate-root-password
+pbs_root_password_rotation_role_id_file: /etc/vault-agent.d/pbs-root-rotation-role-id
+pbs_root_password_rotation_secret_id_file: /etc/vault-agent.d/pbs-root-rotation-secret-id

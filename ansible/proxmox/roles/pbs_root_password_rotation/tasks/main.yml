@@ -1,0 +1,138 @@
+---
+- name: Require the AppRole credentials the rotation authenticates with
+  ansible.builtin.assert:
+    that:
+      - pbs_root_password_rotation_role_id | default('') | length > 0
+      - pbs_root_password_rotation_bootstrap_vault_token | default('') | length > 0
+    fail_msg: >-
+      pbs_root_password_rotation needs a role_id and a bootstrap Vault token. The
+      calling playbook provisions the AppRole against Vault and passes them in;
+      run ansible/proxmox/pbs_root_password_rotation.yml rather than this role
+      directly.
+
+- name: Confirm the tools the rotation depends on are present
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: pbs_root_password_rotation_tools
+  loop:
+    - /usr/sbin/chpasswd
+    - /usr/bin/vault
+    - "{{ pbs_root_password_rotation_vault_ca_file }}"
+
+- name: Require those tools
+  ansible.builtin.assert:
+    that:
+      - pbs_root_password_rotation_tools.results
+        | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing chpasswd, the vault CLI, or the Vault CA at
+      {{ pbs_root_password_rotation_vault_ca_file }} (installed by
+      ansible/proxmox/provision_certificates.yml).
+
+- name: Ensure the rotation state directory exists
+  ansible.builtin.file:
+    path: "{{ pbs_root_password_rotation_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+# Its own AppRole (pbs-root-password-rotation): read + patch on exactly one
+# Vault record, separate from the B2 and certificate credentials on this host.
+- name: Install the rotation AppRole role_id
+  ansible.builtin.copy:
+    content: "{{ pbs_root_password_rotation_role_id }}"
+    dest: "{{ pbs_root_password_rotation_role_id_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Check whether this host already holds a rotation secret_id
+  ansible.builtin.stat:
+    path: "{{ pbs_root_password_rotation_secret_id_file }}"
+  register: pbs_root_password_rotation_secret_id_stat
+
+# Minted only when the host has none, so re-running the playbook does not churn
+# the credential on every pass.
+- name: Mint a rotation secret_id for this host
+  community.hashi_vault.vault_write:
+    url: "{{ pbs_root_password_rotation_vault_addr }}"
+    token: "{{ pbs_root_password_rotation_bootstrap_vault_token }}"
+    path: "auth/approle/role/{{ pbs_root_password_rotation_approle_name }}/secret-id"
+    data:
+      metadata: '{"node": "{{ inventory_hostname }}"}'
+  register: pbs_root_password_rotation_secret_id_result
+  when: not pbs_root_password_rotation_secret_id_stat.stat.exists
+  delegate_to: localhost
+  become: false
+  # Delegated tasks keep the TARGET's ansible_python_interpreter (/usr/bin/python3
+  # on PBS), which on the controller has no hvac. Use the controller's own.
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  no_log: true
+
+- name: Install the rotation AppRole secret_id
+  ansible.builtin.copy:
+    content: "{{ pbs_root_password_rotation_secret_id_result.data.data.secret_id }}"
+    dest: "{{ pbs_root_password_rotation_secret_id_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: not pbs_root_password_rotation_secret_id_stat.stat.exists
+  no_log: true
+
+- name: Install the rotation script
+  ansible.builtin.template:
+    src: pbs-rotate-root-password.py.j2
+    dest: "{{ pbs_root_password_rotation_script }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Verify the rotation script is syntactically valid
+  ansible.builtin.command:
+    cmd: python3 -m py_compile {{ pbs_root_password_rotation_script }}
+  changed_when: false
+
+- name: Install the rotation systemd service
+  ansible.builtin.template:
+    src: pbs-rotate-root-password.service.j2
+    dest: "/etc/systemd/system/{{ pbs_root_password_rotation_unit_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install the rotation systemd timer
+  ansible.builtin.template:
+    src: pbs-rotate-root-password.timer.j2
+    dest: "/etc/systemd/system/{{ pbs_root_password_rotation_unit_name }}.timer"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Apply pending unit changes before enabling the timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the rotation timer
+  ansible.builtin.systemd_service:
+    name: "{{ pbs_root_password_rotation_unit_name }}.timer"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# Proves AppRole login, the Vault record, and that Vault's password logs in,
+# without changing anything.
+- name: Validate the rotation path without changing anything
+  ansible.builtin.command:
+    cmd: "{{ pbs_root_password_rotation_script }} --check"
+  register: pbs_root_password_rotation_check
+  changed_when: false
+  when: pbs_root_password_rotation_run_check | default(true) | bool
+
+- name: Show the validation result
+  ansible.builtin.debug:
+    var: pbs_root_password_rotation_check.stdout_lines
+  when: pbs_root_password_rotation_run_check | default(true) | bool
