@@ -174,6 +174,15 @@ def _finalize(name: str, spec: dict, meta: dict, run: Callable, vault_json: Call
     failed = [r["name"] for r in report["restic"] if r.get("failed_since")
               and dt.datetime.fromisoformat(r["failed_since"]) >= swapped]
     cnpg_bad = [c["name"] for c in report["cnpg"] if not c.get("archiving")]
+    unmanaged = report.get("unmanaged") or []
+    if unmanaged:
+        # A ReplicationSource / CNPG cluster whose credential Secret no
+        # VaultStaticSecret owns cannot have received the new key, and is
+        # invisible to the fed-only checks below - 2026-11-19 a hand-made
+        # nextcloud restic Secret kept succeeding on the OLD key, so the delete
+        # went ahead and its backups failed with Access Denied.
+        raise step_error(f"restic backup(s) with hand-made repository Secrets (not VSO-managed): {unmanaged}; "
+                         f"old key ...{old_id[-4:]} KEPT. Put them under a VaultStaticSecret first.")
     if failed or cnpg_bad:
         raise step_error(f"consumers unhealthy since the swap (restic failed: {failed}; CNPG not archiving: "
                          f"{cnpg_bad}); old key ...{old_id[-4:]} KEPT. Roll back with "
@@ -188,8 +197,12 @@ def _finalize(name: str, spec: dict, meta: dict, run: Callable, vault_json: Call
         rot.call("b2_delete_key", {"applicationKeyId": old_id})
     if any(k["applicationKeyId"] == old_id for k in rot.list_keys()):
         raise step_error(f"old key ...{old_id[-4:]} still present after delete")
-    run(["vault", "kv", "metadata", "patch", "-mount=secret", "-custom-metadata=b2_pending_delete=",
-         "-custom-metadata=b2_swapped_at=", name])
+    # Remove the pending markers with a JSON merge-patch of null. The CLI form
+    # `-custom-metadata=key=` sends an EMPTY value, which Vault rejects
+    # ("custom_metadata validation failed: length of value") - 2026-11-19 the
+    # old key was deleted and then this step failed, leaving the job red.
+    run(["vault", "patch", f"secret/metadata/{name}", "-"],
+        stdin=json.dumps({"custom_metadata": {"b2_pending_delete": None, "b2_swapped_at": None}}))
     log(f"  deleted old key ...{old_id[-4:]}: {len(report['restic'])} restic backup(s) ok on the new key, "
         f"{len(report['cnpg'])} CNPG cluster(s) archiving")
 
@@ -219,4 +232,24 @@ def health_report(path: str, kubectl: Callable) -> dict:
         cond = [x for x in (c.get("status", {}).get("conditions") or []) if x["type"] == "ContinuousArchiving"]
         cnpg.append({"name": f'{c["metadata"]["namespace"]}/{c["metadata"]["name"]}',
                      "archiving": bool(cond) and cond[0]["status"] == "True"})
-    return {"secrets": len(fed), "restic": restic, "cnpg": cnpg}
+    # restic ReplicationSources whose repository Secret no VaultStaticSecret owns
+    # at all (from ANY path): they cannot follow a rotation and the fed-only list
+    # above cannot see them, so _finalize refuses to delete an old key while any
+    # exist.
+    owned = {(v["metadata"]["namespace"], v["spec"]["destination"]["name"]) for v in vss}
+    unmanaged = []
+    for r in json.loads(kubectl("get", "replicationsources.volsync.backube", "-A", "-o", "json"))["items"]:
+        repo = (r["spec"].get("restic") or {}).get("repository")
+        if repo and (r["metadata"]["namespace"], repo) not in owned:
+            unmanaged.append(f'{r["metadata"]["namespace"]}/{r["metadata"]["name"]}')
+    # CNPG clusters outside VSO are NOT blocking: their cnpg-backup-s3 copies
+    # are kept current by the cnpg-backup-secret-sync job (verified 2026-11-19:
+    # guacamole + both nextcloud clusters carried the new key). Reported only.
+    cnpg_elsewhere = []
+    for c in json.loads(kubectl("get", "clusters.postgresql.cnpg.io", "-A", "-o", "json"))["items"]:
+        b = ((c["spec"].get("backup") or {}).get("barmanObjectStore") or {})
+        cred = ((b.get("s3Credentials") or {}).get("accessKeyId") or {}).get("name")
+        if cred and (c["metadata"]["namespace"], cred) not in owned:
+            cnpg_elsewhere.append(f'{c["metadata"]["namespace"]}/{c["metadata"]["name"]}')
+    return {"secrets": len(fed), "restic": restic, "cnpg": cnpg, "unmanaged": unmanaged,
+            "cnpg_synced_elsewhere": cnpg_elsewhere}
