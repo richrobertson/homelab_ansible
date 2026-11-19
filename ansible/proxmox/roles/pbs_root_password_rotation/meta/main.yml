@@ -1,0 +1,9 @@
+---
+galaxy_info:
+  role_name: pbs_root_password_rotation
+  description: >-
+    Rotate the PBS host root password - set, prove via the PBS API, record in
+    Vault - and restore the old one if any step after the change fails.
+  license: MIT
+  min_ansible_version: "2.14"
+dependencies: []
