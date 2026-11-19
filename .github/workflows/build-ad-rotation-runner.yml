@@ -17,6 +17,7 @@ on:
       - scripts/rotation_keycloak_oidc.py
       - scripts/rotation_nextcloud_admin.py
       - scripts/rotation_syncthing.py
+      - scripts/rotation_synology.py
       - ansible/k8s/vars/**
       - ansible.cfg
       - .github/workflows/build-ad-rotation-runner.yml
@@ -34,6 +35,7 @@ on:
       - scripts/rotation_keycloak_oidc.py
       - scripts/rotation_nextcloud_admin.py
       - scripts/rotation_syncthing.py
+      - scripts/rotation_synology.py
       - ansible/k8s/vars/**
       - ansible.cfg
       - .github/workflows/build-ad-rotation-runner.yml
@@ -75,8 +77,18 @@ jobs:
           docker run --rm ad-rotation-runner:ci --help >/dev/null
           # Same for the k8s_secret rotator, which also loads its consumer map.
           docker run --rm --entrypoint python3 ad-rotation-runner:ci /opt/homelab_ansible/scripts/rotate_due_k8s_secrets.py --help >/dev/null
-          docker run --rm --workdir /opt/homelab_ansible/scripts --entrypoint python3 ad-rotation-runner:ci -c "import rotation_aws, rotation_b2, rotation_keycloak_oidc, rotation_nextcloud_admin, rotation_syncthing, boto3; print('aws + b2 + keycloak_oidc + nextcloud_admin + syncthing kinds ok, boto3', boto3.__version__)"
+          docker run --rm --workdir /opt/homelab_ansible/scripts --entrypoint python3 ad-rotation-runner:ci -c "import rotation_aws, rotation_b2, rotation_keycloak_oidc, rotation_nextcloud_admin, rotation_syncthing, rotation_synology, boto3, paramiko; print('aws + b2 + keycloak_oidc + nextcloud_admin + syncthing + synology kinds ok, boto3', boto3.__version__, 'paramiko', paramiko.__version__)"
           docker run --rm --entrypoint python3 ad-rotation-runner:ci -c "import yaml; m=yaml.safe_load(open('/opt/homelab_ansible/ansible/k8s/vars/k8s_secret_consumers.yml'))['k8s_secret_rotations']; assert m, 'empty map'; print(len(m), 'k8s secrets mapped')"
+          # Synology kind: pinned host keys load, the replication-plan parser reads
+          # real synodr output, and generated passwords meet DSM's policy.
+          docker run --rm --workdir /opt/homelab_ansible/scripts --entrypoint python3 ad-rotation-runner:ci -c "
+          import paramiko, rotation_synology as s
+          assert len(paramiko.HostKeys(s.KNOWN_HOSTS)) == 2, 'synology_known_hosts'
+          out = ' [share] [remote] [mainsite] \\nplanId: [ca81edca-0ed6-461b-bb25-43de28d457af]\\ntarget: [web](web)\\nstatus: [ready](1)\\nopstatus: [ready]\\nremote conn[0]: conn[192.168.1.141/5010/http]/ credId[3ba4eba6-5653-45be-afdd-f01c94dbc200]/ replicaConn[192.168.1.141/5566/2]\\n'
+          p = s.parse_plans(out)
+          assert p == [{'id': 'ca81edca-0ed6-461b-bb25-43de28d457af', 'target': 'web', 'status': 'ready', 'op': 'ready', 'conns': [{'addr': '192.168.1.141', 'port': '5010', 'protocol': 'http', 'replica_port': '5566'}]}], p
+          pw = s.generate_password(); assert len(pw) == 32 and any(c in '-_' for c in pw)
+          print('synology kind ok')"
           # The playbook must parse with exactly the core + collections in the image.
           docker run --rm --workdir /opt/homelab_ansible --entrypoint ansible-playbook \
             ad-rotation-runner:ci --syntax-check -i inventory/runner/rotation.ini \
